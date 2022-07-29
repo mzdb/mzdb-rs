@@ -18,10 +18,3 @@
 >reader <- MzdbReader$new("PATH")
 >reader$my_function() or source("test_me.r")
 
-
-set PATH=%PATH%;C:\Users\sancho\AppData\Local\Programs\R\R-4.2.1\bin\x64
-set LIBRARY_PATH=D:\dev\cms\mzdb-rust\rmzdb\lib
-
-#then
-
-R.exe
