@@ -1,9 +1,24 @@
 
 ### HOW TO COMPILE THE PYTHON CODE ###
 
+>cd pymzdb
+>cmd
+>.env\Scripts\activate
+>maturin develop
+>python test_me.py
 
 
 ### HOW TO COMPILE THE R CODE ###
+
+>cd rmzdb
+> cmd
+>R
+>library(rextendr)
+>rextendr::document()
+>reader <- MzdbReader$new("PATH")
+>reader$my_function() or source("test_me.r")
+
+
 set PATH=%PATH%;C:\Users\sancho\AppData\Local\Programs\R\R-4.2.1\bin\x64
 set LIBRARY_PATH=D:\dev\cms\mzdb-rust\rmzdb\lib
 
