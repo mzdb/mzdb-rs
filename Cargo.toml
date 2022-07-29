@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "mzdb-rs",
+	"pymzdb",
+    "rmzdb/src/rust"
+]

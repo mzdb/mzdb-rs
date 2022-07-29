@@ -1,0 +1,15 @@
+[package]
+name = "pymzdb"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "pymzdb"
+crate-type = ["cdylib"] # ["cdylib", "lib"]
+
+[dependencies]
+anyhow = "1.0.57"
+mzdb-rs = { path = "../mzdb-rs" }
+pyo3 = { version = "0.16.5", features = ["anyhow", "extension-module"] }
+rusqlite = { version = "0.27.0" } # , features = ["blob","bundled"]
