@@ -1,0 +1,28 @@
+[package]
+name = "mzdb-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.57"
+#byteorder = "1.4.3"
+itertools = "0.10.3"
+rusqlite = { version = "0.27.0", features = ["blob","bundled"] }
+log = "0.4.17"
+serde = { version = "1.0.137", features = ["derive"] }
+serde_rusqlite = "0.30.1"
+simple-logging = "2.0.2"
+strum_macros = "0.24.0"
+
+[[bin]]
+name = "mzdb_sandbox"
+path = "src/main.rs"
+
+[lib]
+name = "mzdb"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
+
