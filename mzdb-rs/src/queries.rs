@@ -343,7 +343,7 @@ pub fn list_data_encodings(db: &Connection) -> Result<Vec<DataEncoding>> {
     Ok(result)
 }
 
-/*
+use std::collections::HashMap;
 pub fn list_get_spectra_data_encoding_ids(db: &Connection) -> Result<HashMap<i64, i64>> {
     let mut stmt = db.prepare("SELECT id, data_encoding_id FROM spectrum").location(here!())?;
     let mut rows = stmt.query([]).location(here!())?;
@@ -356,7 +356,7 @@ pub fn list_get_spectra_data_encoding_ids(db: &Connection) -> Result<HashMap<i64
     }
 
     Ok(mapping)
-}*/
+}
 
 /*
 use std::io::{Read, Seek, SeekFrom};

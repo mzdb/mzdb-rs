@@ -84,7 +84,7 @@ pub fn run_basic_tests() -> Result<()>  {
     let get_table_records_count_res = get_table_records_count(&db, name).location(here!())?;
     assert_eq!(get_table_records_count_res.unwrap(),1, "invalid number of table records count for shared_param_tree");
 
-    let bytes = get_bounding_box_data(&db ,1 as i64).location(here!())?;
+    //let bytes = get_bounding_box_data(&db ,1 as i64).location(here!())?;
     //assert_eq!(bytes.unwrap(),1, "");
 
     let first_id =1;
