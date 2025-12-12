@@ -1,6 +1,8 @@
 //use itertools::Itertools;
 //use rusqlite::{Connection, Result};
 
+use anyhow::*;
+use roxmltree::Document;
 use serde::{Deserialize, Serialize};
 //use serde_rusqlite::*;
 use std::collections::HashMap;
@@ -70,6 +72,13 @@ pub struct FittedPeak {
     pub y: f32,
     pub left_hwhm: f32,
     pub right_hwhm: f32,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct XicPeak {
+    pub mz: f64,
+    pub intensity: f32,
+    pub rt: f32,
 }
 
 //ParamTree.h
@@ -286,13 +295,97 @@ union IntensityArray {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpectrumData {
     pub data_encoding: DataEncoding,
-    pub peak_count: usize,
+    pub peaks_count: usize,
     pub mz_array: Vec<f64>,
     pub intensity_array: Vec<f32>,
     pub lwhm_array: Vec<f32>, // warning: can be NULL
     pub rwhm_array: Vec<f32>, // warning: can be NULL
 }
 
+impl SpectrumData {
+    pub fn new(
+        data_encoding: DataEncoding,
+        mz_list: Vec<f64>,
+        intensity_list: Vec<f32>,
+        left_hwhm_list: Option<Vec<f32>>,
+        right_hwhm_list: Option<Vec<f32>>,
+    ) -> Self {
+        let peaks_count = mz_list.len();
+        SpectrumData {
+            data_encoding,
+            peaks_count: mz_list.len(),
+            mz_array: mz_list,
+            intensity_array: intensity_list,
+            lwhm_array: left_hwhm_list.unwrap_or_default(),
+            rwhm_array: right_hwhm_list.unwrap_or_default()
+        }
+    }
+
+    // Convert ppm to Da (this is a placeholder function)
+    fn _ppm_to_da(&self, mz: f64, ppm: f64) -> f64 {
+        mz * ppm / 1_000_000.0
+    }
+
+    // Get the nearest peak based on mz and tolerance
+    pub fn get_nearest_peak(
+        &self,
+        mz: f64,
+        mz_tol_ppm: f64,
+        rt: f32,
+    ) -> Option<XicPeak> {
+        if self.peaks_count == 0 {
+            return None;
+        }
+
+        let mz_da = self._ppm_to_da(mz, mz_tol_ppm);
+        let bin_search_index = self.mz_array.binary_search_by(|&probe|
+            probe.partial_cmp(&mz).unwrap_or(std::cmp::Ordering::Equal)
+        );
+
+        let idx = match bin_search_index {
+            Result::Ok(i) => i,
+            Err(i) => i,
+        };
+
+        let (prev_val, next_val, new_idx) = if idx == self.peaks_count {
+            let prev_val = self.mz_array[self.peaks_count - 1];
+            if (mz - prev_val).abs() > mz_da {
+                return None;
+            }
+            (prev_val, 0.0, idx - 1)
+        } else if idx == 0 {
+            let next_val = self.mz_array[idx];
+            if (mz - next_val).abs() > mz_da {
+                return None;
+            }
+            (0.0, next_val, idx)
+        } else {
+            let next_val = self.mz_array[idx];
+            let prev_val = self.mz_array[idx - 1];
+            let diff_next_val = (mz - next_val).abs();
+            let diff_prev_val = (mz - prev_val).abs();
+            if diff_next_val < diff_prev_val {
+                if diff_next_val > mz_da {
+                    return None;
+                }
+                (prev_val, next_val, idx)
+            } else {
+                if diff_prev_val > mz_da {
+                    return None;
+                }
+                (prev_val, next_val, idx - 1)
+            }
+        };
+
+        Some(XicPeak {
+            mz: self.mz_array[new_idx],
+            intensity: self.intensity_array[new_idx],
+            rt
+        })
+    }
+}
+
+/*
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpectrumHeaderRecord {
     pub id: i64,
@@ -319,9 +412,9 @@ pub struct SpectrumHeaderRecord {
     pub data_processing_id: Option<i64>,
     pub data_encoding_id: Option<i64>,
     pub bb_first_spectrum_id: Option<i64>,
-}
+}*/
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpectrumHeader {
     pub id: i64,
     pub initial_id: i64,
@@ -333,12 +426,19 @@ pub struct SpectrumHeader {
     pub tic: f32,
     pub base_peak_mz: f64,
     pub base_peak_intensity: f32,
+    #[serde(rename = "main_precursor_mz")]
     pub precursor_mz: Option<f64>,
+    #[serde(rename = "main_precursor_charge")]
     pub precursor_charge: Option<i32>,
+    #[serde(rename = "data_points_count")]
     pub peaks_count: i64,
-    pub param_tree_str: String,
+    #[serde(rename = "param_tree")]
+    pub param_tree_str: Option<String>,
+    #[serde(rename = "scan_list")]
     pub scan_list_str: Option<String>,
+    #[serde(rename = "precursor_list")]
     pub precursor_list_str: Option<String>,
+    #[serde(rename = "product_list")]
     pub product_list_str: Option<String>,
     pub shared_param_tree_id: Option<i64>,
     pub instrument_configuration_id: i64,
@@ -384,12 +484,61 @@ pub struct RunSlice {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub struct BboxSizes {
+pub struct BBSizes {
     pub bb_mz_height_ms1: f64,
     pub bb_mz_height_msn: f64,
     pub bb_rt_width_ms1: f32,
     pub bb_rt_width_msn: f32,
 }
+
+impl BBSizes {
+    /// Parses an XML string to extract BBSizes parameters.
+    pub fn from_xml(xml: &str) -> Result<Self> {
+        let doc = Document::parse(xml)?;
+
+        let mut bb_mz_height_ms1 = 0.0;
+        let mut bb_mz_height_msn = 0.0;
+        let mut bb_rt_width_ms1 = 0.0;
+        let mut bb_rt_width_msn = 0.0;
+
+        // Traverse each <userParam> in <userParams>
+        for user_param in doc.descendants().filter(|n| n.tag_name().name() == "userParam") {
+            if let Some(name) = user_param.attribute("name") {
+                match name {
+                    "ms1_bb_mz_width" => {
+                        if let Some(value) = user_param.attribute("value") {
+                            bb_mz_height_ms1 = value.parse::<f64>()?;
+                        }
+                    }
+                    "msn_bb_mz_width" => {
+                        if let Some(value) = user_param.attribute("value") {
+                            bb_mz_height_msn = value.parse::<f64>()?;
+                        }
+                    }
+                    "ms1_bb_time_width" => {
+                        if let Some(value) = user_param.attribute("value") {
+                            bb_rt_width_ms1 = value.parse::<f32>()?;
+                        }
+                    }
+                    "msn_bb_time_width" => {
+                        if let Some(value) = user_param.attribute("value") {
+                            bb_rt_width_msn = value.parse::<f32>()?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(BBSizes {
+            bb_mz_height_ms1,
+            bb_mz_height_msn,
+            bb_rt_width_ms1,
+            bb_rt_width_msn,
+        })
+    }
+}
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundingBox {
@@ -413,9 +562,8 @@ pub struct BoundingBoxIndex {
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum XicMethod {
-    MAX= 0,
-    NEAREST= 1,
-    SUM= 2
+    MAX = 0,
+    NEAREST = 1,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -426,6 +574,7 @@ pub struct IsolationWindow {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityCache {
+    pub bb_sizes: BBSizes,
     pub data_encodings_cache: DataEncodingsCache,
     pub spectrum_headers: Vec<SpectrumHeader>
 }

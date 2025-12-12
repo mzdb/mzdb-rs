@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use anyhow::*;
 use crate::anyhow_ext::*;
 
-use rusqlite::Connection;
+use rusqlite::Connection; // OptionalExtension
 use serde_rusqlite::from_rows;
 
-use crate::model::{DataEncoding, DataEncodingsCache, EntityCache, SpectrumHeader, SpectrumHeaderRecord};
-use crate::queries::list_data_encodings;
+use crate::model::{BBSizes, DataEncoding, DataEncodingsCache, EntityCache, SpectrumHeader};
+use crate::queries::{get_param_tree_mzdb, list_data_encodings};
 
 /*macro_rules! here {
     () => {
@@ -21,8 +21,12 @@ use crate::queries::list_data_encodings;
 
 pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
 
-    let mut statement = db.prepare("SELECT * FROM spectrum").unwrap();
-    let records = from_rows::<SpectrumHeaderRecord>(statement.query([]).unwrap());
+    // FIXME: load everything
+    let mut statement = db.prepare("SELECT id, initial_id, title, cycle, time, ms_level, activation_type, tic, base_peak_mz, base_peak_intensity, main_precursor_mz, main_precursor_charge, data_points_count, precursor_list, shared_param_tree_id, instrument_configuration_id, source_file_id, run_id, data_processing_id, data_encoding_id, bb_first_spectrum_id FROM spectrum").unwrap();
+    //let mut statement = db.prepare("SELECT * FROM spectrum").unwrap();
+    let s_headers = from_rows::<SpectrumHeader>(statement.query([]).unwrap()).collect::<rusqlite::Result<Vec<SpectrumHeader>, _>>()?;
+
+    /*let records = from_rows::<SpectrumHeaderRecord>(statement.query([]).unwrap());
 
     let mut s_headers = Vec::new();
     for record_res in records {
@@ -56,12 +60,16 @@ pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
         };
 
         s_headers.push(sh);
-    }
+    }*/
 
     Ok(s_headers)
 }
 
 pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
+
+    let param_tree = get_param_tree_mzdb(&db).location(here!())?.unwrap_or(String::new());
+    let bb_sizes = BBSizes::from_xml(&param_tree)?;
+
     let data_encodings = list_data_encodings(&db)?;
 
     let mut data_encoding_by_id:  HashMap<i64, DataEncoding> = HashMap::with_capacity(data_encodings.len());
@@ -86,6 +94,7 @@ pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
     );
 
     Ok(EntityCache {
+        bb_sizes: bb_sizes,
         data_encodings_cache: de_cache,
         spectrum_headers: get_spectrum_headers(db).location(here!())?
     })

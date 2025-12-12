@@ -171,6 +171,9 @@ pub fn for_each_spectrum<F>(db: &Connection, entity_cache: &EntityCache, ms_leve
 }
 
 fn _bb_row_buffer_to_spectrum_buffer(bb_row_buffer: &Vec<BoundingBox>, spectrum_buffer: &mut Vec<Spectrum>, entity_cache: &EntityCache) -> Result<()> {
+    if bb_row_buffer.is_empty() {
+        return Ok(())
+    }
 
     let de_cache = &entity_cache.data_encodings_cache;
     let bb_count = bb_row_buffer.len();
@@ -206,7 +209,7 @@ fn _bb_row_buffer_to_spectrum_buffer(bb_row_buffer: &Vec<BoundingBox>, spectrum_
                 None
             ).location(here!())?;
 
-            spectrum_peak_count += spectrum_slice_data.peak_count;
+            spectrum_peak_count += spectrum_slice_data.peaks_count;
 
             spectrum_slices.push(spectrum_slice_data);
         }

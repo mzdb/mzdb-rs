@@ -2,11 +2,13 @@
 dead_code
 )]
 
+use std::collections::{BTreeMap, HashMap};
+
 use anyhow::*;
 use crate::anyhow_ext::*;
 //use itertools::Itertools;
 
-use rusqlite::{Connection, OptionalExtension, Row, Statement};
+use rusqlite::{params, Connection, OptionalExtension, Row, Statement};
 use rusqlite::{Result as RusqliteResult};
 use crate::model::*;
 use crate::model::DataMode::FITTED;
@@ -28,9 +30,6 @@ pub const SPECTRUM_TABLE_NAME: &'static str = "spectrum";
     };
 }*/
 
-
-
-//Selection de la premiere ligne
 fn _get_first_string_using_stmt2(stmt: &mut Statement) -> Result<Option<String>> {
     stmt.query_row([], |row|  row.get(0)).optional().map_err(anyhow::Error::msg)
 }
@@ -134,6 +133,15 @@ fn get_ints(db: &Connection, query_str: &str) -> anyhow::Result<Vec<i64>> {
 //----------------------------------------------------------------------//
 
 /// Get the mzDB version
+///
+/// # Arguments
+///
+/// * `db` - A reference to a `Connection` struct
+///
+/// # Returns
+///
+/// A `Result` containing an `Option` of a `String` representing the mzDB version.
+/// Returns an `Err` variant if there is an error executing the SQL query.
 pub fn get_mzdb_version(db: &Connection) -> Result<Option<String>> {
     _get_first_string_from_query(
         &db,
@@ -142,6 +150,15 @@ pub fn get_mzdb_version(db: &Connection) -> Result<Option<String>> {
 }
 
 /// Get the mzDB writer version
+///
+/// # Arguments
+///
+/// * `db` - A reference to a `Connection` struct
+///
+/// # Returns
+///
+/// A `Result` containing an `Option` of a `String` representing the mzDB writer version.
+/// Returns an `Err` variant if there is an error executing the SQL query.
 pub fn get_pwiz_mzdb_version(db: &Connection) -> Result<Option<String>> {
     get_first_string(
         &db,
@@ -150,6 +167,15 @@ pub fn get_pwiz_mzdb_version(db: &Connection) -> Result<Option<String>> {
 }
 
 /// Get all param trees of the chromatogram table
+///
+/// # Arguments
+///
+/// * `db` - A reference to a `Connection` struct
+///
+/// # Returns
+///
+/// A `Result` containing a `Vec` of `String` representing the param tree of the chromatogram table.
+/// Returns an `Err` variant if there is an error executing the SQL query.
 pub fn get_param_tree_chromatogram_res(db: &Connection) -> Result<Vec<String>> {
     get_strings(
         &db,
@@ -158,6 +184,16 @@ pub fn get_param_tree_chromatogram_res(db: &Connection) -> Result<Vec<String>> {
 }
 
 /// Get the param tree of the spectrum table from one spectrum id
+///
+/// # Arguments
+///
+/// * `db` - A reference to a `Connection` struct
+/// * `spectrum_id` - An `i64` representing the spectrum id
+///
+/// # Returns
+///
+/// A `Result` containing an `Option` of a `String` representing the param tree of the spectrum table.
+/// Returns an `Err` variant if there is an error executing the SQL query.
 pub fn get_param_tree_spectrum(db: &Connection, spectrum_id: i64) -> Result<Option<String>> {
     get_first_string(
         &db,
@@ -166,6 +202,15 @@ pub fn get_param_tree_spectrum(db: &Connection, spectrum_id: i64) -> Result<Opti
 }
 
 /// Get param tree of the mzdb table
+///
+/// # Arguments
+///
+/// * `db` - A reference to a `Connection` struct
+///
+/// # Returns
+///
+/// A `Result` containing an `Option` of a `String` representing the param tree of the mzdb table.
+/// Returns an `Err` variant if there is an error executing the SQL query.
 pub fn get_param_tree_mzdb(db: &Connection) -> Result<Option<String>> {
     _get_first_string_from_query(
         &db,
@@ -343,7 +388,6 @@ pub fn list_data_encodings(db: &Connection) -> Result<Vec<DataEncoding>> {
     Ok(result)
 }
 
-use std::collections::HashMap;
 pub fn list_get_spectra_data_encoding_ids(db: &Connection) -> Result<HashMap<i64, i64>> {
     let mut stmt = db.prepare("SELECT id, data_encoding_id FROM spectrum").location(here!())?;
     let mut rows = stmt.query([]).location(here!())?;
@@ -524,7 +568,7 @@ fn read_spectrum_slice_data(
 
     let sd = SpectrumData {
         data_encoding: de.clone(),
-        peak_count: peaks_count,
+        peaks_count: peaks_count,
         mz_array: mz_array,
         intensity_array: intensity_array,
         lwhm_array: lwhm_array,
@@ -621,7 +665,7 @@ pub fn index_bbox(bbox: &BoundingBox, cache: &DataEncodingsCache) -> Result<Boun
     Ok(indexed_bbox)
 }
 
-pub fn merge_spectrum_slices(sd_slices: &mut Vec<SpectrumData>, peak_count: usize) -> Result<SpectrumData> {
+pub fn merge_spectrum_slices(sd_slices: &mut Vec<SpectrumData>, peaks_count: usize) -> Result<SpectrumData> {
     let data_encoding = sd_slices.first()
         .map(|sd| sd.data_encoding.clone())
         .context("sd_slices is empty").location(here!())?;
@@ -629,17 +673,17 @@ pub fn merge_spectrum_slices(sd_slices: &mut Vec<SpectrumData>, peak_count: usiz
     let data_mode = data_encoding.mode;
 
     // Create new vectors of primitives
-    let mut mz_array: Vec<f64> = Vec::with_capacity(peak_count);
-    let mut intensity_array: Vec<f32> = Vec::with_capacity(peak_count);
+    let mut mz_array: Vec<f64> = Vec::with_capacity(peaks_count);
+    let mut intensity_array: Vec<f32> = Vec::with_capacity(peaks_count);
 
     let mut lwhm_array: Vec<f32> = if data_mode == FITTED {
-        Vec::with_capacity(peak_count)
+        Vec::with_capacity(peaks_count)
     } else {
         Vec::new()
     };
 
     let mut rwhm_array: Vec<f32> = if data_mode == FITTED {
-        Vec::with_capacity(peak_count)
+        Vec::with_capacity(peaks_count)
     } else {
         Vec::new()
     };
@@ -657,7 +701,7 @@ pub fn merge_spectrum_slices(sd_slices: &mut Vec<SpectrumData>, peak_count: usiz
 
     Ok(SpectrumData {
         data_encoding,
-        peak_count,
+        peaks_count,
         mz_array,
         intensity_array,
         lwhm_array,
@@ -721,7 +765,7 @@ pub fn get_spectrum(db: &Connection, spectrum_id: i64, entity_cache: &EntityCach
     // Select the information in bouding box for one spectrum id
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next().location(here!())? {
-        // put the information of each bouding box in the struc of bouding box
+        // put the information of each bounding box in the struct of bounding box
         let cur_bb = create_bbox(row).location(here!())?;
 
         let bb_index = index_bbox(&cur_bb, de_cache).location(here!())?;
@@ -749,11 +793,471 @@ pub fn get_spectrum(db: &Connection, spectrum_id: i64, entity_cache: &EntityCach
         sd_slices.push(spectrum_slice_data);
     }
 
-    let peak_count = sd_slices.iter().map(|slice| slice.peak_count).sum(); // .copied()
-    let spectrum_data = merge_spectrum_slices(&mut sd_slices, peak_count).location(here!())?;
+    let peaks_count = sd_slices.iter().map(|slice| slice.peaks_count).sum(); // .copied()
+    let spectrum_data = merge_spectrum_slices(&mut sd_slices, peaks_count).location(here!())?;
 
     Ok(Spectrum {
         header: spectrum_header.clone(),
         data: spectrum_data,
     })
+}
+
+// Function to get MS spectrum slices (msLevel 1)
+pub fn get_ms_spectrum_slices(
+    connection: &Connection, // SQLite connection
+    min_mz: f64,
+    max_mz: f64,
+    min_rt: f32,
+    max_rt: f32,
+    entity_cache: &EntityCache
+) -> Result<Vec<SpectrumSlice>> {
+    _get_spectrum_slices_in_ranges(
+        connection,
+        min_mz,
+        max_mz,
+        min_rt,
+        max_rt,
+        1, // msLevel 1 for MS spectra
+        0.0, // parentMz is not used for MS level 1
+        entity_cache
+    )
+}
+
+// Function to get MS/MS spectrum slices (msLevel 2)
+pub fn get_msn_spectrum_slices(
+    connection: &Connection,
+    parent_mz: f64,
+    min_frag_mz: f64,
+    max_frag_mz: f64,
+    min_rt: f32,
+    max_rt: f32,
+    entity_cache: &EntityCache
+) -> Result<Vec<SpectrumSlice>> {
+    _get_spectrum_slices_in_ranges(
+        connection,
+        min_frag_mz,
+        max_frag_mz,
+        min_rt,
+        max_rt,
+        2, // msLevel 2 for MS/MS spectra
+        parent_mz, // parentMz is used for MS level 2
+        entity_cache
+    )
+}
+
+/*
+fn get_spectrum_slices_in_ranges(
+    connection: &Connection,
+    min_mz: f64,
+    max_mz: f64,
+    min_rt: f32,
+    max_rt: f32,
+    ms_level: i32,
+    parent_mz: f64,
+    entity_cache: &EntityCache
+) -> Result<Vec<SpectrumSlice>> {
+    let bb_sizes = entity_cache.bb_sizes;
+    let rt_width = if ms_level == 1 {
+        bb_sizes.bb_rt_width_ms1
+    } else {
+        bb_sizes.bb_rt_width_msn
+    };
+    let mz_height = if ms_level == 1 {
+        bb_sizes.bb_mz_height_ms1
+    } else {
+        bb_sizes.bb_mz_height_msn
+    };
+
+    let min_mz = min_mz - mz_height;
+    let max_mz = max_mz + mz_height;
+    let min_rt = min_rt - rt_width;
+    let max_rt = max_rt + rt_width;
+
+    let sql_query = if ms_level == 1 {
+        "SELECT * FROM bounding_box WHERE id IN \
+         (SELECT id FROM bounding_box_rtree WHERE min_mz >= ?1 AND max_mz <= ?2 AND min_time >= ?3 AND max_time <= ?4) \
+         ORDER BY first_spectrum_id"
+    } else {
+        "SELECT * FROM bounding_box WHERE id IN \
+         (SELECT id FROM bounding_box_msn_rtree WHERE min_ms_level = ?5 AND max_ms_level = ?5 \
+         AND min_parent_mz <= ?6 AND max_parent_mz >= ?6 \
+         AND min_mz >= ?1 AND max_mz <= ?2 AND min_time >= ?3 AND max_time <= ?4) \
+         ORDER BY first_spectrum_id"
+    };
+
+    let mut stmt = connection.prepare(sql_query)?;
+
+    // Assuming SpectrumHeader is obtained through another function
+    let spec_headers = &entity_cache.spectrum_headers;
+   let spectrum_header_by_id: HashMap<_, _> = spec_headers
+        .into_iter()
+        .map(|header| (header.id, header))
+        .collect();
+
+    //let de_cache = &entity_cache.data_encodings_cache;
+
+    let mut spectrum_data_list_by_id: BTreeMap<i64, Vec<SpectrumData>> = BTreeMap::new();
+    let mut peaks_count_by_spectrum_id: HashMap<i64, i32> = HashMap::new();
+
+    let mut rows = stmt.query(rusqlite::params![min_mz, max_mz, min_rt, max_rt, ms_level, parent_mz])?;
+
+    while let Some(row) = rows.next()? {
+        let bb = create_bbox(row)?;
+        /*let bb_id: i32 = row.get(0)?;
+        let data: Vec<u8> = row.get(1)?;
+        let first_spectrum_id: i64 = row.get(2)?;
+        let last_spectrum_id: i64 = row.get(3)?;
+
+        let bb = BoundingBox {
+            id: bb_id,
+            data,
+            first_spectrum_id,
+            last_spectrum_id,
+        };*/
+
+        // TODO: bb_reader and actual data processing
+        // Add logic to process each spectrum and store them in `spectrum_data_list_by_id`
+
+        // Example:
+        let spectrum_data = SpectrumData {
+            /* populate */ data_encoding: DataEncoding {},
+            peaks_count: 0,
+            mz_array: vec![],
+            intensity_array: vec![],
+            lwhm_array: vec![],
+            rwhm_array: vec![],
+        };
+        spectrum_data_list_by_id
+            .entry(first_spectrum_id)
+            .or_insert_with(Vec::new)
+            .push(spectrum_data);
+    }
+
+    // Finalize SpectrumSlice array creation
+    let mut final_spectrum_slices = Vec::new();
+
+    for (spectrum_id, spectrum_data_list) in spectrum_data_list_by_id {
+        let peaks_count = peaks_count_by_spectrum_id.get(&spectrum_id).cloned().unwrap_or(0);
+        let final_spectrum_data = _merge_spectrum_data_list(&spectrum_data_list, peaks_count)?;
+
+        let spectrum_slice = SpectrumSlice {
+            spectrum: Spectrum {
+                header: (*spectrum_header_by_id.get(&spectrum_id).unwrap()).clone(),
+                data: final_spectrum_data,
+            },
+            run_slice_id: 0,
+        };
+
+        final_spectrum_slices.push(spectrum_slice);
+    }
+
+    Ok(final_spectrum_slices)
+}*/
+
+  // Important: SQlite R*Tree floating values are 32bits floats, thus we need to expand the search slightly
+// Advice from SQLite developers (https://www.sqlite.org/rtree.html#roundoff_error):
+// Applications should expand their contained-within query boxes slightly (by 0.000012%)
+// by rounding down the lower coordinates and rounding up the top coordinates, in each dimension.
+const SQLITE_RTREE_UB_CORR: f64 = 1.0 + 0.00000012;
+const SQLITE_RTREE_LB_CORR: f64 = 1.0 - 0.00000012;
+
+
+// TODO: implement BTree instead of HashMap
+fn _get_spectrum_slices_in_ranges(
+    connection: &Connection,
+    min_mz: f64,
+    max_mz: f64,
+    min_rt: f32,
+    max_rt: f32,
+    ms_level: u8,
+    parent_mz: f64,
+    entity_cache: &EntityCache
+) -> Result<Vec<SpectrumSlice>> {
+    let bb_sizes = entity_cache.bb_sizes;
+    let (rt_width, mz_height) = if ms_level == 1 {
+        (bb_sizes.bb_rt_width_ms1, bb_sizes.bb_mz_height_ms1)
+    } else {
+        (bb_sizes.bb_rt_width_msn, bb_sizes.bb_mz_height_msn)
+    };
+
+    // Update min/max BB coordinates according to actual BB sizes
+    let bb_min_mz = (min_mz - mz_height) * SQLITE_RTREE_LB_CORR;
+    let bb_max_mz = (max_mz + mz_height) * SQLITE_RTREE_UB_CORR;
+    let bb_min_rt = (min_rt - rt_width) * SQLITE_RTREE_LB_CORR as f32;
+    let bb_max_rt = (max_rt + rt_width) * SQLITE_RTREE_UB_CORR as f32;
+
+    let sql_query = if ms_level == 1 {
+        "
+            SELECT * FROM bounding_box WHERE id IN (
+                SELECT id FROM bounding_box_rtree
+                WHERE min_mz >= ? AND max_mz <= ?
+                AND min_time >= ? AND max_time <= ?
+            )
+            ORDER BY first_spectrum_id;
+        "
+    } else {
+        "
+            SELECT * FROM bounding_box WHERE id IN (
+                SELECT id FROM bounding_box_msn_rtree
+                WHERE min_ms_level = ? AND max_ms_level = ?
+                AND min_parent_mz <= ? AND max_parent_mz >= ?
+                AND min_mz >= ? AND max_mz <= ?
+                AND min_time >= ? AND max_time <= ?
+            )
+            ORDER BY first_spectrum_id;
+        "
+    };
+
+    let mut stmt = connection.prepare(sql_query)?;
+
+    let mut rows = if ms_level == 1 {
+        stmt.query(params![bb_min_mz, bb_max_mz, bb_min_rt, bb_max_rt])?
+    } else {
+        stmt.query(params![
+            ms_level,
+            ms_level,
+            parent_mz,
+            parent_mz,
+            bb_min_mz,
+            bb_max_mz,
+            bb_min_rt,
+            bb_max_rt
+        ])?
+    };
+
+    let spec_headers = &entity_cache.spectrum_headers;
+    let spectrum_header_by_id: HashMap<_, _> = spec_headers
+        .into_iter()
+        .map(|header| (header.id, header))
+        .collect();
+
+    let de_cache = &entity_cache.data_encodings_cache;
+
+    let mut spectrum_data_list_by_id: HashMap<i64, Vec<SpectrumData>> = HashMap::new();
+    let mut peaks_count_by_spectrum_id: HashMap<i64, usize> = HashMap::new();
+
+    // Process bounding box records
+    while let Some(bb_record) = rows.next()? {
+        /*let bb_id: i64 = record.get("id")?;
+        let data: Vec<u8> = record.get("data")?;
+        let first_spectrum_id: i64 = record.get("first_spectrum_id")?;
+        let last_spectrum_id: i64 = record.get("last_spectrum_id")?;*/
+
+        /*let bb = BoundingBox {
+            id:  record.get("id")?,
+            first_spectrum_id: record.get("first_spectrum_id")?,
+            last_spectrum_id: record.get("last_spectrum_id")?,
+            run_slice_id: record.get("run_slice_id")?,
+            blob_data: record.get("data")?,
+        };*/
+
+        let cur_bb = create_bbox(bb_record)?;
+
+        let de_opt = de_cache.get_data_encoding_by_spectrum_id(&cur_bb.first_spectrum_id);
+        if de_opt.is_none() {
+            bail!("can't retrieve data encoding for spectrum ID={}", cur_bb.first_spectrum_id);
+        }
+        let data_encoding = de_opt.unwrap();
+
+        let bb_index = index_bbox(&cur_bb, de_cache).location(here!())?;
+
+        //let bb_spectra_count = bb_index.spectrum_slices_count;
+        let bb_spectrum_ids = &bb_index.spectra_ids;
+
+        for (spectrum_idx, &spectrum_id) in bb_spectrum_ids.iter().enumerate() {
+            if let Some(sh) = spectrum_header_by_id.get(&spectrum_id) {
+                let current_rt = sh.time;
+                if current_rt >= min_rt && current_rt <= max_rt {
+                    let spectrum_slice_data = read_spectrum_slice_data_at(
+                        &cur_bb, &bb_index, data_encoding, spectrum_idx, Some(min_mz), Some(max_mz)
+                    )?;
+
+                    if spectrum_slice_data.peaks_count != 0 {
+                        *peaks_count_by_spectrum_id.entry(spectrum_id).or_default() += spectrum_slice_data.peaks_count;
+                        spectrum_data_list_by_id.entry(spectrum_id).or_default().push(spectrum_slice_data);
+                    }
+                }
+            }
+        }
+    }
+
+    // Finalize spectrum slices
+    /*let mut final_spectrum_slices = Vec::with_capacity(spectrum_data_list_by_id.len());
+    for (spectrum_id, spectrum_data_list) in spectrum_data_list_by_id {
+        let peaks_count = peaks_count_by_spectrum_id[&spectrum_id];
+        let final_spectrum_data = SpectrumData::merge(&spectrum_data_list, peaks_count)?;
+        if let Some(sh) = spectrum_header_by_id.get(&spectrum_id) {
+            final_spectrum_slices.push(SpectrumSlice::new(sh.clone(), final_spectrum_data));
+        }
+    }*/
+
+    let mut final_spectrum_slices = Vec::with_capacity(spectrum_data_list_by_id.len());
+    for (spectrum_id, spectrum_data_list) in spectrum_data_list_by_id {
+        let peaks_count = peaks_count_by_spectrum_id.get(&spectrum_id).cloned().unwrap_or(0);
+        let final_spectrum_data = _merge_spectrum_data_list(spectrum_data_list, peaks_count)?;
+
+        let spectrum_slice = SpectrumSlice {
+            spectrum: Spectrum {
+                header: (*spectrum_header_by_id.get(&spectrum_id).unwrap()).clone(),
+                data: final_spectrum_data,
+            },
+            run_slice_id: 0,
+        };
+
+        final_spectrum_slices.push(spectrum_slice);
+    }
+
+    Ok(final_spectrum_slices)
+}
+
+fn _merge_spectrum_data_list(spectrum_data_list: Vec<SpectrumData>, peaks_count: usize) -> Result<SpectrumData> {
+    if spectrum_data_list.is_empty() {
+        bail!("Spectrum data list should not be empty")
+    }
+
+    let mut final_mz_array = Vec::with_capacity(peaks_count);
+    let mut final_intensity_array = Vec::with_capacity(peaks_count);
+    let mut final_lwhm_array: Option<Vec<f32>> = None;
+    let mut final_rwhm_array: Option<Vec<f32>> = None;
+
+    if let Some(first_spectrum_data) = spectrum_data_list.first() {
+        if !first_spectrum_data.lwhm_array.is_empty() && !first_spectrum_data.rwhm_array.is_empty() {
+            final_lwhm_array = Some(Vec::with_capacity(peaks_count));
+            final_rwhm_array = Some(Vec::with_capacity(peaks_count));
+        }
+    }
+
+    let data_encoding = spectrum_data_list[0].data_encoding.clone();
+    for spectrum_data in spectrum_data_list {
+        // Extend the primary arrays
+        final_mz_array.extend(spectrum_data.mz_array);
+        final_intensity_array.extend(spectrum_data.intensity_array);
+
+        // Extend the optional arrays if they exist
+        if let (Some(ref mut lwhm), Some(ref mut rwhm)) = (&mut final_lwhm_array, &mut final_rwhm_array) {
+            lwhm.extend(spectrum_data.lwhm_array);
+            rwhm.extend(spectrum_data.rwhm_array);
+        }
+    }
+
+    Ok(SpectrumData {
+        data_encoding: data_encoding,
+        peaks_count,
+        mz_array: final_mz_array,
+        intensity_array: final_intensity_array,
+        lwhm_array: final_lwhm_array.unwrap_or_default(),
+        rwhm_array: final_rwhm_array.unwrap_or_default(),
+    })
+}
+
+// Get MS XIC (ms level 1)
+pub fn get_ms_xic(
+    connection: &Connection,  // SQLite connection
+    mz: f64,
+    mz_tol_ppm: f64,
+    min_rt: Option<f32>,
+    max_rt: Option<f32>,
+    method: XicMethod,
+    entity_cache: &EntityCache
+) -> Result<Vec<XicPeak>> {
+
+    let mz_tol_da = mz * mz_tol_ppm / 1e6;
+
+    let min_rt_for_rtree = min_rt.unwrap_or(0.0);
+    let max_rt_for_rtree = if max_rt.is_some() { max_rt.unwrap() } else {
+        get_last_time(connection)?.context("can't retrieve the last spectrum retention time information")?
+    };
+
+    // Assume `get_ms_spectrum_slices` returns spectrum slices
+    let spectrum_slices = get_ms_spectrum_slices(
+        connection,
+        mz - mz_tol_da,
+        mz + mz_tol_da,
+        min_rt_for_rtree,
+        max_rt_for_rtree,
+        entity_cache
+    )?;
+
+    Ok(_spectrum_slices_to_xic(spectrum_slices, mz, mz_tol_ppm, method))
+}
+
+// Gt MS/MS XIC (ms level 2)
+fn get_msn_xic(
+    connection: &Connection,  // SQLite connection
+    parent_mz: f64,
+    fragment_mz: f64,
+    fragment_mz_tol_ppm: f64,
+    min_rt: Option<f32>,
+    max_rt: Option<f32>,
+    method: XicMethod,
+    entity_cache: &EntityCache
+) -> Result<Vec<XicPeak>> {
+
+    let fragment_mz_tol_da = fragment_mz * fragment_mz_tol_ppm / 1e6;
+
+    let min_rt_for_rtree = min_rt.unwrap_or(0.0);
+    let max_rt_for_rtree = if max_rt.is_some() { max_rt.unwrap() } else {
+        get_last_time(connection)?.context("can't retrieve the last spectrum retention time information")?
+    };
+
+    // Use the existing helper function `get_msn_spectrum_slices`
+    let spectrum_slices = get_msn_spectrum_slices(
+        connection,
+        parent_mz,
+        fragment_mz - fragment_mz_tol_da,
+        fragment_mz + fragment_mz_tol_da,
+        min_rt_for_rtree,
+        max_rt_for_rtree,
+        entity_cache
+    )?;
+
+    Ok(_spectrum_slices_to_xic(spectrum_slices, fragment_mz, fragment_mz_tol_ppm, method))
+}
+
+// Internal function to convert spectrum slices to XIC
+fn _spectrum_slices_to_xic(
+    spectrum_slices: Vec<SpectrumSlice>,  // Assuming SpectrumSlice type
+    searched_mz: f64,
+    mz_tol_ppm: f64,
+    method: XicMethod,
+) -> Vec<XicPeak> {
+    if spectrum_slices.is_empty() {
+        return Vec::new();  // Return empty vector if no spectrum slices
+    }
+
+    let mut xic_peaks = Vec::with_capacity(spectrum_slices.len());
+
+    match method {
+        XicMethod::MAX => {
+            for sl in spectrum_slices {
+                let spectrum_data = sl.spectrum.data;
+                if spectrum_data.peaks_count > 0 {
+                    let max_dp_opt = spectrum_data.intensity_array.iter().enumerate().max_by(|&a, &b| {
+                        (*a.1).total_cmp(b.1)
+                    });
+
+                    if let Some((max_dp_idx, max_intensity)) = max_dp_opt {
+                        xic_peaks.push(XicPeak {
+                            mz: spectrum_data.mz_array[max_dp_idx],
+                            intensity: *max_intensity,
+                            rt: sl.spectrum.header.time
+                        });
+                    }
+                }
+            }
+        },
+        XicMethod::NEAREST => {
+            for sl in spectrum_slices {
+                let spectrum_data = sl.spectrum.data;
+                if spectrum_data.peaks_count > 0 {
+                    let rt = sl.spectrum.header.time;
+                    if let Some(nearest_peak) = spectrum_data.get_nearest_peak(searched_mz, mz_tol_ppm, rt) {
+                        xic_peaks.push(nearest_peak);  // Assuming `get_nearest_peak` returns an Option<Peak>
+                    }
+                }
+            }
+        },
+    }
+
+    xic_peaks
 }

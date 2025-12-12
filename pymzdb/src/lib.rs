@@ -502,7 +502,7 @@ fn _print_spectrum(spectrum: &Spectrum) -> Result<()> {
     print!("Spectrum: {} --------------------------------------------------------\n\n", spectrum.header.id);
 
     println!("MZ\tIntensity");
-    for peak_idx in 0..spectrum.data.peak_count {
+    for peak_idx in 0..spectrum.data.peaks_count {
         let d_mz = *spectrum.data.mz_array.get(peak_idx).unwrap();
         let f_in = *spectrum.data.intensity_array.get(peak_idx).unwrap();
 
