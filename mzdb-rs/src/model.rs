@@ -3,6 +3,7 @@
 //! This module contains all the data structures used to represent mass spectrometry
 //! data stored in mzDB format, including spectra, peaks, data encodings, and various
 //! metadata types.
+#![allow(unused)]
 
 use anyhow::*;
 use roxmltree::Document;

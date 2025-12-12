@@ -7,6 +7,7 @@
 //! - XIC (Extracted Ion Chromatogram) generation
 //!
 //! Most functions take a `&Connection` reference and return `Result<T>`.
+#![allow(unused)]
 
 use std::collections::HashMap;
 

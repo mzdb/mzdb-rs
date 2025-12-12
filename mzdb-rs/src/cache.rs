@@ -9,6 +9,7 @@
 //! in the bounding box blob data parsing. Currently, the standard library's byte slicing
 //! is used, but for high-throughput scenarios, `bytes::Bytes` could provide benefits
 //! through reference counting and avoiding copies.
+#![allow(unused)]
 
 use rusqlite::{Connection, Statement};
 use std::cell::RefCell;
