@@ -1,11 +1,15 @@
 mod cache;
+mod chromatogram;
 mod iterator;
+mod metadata;
 mod model;
 mod mzdb;
 mod queries;
+mod queries_extended;
+mod query_utils;
+mod rtree;
 
-use anyhow::*;
-use anyhow_ext::Context;
+use anyhow_ext::*;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -22,7 +26,7 @@ fn test_db_path() -> PathBuf {
 }
 
 fn main() -> Result<()> {
-        
+
     // Using the low-level API (for demonstration)
     let db = Connection::open(test_db_path())?;
     let entity_cache = create_entity_cache(&db).dot()?;

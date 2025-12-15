@@ -11,76 +11,23 @@
 
 use std::collections::HashMap;
 
-use anyhow::*;
-use anyhow_ext::Context;
+use anyhow_ext::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use rusqlite::Result as RusqliteResult;
 
 use crate::model::*;
 use crate::model::DataMode::Fitted;
+use crate::rtree::{SQLITE_RTREE_LB_CORR, SQLITE_RTREE_UB_CORR};
+use crate::query_utils::{
+    query_single_string, query_all_strings,
+    query_single_i64, query_single_i64_required,
+    query_single_f32, query_single_f64,
+    get_table_records_count as get_table_records_count_impl,
+};
 
 pub const BOUNDING_BOX_TABLE_NAME: &str = "bounding_box";
 pub const DATA_ENCODING_TABLE_NAME: &str = "data_encoding";
 pub const SPECTRUM_TABLE_NAME: &str = "spectrum";
-
-// SQLite R*Tree correction factors for floating point precision
-// See: https://www.sqlite.org/rtree.html#roundoff_error
-const SQLITE_RTREE_UB_CORR: f64 = 1.0 + 0.00000012;
-const SQLITE_RTREE_LB_CORR: f64 = 1.0 - 0.00000012;
-
-// ============================================================================
-// Private helper functions for database queries
-// ============================================================================
-
-fn query_single_string(db: &Connection, sql: &str) -> Result<Option<String>> {
-    db.prepare(sql)
-        .dot()?
-        .query_row([], |row| row.get(0))
-        .optional()
-        .dot()
-}
-
-fn query_all_strings(db: &Connection, sql: &str) -> Result<Vec<String>> {
-    let mut stmt = db.prepare(sql).dot()?;
-    let rows = stmt.query_map([], |row| row.get(0)).dot()?;
-
-    let mut result = Vec::new();
-    for value in rows {
-        result.push(value.dot()?);
-    }
-    Ok(result)
-}
-
-fn query_single_i64(db: &Connection, sql: &str) -> Result<Option<i64>> {
-    db.prepare(sql)
-        .dot()?
-        .query_row([], |row| row.get(0))
-        .optional()
-        .dot()
-}
-
-fn query_single_i64_required(db: &Connection, sql: &str) -> Result<i64> {
-    db.prepare(sql)
-        .dot()?
-        .query_row([], |row| row.get(0))
-        .dot()
-}
-
-fn query_single_f32(db: &Connection, sql: &str) -> Result<Option<f32>> {
-    db.prepare(sql)
-        .dot()?
-        .query_row([], |row| row.get(0))
-        .optional()
-        .dot()
-}
-
-fn query_single_f64(db: &Connection, sql: &str) -> Result<Option<f64>> {
-    db.prepare(sql)
-        .dot()?
-        .query_row([], |row| row.get(0))
-        .optional()
-        .dot()
-}
 
 // ============================================================================
 // Public metadata query functions
@@ -153,12 +100,13 @@ pub fn get_spectra_count_by_ms_level(db: &Connection, ms_level: i64) -> Result<O
     )
 }
 
-/// Get the number of records in a table (from sqlite_sequence)
+/// Get the number of records in a table.
+/// 
+/// This function first tries to get the count from sqlite_sequence (which is faster
+/// for large tables with AUTOINCREMENT primary keys), and falls back to COUNT(*) 
+/// if the table is not present in sqlite_sequence.
 pub fn get_table_records_count(db: &Connection, table_name: &str) -> Result<Option<i64>> {
-    query_single_i64(
-        db,
-        &format!("SELECT seq FROM sqlite_sequence WHERE name = {:?}", table_name),
-    )
+    get_table_records_count_impl(db, table_name)
 }
 
 /// Get the bb_first_spectrum_id for a spectrum
@@ -166,28 +114,6 @@ pub fn get_bounding_box_first_spectrum_id(db: &Connection, spectrum_id: i64) -> 
     query_single_i64(
         db,
         &format!("SELECT bb_first_spectrum_id FROM spectrum WHERE id = {}", spectrum_id),
-    )
-}
-
-/// Get the minimum m/z of a bounding box from R*Tree
-pub fn get_bounding_box_min_mz(db: &Connection, bb_rtree_id: i64) -> Result<Option<f32>> {
-    query_single_f32(
-        db,
-        &format!(
-            "SELECT min_mz FROM bounding_box_rtree WHERE bounding_box_rtree.id = {}",
-            bb_rtree_id
-        ),
-    )
-}
-
-/// Get the minimum time of a bounding box from R*Tree
-pub fn get_bounding_box_min_time(db: &Connection, bb_rtree_id: i64) -> Result<Option<f64>> {
-    query_single_f64(
-        db,
-        &format!(
-            "SELECT min_time FROM bounding_box_rtree WHERE bounding_box_rtree.id = {}",
-            bb_rtree_id
-        ),
     )
 }
 
