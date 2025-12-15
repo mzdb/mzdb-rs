@@ -41,8 +41,10 @@
 //! - [`metadata`]: Metadata table structures and queries
 //! - [`chromatogram`]: Chromatogram structures and queries
 //! - [`rtree`]: R-tree spatial index queries
+//! - [`xml`]: XML parsing for param_tree, scan_list, precursor_list, etc.
 //! - [`cache`]: Query caching utilities
 //! - [`mzdb`]: Core mzDB operations
+//! - [`query_utils`]: Database query helper functions
 
 pub mod cache;
 pub mod chromatogram;
@@ -54,6 +56,7 @@ pub mod queries;
 pub mod queries_extended;
 pub mod query_utils;
 pub mod rtree;
+pub mod xml;
 
 // Re-export main types for convenience
 pub use model::{
@@ -79,6 +82,24 @@ pub use metadata::{
 // Re-export rtree types
 pub use rtree::{
     BoundingBoxMsnRTreeEntry, BoundingBoxRTreeEntry, RTreeStats,
+};
+
+// Re-export xml types and parsing functions
+pub use xml::{
+    // Core parameter types
+    CvParam, UserParam, UserText, ParamTree,
+    // Structured XML types
+    FileContent, ComponentList, InstrumentComponent,
+    ScanList, Scan, ScanWindow,
+    PrecursorList, Precursor, IsolationWindow as XmlIsolationWindow, 
+    SelectedIon, Activation,
+    ProductList, Product,
+    // Parsing functions
+    parse_param_tree, parse_file_content, parse_component_list,
+    parse_scan_list, parse_precursor_list, parse_product_list,
+    // Convenience extraction functions
+    extract_isolation_window, extract_selected_ion_mz, extract_collision_energy,
+    extract_scan_time, find_param_value, find_user_param_value, find_user_text,
 };
 
 // Re-export queries_extended types and functions

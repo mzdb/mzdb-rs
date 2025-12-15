@@ -8,6 +8,7 @@ mod queries;
 mod queries_extended;
 mod query_utils;
 mod rtree;
+mod xml;
 
 use anyhow_ext::*;
 use rusqlite::Connection;
