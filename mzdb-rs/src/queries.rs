@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use anyhow_ext::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use rusqlite::Result as RusqliteResult;
+use serde_rusqlite::from_rows;
 
 use crate::model::*;
 use crate::model::DataMode::Fitted;
@@ -936,3 +937,23 @@ fn spectrum_slices_to_xic(
 
     xic_peaks
 }
+
+// ============================================================================
+// Spectrum header queries
+// ============================================================================
+
+pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
+    let mut statement = db.prepare(
+        "SELECT id, initial_id, title, cycle, time, ms_level, activation_type, tic, \
+         base_peak_mz, base_peak_intensity, main_precursor_mz, main_precursor_charge, \
+         data_points_count, precursor_list, shared_param_tree_id, instrument_configuration_id, \
+         source_file_id, run_id, data_processing_id, data_encoding_id, bb_first_spectrum_id \
+         FROM spectrum",
+    )?;
+
+    let s_headers = from_rows::<SpectrumHeader>(statement.query([])?)
+        .collect::<rusqlite::Result<Vec<SpectrumHeader>, _>>()?;
+
+    Ok(s_headers)
+}
+

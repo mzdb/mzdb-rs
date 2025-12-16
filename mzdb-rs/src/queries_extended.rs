@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::model::*;
 use crate::query_utils::{get_table_records_count, table_exists};
+use crate::xml::parse_isolation_window_from_xml;
 
 // ============================================================================
 // Run slice queries
@@ -284,47 +285,11 @@ pub fn get_mzdb_stats(db: &Connection) -> Result<MzDbStats> {
 }
 
 // ============================================================================
-// XML parsing helpers
-// ============================================================================
-
-/// Parse a CV param float value from XML descendants
-fn parse_cv_param_f32_value(children: &mut roxmltree::Descendants, cv_param_ac: &str) -> Option<f32> {
-    children.find(|n| n.attribute("accession") == Some(cv_param_ac)).and_then(|n| {
-        n.attributes()
-            .find(|a| a.name().starts_with("value"))
-            .and_then(|attr| attr.value().parse::<f32>().ok())
-    })
-}
-
-/// Parse an isolation window from precursor_list XML
-fn parse_isolation_window_from_xml(prec_list_xml: &str) -> Option<IsolationWindow> {
-    let xml_doc = roxmltree::Document::parse(prec_list_xml).ok()?;
-    let mut children = xml_doc.descendants();
-    
-    // MS:1000827 = isolation window target m/z
-    let target_mz = parse_cv_param_f32_value(&mut children, "MS:1000827")?;
-    
-    // Reset iterator for next search
-    let mut children = xml_doc.descendants();
-    // MS:1000828 = isolation window lower offset
-    let lower_offset = parse_cv_param_f32_value(&mut children, "MS:1000828").unwrap_or(0.0);
-    
-    let mut children = xml_doc.descendants();
-    // MS:1000829 = isolation window upper offset
-    let upper_offset = parse_cv_param_f32_value(&mut children, "MS:1000829").unwrap_or(0.0);
-    
-    Some(IsolationWindow {
-        min_mz: (target_mz - lower_offset) as f64,
-        max_mz: (target_mz + upper_offset) as f64,
-    })
-}
-
-// ============================================================================
 // DIA/SWATH specific queries
 // ============================================================================
 
 /// Get unique MS2 isolation windows (for DIA data) by parsing precursor_list XML
-pub fn get_isolation_windows(db: &Connection) -> Result<Vec<IsolationWindow>> {
+pub fn get_isolation_windows(db: &Connection) -> Result<Vec<MzRange>> {
     use std::collections::HashSet;
     
     // Query all MS2 spectra with their precursor_list XML

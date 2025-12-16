@@ -3,8 +3,8 @@
 //! Run with: cargo bench -p mzdb-rs
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use mzdb::cache::create_entity_cache;
 use mzdb::iterator::for_each_spectrum;
-use mzdb::mzdb::create_entity_cache;
 use mzdb::queries::{get_spectrum, get_mzdb_version, list_data_encodings};
 use rusqlite::Connection;
 use std::path::PathBuf;

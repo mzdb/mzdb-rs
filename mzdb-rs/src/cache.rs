@@ -11,8 +11,15 @@
 //! through reference counting and avoiding copies.
 #![allow(unused)]
 
-use rusqlite::{Connection, Statement};
+use std::collections::HashMap;
 use std::cell::RefCell;
+
+use anyhow::*;
+use anyhow_ext::Context;
+use rusqlite::{Connection, Statement};
+
+use crate::model::{BBSizes, DataEncoding, DataEncodingsCache, EntityCache};
+use crate::queries::{get_param_tree_mzdb, list_data_encodings, get_spectrum_headers};
 
 /// SQL queries that are frequently used and benefit from caching
 pub mod sql {
@@ -130,3 +137,41 @@ mod tests {
         assert!(!SqlQueries::get_all_bb_ms_level().is_empty());
     }
 }
+
+// ============================================================================
+// Entity cache creation
+// ============================================================================
+
+pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
+    let param_tree = get_param_tree_mzdb(db).dot()?.unwrap_or_default();
+    let bb_sizes = BBSizes::from_xml(&param_tree)?;
+
+    let data_encodings = list_data_encodings(db)?;
+
+    let mut data_encoding_by_id: HashMap<i64, DataEncoding> =
+        HashMap::with_capacity(data_encodings.len());
+    for de in data_encodings {
+        data_encoding_by_id.insert(de.id, de);
+    }
+
+    let mut stmt = db
+        .prepare("SELECT id, data_encoding_id FROM spectrum")
+        .dot()?;
+    let mut rows = stmt.query([]).dot()?;
+
+    let mut spectra_data_encoding_ids = HashMap::new();
+    while let Some(row) = rows.next().dot()? {
+        let id: i64 = row.get(0).dot()?;
+        let data_encoding_id: i64 = row.get(1).dot()?;
+        spectra_data_encoding_ids.insert(id, data_encoding_id);
+    }
+
+    let de_cache = DataEncodingsCache::new(data_encoding_by_id, spectra_data_encoding_ids);
+
+    Ok(EntityCache {
+        bb_sizes,
+        data_encodings_cache: de_cache,
+        spectrum_headers: get_spectrum_headers(db).dot()?,
+    })
+}
+

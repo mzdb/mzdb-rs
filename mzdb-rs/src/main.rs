@@ -14,9 +14,9 @@ use anyhow_ext::*;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
+use crate::cache::create_entity_cache;
 use crate::iterator::for_each_spectrum;
 use crate::model::Spectrum;
-use crate::mzdb::create_entity_cache;
 use crate::queries::get_pwiz_mzdb_version;
 
 fn test_db_path() -> PathBuf {

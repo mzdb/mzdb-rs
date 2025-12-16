@@ -20,10 +20,50 @@
 //! let xml = r#"<params><cvParams><cvParam accession="MS:1000511" value="1"/></cvParams></params>"#;
 //! let params = parse_param_tree(xml).unwrap();
 //! ```
+#![allow(unused)]
 
-use anyhow_ext::{anyhow, Result};
+use anyhow_ext::{Result};
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
+
+use crate::model::MzRange;
+
+// ============================================================================
+// PSI-MS Controlled Vocabulary Constants
+// ============================================================================
+
+// Data encoding
+//const PSI_MS_32_BIT_FLOAT: &str = "MS:1000521";
+//const PSI_MS_64_BIT_FLOAT: &str = "MS:1000523";
+
+// Acquisition
+//const ACQUISITION_PARAMETER: &str = "MS:1001954";
+
+// Isolation window
+const ISOLATION_WINDOW_TARGET_MZ: &str = "MS:1000827";
+const ISOLATION_WINDOW_LOWER_OFFSET: &str = "MS:1000828";
+const ISOLATION_WINDOW_UPPER_OFFSET: &str = "MS:1000829";
+
+// Selected ion
+const SELECTED_ION_MZ: &str = "MS:1000744";
+const CHARGE_STATE: &str = "MS:1000041";
+const PEAK_INTENSITY: &str = "MS:1000042";
+
+// Activation
+const COLLISION_ENERGY: &str = "MS:1000045";
+const COLLISION_INDUCED_DISSOCIATION: &str = "MS:1000133";
+const HCD: &str = "MS:1000422";
+const ETD: &str = "MS:1000598";
+const ECD: &str = "MS:1000599";
+const ETHCD: &str = "MS:1002631";
+const PQD: &str = "MS:1000435";
+
+// Scan parameters
+const SCAN_START_TIME: &str = "MS:1000016";
+const FILTER_STRING: &str = "MS:1000512";
+const ION_INJECTION_TIME: &str = "MS:1000927";
+const SCAN_WINDOW_LOWER_LIMIT: &str = "MS:1000501";
+const SCAN_WINDOW_UPPER_LIMIT: &str = "MS:1000500";
 
 // ============================================================================
 // Core CV/User Parameter Structures
@@ -522,8 +562,8 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
             {
                 let sw_cv_params = collect_cv_params(&sw_node);
                 scan_windows.push(ScanWindow {
-                    lower_limit: find_cv_param_f64(&sw_cv_params, "MS:1000501"),
-                    upper_limit: find_cv_param_f64(&sw_cv_params, "MS:1000500"),
+                    lower_limit: find_cv_param_f64(&sw_cv_params, SCAN_WINDOW_LOWER_LIMIT),
+                    upper_limit: find_cv_param_f64(&sw_cv_params, SCAN_WINDOW_UPPER_LIMIT),
                     cv_params: sw_cv_params,
                 });
             }
@@ -533,16 +573,16 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
             instrument_configuration_ref: scan_node
                 .attribute("instrumentConfigurationRef")
                 .map(String::from),
-            scan_start_time: find_cv_param_f64(&scan_cv_params, "MS:1000016"),
+            scan_start_time: find_cv_param_f64(&scan_cv_params, SCAN_START_TIME),
             time_unit: scan_cv_params
                 .iter()
-                .find(|p| p.accession == "MS:1000016")
+                .find(|p| p.accession == SCAN_START_TIME)
                 .and_then(|p| p.unit_name.clone()),
             filter_string: scan_cv_params
                 .iter()
-                .find(|p| p.accession == "MS:1000512")
+                .find(|p| p.accession == FILTER_STRING)
                 .and_then(|p| p.value.clone()),
-            ion_injection_time: find_cv_param_f64(&scan_cv_params, "MS:1000927"),
+            ion_injection_time: find_cv_param_f64(&scan_cv_params, ION_INJECTION_TIME),
             scan_windows,
             cv_params: scan_cv_params,
             user_params: scan_user_params,
@@ -598,9 +638,9 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
             .map(|iw_node| {
                 let cv_params = collect_cv_params(&iw_node);
                 IsolationWindow {
-                    target_mz: find_cv_param_f64(&cv_params, "MS:1000827"),
-                    lower_offset: find_cv_param_f64(&cv_params, "MS:1000828"),
-                    upper_offset: find_cv_param_f64(&cv_params, "MS:1000829"),
+                    target_mz: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_TARGET_MZ),
+                    lower_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_LOWER_OFFSET),
+                    upper_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_UPPER_OFFSET),
                     cv_params,
                 }
             });
@@ -617,9 +657,9 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
             {
                 let cv_params = collect_cv_params(&si_node);
                 selected_ions.push(SelectedIon {
-                    mz: find_cv_param_f64(&cv_params, "MS:1000744"),
-                    charge: find_cv_param_i32(&cv_params, "MS:1000041"),
-                    intensity: find_cv_param_f64(&cv_params, "MS:1000042"),
+                    mz: find_cv_param_f64(&cv_params, SELECTED_ION_MZ),
+                    charge: find_cv_param_i32(&cv_params, CHARGE_STATE),
+                    intensity: find_cv_param_f64(&cv_params, PEAK_INTENSITY),
                     cv_params,
                 });
             }
@@ -639,18 +679,18 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
                         // Common activation type accessions
                         matches!(
                             p.accession.as_str(),
-                            "MS:1000133" | // CID
-                            "MS:1000422" | // HCD
-                            "MS:1000598" | // ETD
-                            "MS:1000599" | // ECD
-                            "MS:1002631" | // EThcD
-                            "MS:1000435"   // PQD
+                            COLLISION_INDUCED_DISSOCIATION | // CID
+                            HCD | // HCD
+                            ETD | // ETD
+                            ECD | // ECD
+                            ETHCD | // EThcD
+                            PQD     // PQD
                         )
                     })
                     .and_then(|p| p.name.clone());
 
                 Activation {
-                    collision_energy: find_cv_param_f64(&cv_params, "MS:1000045"),
+                    collision_energy: find_cv_param_f64(&cv_params, COLLISION_ENERGY),
                     activation_type,
                     cv_params,
                 }
@@ -690,9 +730,9 @@ pub fn parse_product_list(xml: &str) -> Result<ProductList> {
             .map(|iw_node| {
                 let cv_params = collect_cv_params(&iw_node);
                 IsolationWindow {
-                    target_mz: find_cv_param_f64(&cv_params, "MS:1000827"),
-                    lower_offset: find_cv_param_f64(&cv_params, "MS:1000828"),
-                    upper_offset: find_cv_param_f64(&cv_params, "MS:1000829"),
+                    target_mz: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_TARGET_MZ),
+                    lower_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_LOWER_OFFSET),
+                    upper_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_UPPER_OFFSET),
                     cv_params,
                 }
             });
@@ -764,6 +804,42 @@ pub fn find_user_text(param_tree_xml: &str, name: &str) -> Option<String> {
         .iter()
         .find(|t| t.name == name)
         .map(|t| t.text.clone())
+}
+
+// ============================================================================
+// XML Parsing Helpers for DIA/SWATH
+// ============================================================================
+
+/// Parse a CV param float value from XML descendants
+pub fn parse_cv_param_f32_value(children: &mut roxmltree::Descendants, cv_param_ac: &str) -> Option<f32> {
+    children.find(|n| n.attribute("accession") == Some(cv_param_ac)).and_then(|n| {
+        n.attributes()
+            .find(|a| a.name().starts_with("value"))
+            .and_then(|attr| attr.value().parse::<f32>().ok())
+    })
+}
+
+/// Parse an isolation window from precursor_list XML
+pub fn parse_isolation_window_from_xml(prec_list_xml: &str) -> Option<MzRange> {
+    let xml_doc = roxmltree::Document::parse(prec_list_xml).ok()?;
+    let mut children = xml_doc.descendants();
+    
+    // MS:1000827 = isolation window target m/z
+    let target_mz = parse_cv_param_f32_value(&mut children, ISOLATION_WINDOW_TARGET_MZ)?;
+    
+    // Reset iterator for next search
+    let mut children = xml_doc.descendants();
+    // MS:1000828 = isolation window lower offset
+    let lower_offset = parse_cv_param_f32_value(&mut children, ISOLATION_WINDOW_LOWER_OFFSET).unwrap_or(0.0);
+    
+    let mut children = xml_doc.descendants();
+    // MS:1000829 = isolation window upper offset
+    let upper_offset = parse_cv_param_f32_value(&mut children, ISOLATION_WINDOW_UPPER_OFFSET).unwrap_or(0.0);
+    
+    Some(MzRange {
+        min_mz: (target_mz - lower_offset) as f64,
+        max_mz: (target_mz + upper_offset) as f64,
+    })
 }
 
 // ============================================================================

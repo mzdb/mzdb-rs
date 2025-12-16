@@ -477,7 +477,7 @@ mod query_tests {
     fn test_spectrum_headers_struct() {
         
         let db = open_test_db();
-        let cache = mzdb::mzdb::create_entity_cache(&db).unwrap();
+        let cache = mzdb::cache::create_entity_cache(&db).unwrap();
         
         for header in cache.spectrum_headers.iter().take(5) {
             println!("Spectrum {}: MS{}, time={:.2}, tic={:.0}",

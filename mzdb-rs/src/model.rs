@@ -27,15 +27,6 @@ pub const ACQUISITION_MODE_SRM: &str = "SRM (Single reaction monitoring) acquisi
 /// Unknown acquisition mode description
 pub const ACQUISITION_MODE_UNKNOWN: &str = "unknown acquisition mode";
 
-// PSI-MS controlled vocabulary accession numbers
-pub const PSI_MS_32_BIT_FLOAT: &str = "*0521";
-pub const PSI_MS_64_BIT_FLOAT: &str = "*0523";
-pub const ACQUISITION_PARAMETER: &str = "*1954";
-pub const ISOLATION_WINDOW_TARGET_MZ: &str = "MS:*0827";
-pub const ISOLATION_WINDOW_LOWER_OFFSET: &str = "MS:*0828";
-pub const ISOLATION_WINDOW_UPPER_OFFSET: &str = "MS:*0829";
-pub const SELECTED_ION_MZ: &str = "MS:*0744";
-
 /// Mass spectrometry acquisition mode
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AcquisitionMode {
@@ -504,7 +495,7 @@ pub enum XicMethod {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub struct IsolationWindow {
+pub struct MzRange {
     pub min_mz: f64,
     pub max_mz: f64,
 }

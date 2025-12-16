@@ -2,8 +2,8 @@
 //!
 //! These tests require a test mzDB file at `./mzdb-rs/data/small.mzDB`
 
+use mzdb::cache::create_entity_cache;
 use mzdb::model::*;
-use mzdb::mzdb::create_entity_cache;
 use mzdb::queries::*;
 use mzdb::iterator::*;
 use rusqlite::Connection;
