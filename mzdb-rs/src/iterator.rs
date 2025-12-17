@@ -6,7 +6,7 @@
 //! # Example
 //! ```no_run
 //! use mzdb::iterator::for_each_spectrum;
-//! use mzdb::mzdb::create_entity_cache;
+//! use mzdb::cache::create_entity_cache;
 //! use rusqlite::Connection;
 //!
 //! let db = Connection::open("file.mzDB").unwrap();
@@ -20,6 +20,7 @@
 
 use anyhow::*;
 use anyhow_ext::Context;
+use fallible_iterator::FallibleIterator;
 use itertools::Itertools;
 use rusqlite::{Connection, Statement};
 
@@ -218,3 +219,205 @@ fn bb_row_buffer_to_spectrum_buffer(
 
     Ok(())
 }
+
+// ============================================================================
+// Fallible Iterator API
+// ============================================================================
+
+/// Iterator that yields spectra from an mzDB file using fallible_iterator
+///
+/// This iterator provides a true streaming API that processes spectra on-demand
+/// without loading them all into memory at once.
+///
+/// # Example
+/// ```no_run
+/// use mzdb::iterator::SpectrumIterator;
+/// use mzdb::cache::create_entity_cache;
+/// use rusqlite::Connection;
+/// use fallible_iterator::FallibleIterator;
+///
+/// let db = Connection::open("file.mzDB").unwrap();
+/// let cache = create_entity_cache(&db).unwrap();
+///
+/// let mut iter = SpectrumIterator::new(&db, &cache, Some(1)).unwrap();
+/// while let Some(spectrum) = iter.next().unwrap() {
+///     println!("Spectrum: {}", spectrum.header.id);
+/// }
+/// ```
+pub struct SpectrumIterator<'a> {
+    stmt: Statement<'a>,
+    entity_cache: &'a EntityCache,
+    bb_row_buffer: Vec<BoundingBox>,
+    spectrum_buffer: Vec<Spectrum>,
+    spectrum_buffer_idx: usize,
+    prev_first_spectrum_id: Option<i64>,
+    rows: Option<rusqlite::Rows<'a>>,
+    finished: bool,
+}
+
+impl<'a> SpectrumIterator<'a> {
+    /// Create a new spectrum iterator
+    ///
+    /// # Arguments
+    /// * `db` - Database connection
+    /// * `entity_cache` - Pre-loaded entity cache
+    /// * `ms_level` - Optional MS level filter (e.g., Some(1) for MS1 only, None for all levels)
+    pub fn new(
+        db: &'a Connection,
+        entity_cache: &'a EntityCache,
+        ms_level: Option<u8>,
+    ) -> Result<Self> {
+        let stmt = match ms_level {
+            None => create_bb_iter_stmt_for_all_ms_levels(db).dot()?,
+            Some(level) => create_bb_iter_stmt_for_single_ms_level(db, level).dot()?,
+        };
+
+        Ok(Self {
+            stmt,
+            entity_cache,
+            bb_row_buffer: Vec::with_capacity(100),
+            spectrum_buffer: Vec::with_capacity(100),
+            spectrum_buffer_idx: 0,
+            prev_first_spectrum_id: None,
+            rows: None,
+            finished: false,
+        })
+    }
+
+    fn ensure_rows(&mut self) -> Result<()> {
+        if self.rows.is_none() {
+            // Safety: We need to extend the lifetime of the rows iterator
+            // The rows borrow from stmt, and stmt lives as long as self
+            // This is safe because:
+            // 1. stmt is owned by Self and lives for 'a
+            // 2. rows will be dropped when Self is dropped
+            // 3. rows will never outlive stmt
+            let rows = unsafe {
+                std::mem::transmute::<rusqlite::Rows<'_>, rusqlite::Rows<'a>>(
+                    self.stmt.query([]).dot()?
+                )
+            };
+            self.rows = Some(rows);
+        }
+        Ok(())
+    }
+
+    fn read_next_bb(&mut self) -> Result<Option<BoundingBox>> {
+        self.ensure_rows()?;
+        
+        if let Some(ref mut rows) = self.rows {
+            if let Some(row) = rows.next().dot()? {
+                return Ok(Some(BoundingBox {
+                    id: row.get(0)?,
+                    first_spectrum_id: row.get(3)?,
+                    last_spectrum_id: row.get(4)?,
+                    run_slice_id: row.get(2)?,
+                    blob_data: row.get(1)?,
+                }));
+            }
+        }
+        
+        Ok(None)
+    }
+
+    fn process_bb_buffer(&mut self) -> Result<()> {
+        if self.bb_row_buffer.is_empty() {
+            return Ok(());
+        }
+
+        let mut temp_buffer = Vec::with_capacity(100);
+        bb_row_buffer_to_spectrum_buffer(
+            &self.bb_row_buffer,
+            &mut temp_buffer,
+            self.entity_cache,
+        )
+        .dot()?;
+        
+        self.bb_row_buffer.clear();
+        temp_buffer.sort_by(|s1, s2| s1.header.id.cmp(&s2.header.id));
+        self.spectrum_buffer.extend(temp_buffer);
+
+        Ok(())
+    }
+
+    fn fill_spectrum_buffer(&mut self) -> Result<bool> {
+        // Clear previous buffer
+        self.spectrum_buffer.clear();
+        self.spectrum_buffer_idx = 0;
+
+        // Process bounding boxes until we have spectra to return
+        while let Some(bb) = self.read_next_bb()? {
+            let spec_idx = (bb.first_spectrum_id - 1) as usize;
+            let bb_first_spectrum_header = self
+                .entity_cache
+                .spectrum_headers
+                .get(spec_idx)
+                .ok_or_else(|| anyhow!("spectrum header not found at index {}", spec_idx))?;
+
+            let spec_ms_level = bb_first_spectrum_header.ms_level;
+
+            let is_new_spectrum = match self.prev_first_spectrum_id {
+                None => false,
+                Some(prev_id) => bb.first_spectrum_id != prev_id,
+            };
+
+            if is_new_spectrum {
+                self.process_bb_buffer().dot()?;
+
+                // When encountering MS1, we have collected one cycle
+                if spec_ms_level == 1 && !self.spectrum_buffer.is_empty() {
+                    self.prev_first_spectrum_id = Some(bb.first_spectrum_id);
+                    self.bb_row_buffer.push(bb);
+                    return Ok(true);
+                }
+            }
+
+            self.prev_first_spectrum_id = Some(bb.first_spectrum_id);
+            self.bb_row_buffer.push(bb);
+        }
+
+        // Process any remaining bounding boxes
+        if !self.bb_row_buffer.is_empty() {
+            self.process_bb_buffer().dot()?;
+        }
+
+        self.finished = true;
+        Ok(!self.spectrum_buffer.is_empty())
+    }
+}
+
+impl<'a> FallibleIterator for SpectrumIterator<'a> {
+    type Item = Spectrum;
+    type Error = anyhow::Error;
+
+    fn next(&mut self) -> Result<Option<Self::Item>> {
+        // Return buffered spectra first
+        if self.spectrum_buffer_idx < self.spectrum_buffer.len() {
+            let spectrum = self.spectrum_buffer[self.spectrum_buffer_idx].clone();
+            self.spectrum_buffer_idx += 1;
+            return Ok(Some(spectrum));
+        }
+
+        // If we've exhausted the buffer and we're finished, return None
+        if self.finished {
+            return Ok(None);
+        }
+
+        // Fill the buffer with the next batch of spectra
+        let has_spectra = self.fill_spectrum_buffer()?;
+
+        if !has_spectra {
+            return Ok(None);
+        }
+
+        // Return the first spectrum from the newly filled buffer
+        if !self.spectrum_buffer.is_empty() {
+            let spectrum = self.spectrum_buffer[0].clone();
+            self.spectrum_buffer_idx = 1;
+            Ok(Some(spectrum))
+        } else {
+            Ok(None)
+        }
+    }
+}
+

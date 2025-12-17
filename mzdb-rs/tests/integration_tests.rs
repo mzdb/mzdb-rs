@@ -6,6 +6,8 @@ use mzdb::cache::create_entity_cache;
 use mzdb::model::*;
 use mzdb::queries::*;
 use mzdb::iterator::*;
+use mzdb::MzDbReader;
+use fallible_iterator::FallibleIterator;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -271,4 +273,134 @@ mod model_tests {
         assert!(data.lwhm_array.is_empty());
         assert!(data.rwhm_array.is_empty());
     }
+}
+
+// Tests for the new fallible iterator API
+#[test]
+fn test_fallible_iterator_all_spectra() {
+    let db = open_test_db();
+    let cache = create_entity_cache(&db).expect("Failed to create cache");
+    
+    let mut iter = SpectrumIterator::new(&db, &cache, None)
+        .expect("Failed to create iterator");
+    
+    let mut spectrum_count = 0;
+    let mut ms1_count = 0;
+    let mut ms2_count = 0;
+    
+    while let Some(spectrum) = iter.next().expect("Failed to get next spectrum") {
+        spectrum_count += 1;
+        match spectrum.header.ms_level {
+            1 => ms1_count += 1,
+            2 => ms2_count += 1,
+            _ => {}
+        }
+        
+        // Basic validation
+        assert!(spectrum.header.id > 0);
+        assert!(spectrum.header.time >= 0.0);
+        assert_eq!(spectrum.data.peaks_count, spectrum.data.mz_array.len());
+    }
+    
+    assert!(spectrum_count > 0, "Should have spectra");
+    println!("Fallible iterator - Total: {}, MS1: {}, MS2: {}", spectrum_count, ms1_count, ms2_count);
+}
+
+#[test]
+fn test_fallible_iterator_ms1_only() {
+    let db = open_test_db();
+    let cache = create_entity_cache(&db).expect("Failed to create cache");
+    
+    let mut iter = SpectrumIterator::new(&db, &cache, Some(1))
+        .expect("Failed to create iterator");
+    
+    let mut count = 0;
+    
+    while let Some(spectrum) = iter.next().expect("Failed to get next spectrum") {
+        assert_eq!(spectrum.header.ms_level, 1, "Should only get MS1 spectra");
+        count += 1;
+    }
+    
+    assert!(count > 0, "Should have MS1 spectra");
+    println!("Fallible iterator MS1 - Count: {}", count);
+}
+
+#[test]
+fn test_fallible_iterator_with_methods() {
+    let db = open_test_db();
+    let cache = create_entity_cache(&db).expect("Failed to create cache");
+    
+    let iter = SpectrumIterator::new(&db, &cache, None)
+        .expect("Failed to create iterator");
+    
+    // Test count method
+    let count = iter.count().expect("Failed to count spectra");
+    assert!(count > 0, "Should have spectra");
+    println!("Total spectra count: {}", count);
+    
+    // Create a new iterator for fold
+    let iter2 = SpectrumIterator::new(&db, &cache, Some(1))
+        .expect("Failed to create iterator");
+    
+    // Test fold to calculate total peaks
+    let total_peaks = iter2.fold(0, |acc, spectrum| {
+        Ok(acc + spectrum.data.peaks_count)
+    }).expect("Failed to fold");
+    
+    println!("Total peaks in MS1 spectra: {}", total_peaks);
+    assert!(total_peaks > 0, "Should have peaks");
+}
+
+#[test]
+fn test_mzdb_reader_iter_spectra() {
+    let reader = MzDbReader::open(test_db_path().to_str().unwrap())
+        .expect("Failed to open MzDbReader");
+    
+    let mut iter = reader.iter_spectra(None).expect("Failed to create iterator");
+    
+    let mut count = 0;
+    while let Some(spectrum) = iter.next().expect("Failed to get next spectrum") {
+        count += 1;
+        assert!(spectrum.header.id > 0);
+    }
+    
+    assert!(count > 0, "Should have spectra");
+    println!("MzDbReader iter_spectra - Count: {}", count);
+}
+
+#[test]
+fn test_mzdb_reader_for_each_spectrum() {
+    let reader = MzDbReader::open(test_db_path().to_str().unwrap())
+        .expect("Failed to open MzDbReader");
+    
+    let mut count = 0;
+    reader.for_each_spectrum(Some(1), |spectrum| {
+        count += 1;
+        assert_eq!(spectrum.header.ms_level, 1);
+        Ok(())
+    }).expect("Failed to iterate spectra");
+    
+    assert!(count > 0, "Should have MS1 spectra");
+    println!("MzDbReader for_each_spectrum - Count: {}", count);
+}
+
+#[test]
+fn test_fallible_iterator_collect() {
+    let db = open_test_db();
+    let cache = create_entity_cache(&db).expect("Failed to create cache");
+    
+    let iter = SpectrumIterator::new(&db, &cache, Some(1))
+        .expect("Failed to create iterator");
+    
+    // Collect all MS1 spectra into a Vec
+    let spectra: Vec<Spectrum> = iter.collect().expect("Failed to collect spectra");
+    
+    assert!(spectra.len() > 0, "Should have collected MS1 spectra");
+    
+    // Verify they're all MS1
+    for spectrum in &spectra {
+        assert_eq!(spectrum.header.ms_level, 1);
+    }
+    
+    println!("Collected {} MS1 spectra", spectra.len());
 }

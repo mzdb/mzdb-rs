@@ -16,6 +16,7 @@
 //!
 //! ```no_run
 //! use mzdb::MzDbReader;
+//! use fallible_iterator::FallibleIterator;
 //!
 //! let reader = MzDbReader::open("path/to/file.mzDB").unwrap();
 //!
@@ -23,7 +24,8 @@
 //! println!("mzDB version: {:?}", reader.get_version());
 //!
 //! // Iterate over spectra
-//! for spectrum in reader.iter_spectra(None).unwrap() {
+//! let mut iter = reader.iter_spectra(None).unwrap();
+//! while let Some(spectrum) = iter.next().unwrap() {
 //!     println!("Spectrum {}: {} peaks", spectrum.header.id, spectrum.data.peaks_count);
 //! }
 //!

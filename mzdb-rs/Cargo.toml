@@ -12,6 +12,7 @@ categories = ["science", "database"]
 anyhow = "1.0"
 anyhow_ext = "0.2"
 bytes = "1.5"
+fallible-iterator = "0.3"
 itertools = "0.13"
 rusqlite = { version = "0.32", features = ["blob", "bundled"] }
 log = "0.4"

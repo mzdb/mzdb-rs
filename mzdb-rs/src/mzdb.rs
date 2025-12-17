@@ -9,7 +9,7 @@ use rusqlite::Connection;
 
 use crate::cache::create_entity_cache;
 use crate::chromatogram::*;
-use crate::iterator::for_each_spectrum;
+use crate::iterator::{for_each_spectrum as iterator_for_each_spectrum, SpectrumIterator};
 use crate::metadata::*;
 use crate::model::*;
 use crate::queries::*;
@@ -109,14 +109,54 @@ impl MzDbReader {
         get_spectrum(&self.connection, spectrum_id, &self.entity_cache)
     }
 
-    /// Iterate over all spectra, optionally filtering by MS level
-    pub fn iter_spectra(&self, ms_level: Option<u8>) -> Result<Vec<Spectrum>> {
-        let mut spectra = Vec::new();
-        for_each_spectrum(&self.connection, &self.entity_cache, ms_level, |s| {
-            spectra.push(s.clone());
-            Ok(())
-        })?;
-        Ok(spectra)
+    /// Iterate over all spectra using a callback function
+    ///
+    /// This is a callback-based approach that processes each spectrum in order.
+    /// For a more idiomatic iterator-based approach, use `iter_spectra()`.
+    ///
+    /// # Arguments
+    /// * `ms_level` - Optional MS level filter (e.g., Some(1) for MS1 only, None for all levels)
+    /// * `on_each_spectrum` - Callback function called for each spectrum
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mzdb::MzDbReader;
+    ///
+    /// let reader = MzDbReader::open("file.mzDB").unwrap();
+    /// reader.for_each_spectrum(Some(1), |spectrum| {
+    ///     println!("MS1 spectrum: {}", spectrum.header.id);
+    ///     Ok(())
+    /// }).unwrap();
+    /// ```
+    pub fn for_each_spectrum<F>(&self, ms_level: Option<u8>, on_each_spectrum: F) -> Result<()>
+    where
+        F: FnMut(&Spectrum) -> Result<()>,
+    {
+        iterator_for_each_spectrum(&self.connection, &self.entity_cache, ms_level, on_each_spectrum)
+    }
+
+    /// Iterate over all spectra using a fallible iterator
+    ///
+    /// This returns a fallible iterator that yields spectra. This is a more idiomatic
+    /// Rust approach compared to the callback-based `for_each_spectrum()`.
+    ///
+    /// # Arguments
+    /// * `ms_level` - Optional MS level filter (e.g., Some(1) for MS1 only, None for all levels)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mzdb::MzDbReader;
+    /// use fallible_iterator::FallibleIterator;
+    ///
+    /// let reader = MzDbReader::open("file.mzDB").unwrap();
+    /// let mut iter = reader.iter_spectra(Some(1)).unwrap();
+    ///
+    /// while let Some(spectrum) = iter.next().unwrap() {
+    ///     println!("MS1 spectrum: {}", spectrum.header.id);
+    /// }
+    /// ```
+    pub fn iter_spectra(&self, ms_level: Option<u8>) -> Result<SpectrumIterator> {
+        SpectrumIterator::new(&self.connection, &self.entity_cache, ms_level)
     }
 
     /// Get the maximum MS level in the file
