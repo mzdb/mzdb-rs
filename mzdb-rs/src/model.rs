@@ -294,6 +294,34 @@ impl SpectrumData {
         mz * ppm / 1_000_000.0
     }
 
+    /// Get m/z value at a specific index
+    #[cfg(feature = "writer")]
+    pub fn get_mz_at(&self, index: usize) -> Result<f64, anyhow::Error> {
+        self.mz_array.get(index)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds for m/z array", index))
+    }
+
+    /// Get intensity value at a specific index
+    #[cfg(feature = "writer")]
+    pub fn get_intensity_at(&self, index: usize) -> Result<f32, anyhow::Error> {
+        self.intensity_array.get(index)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds for intensity array", index))
+    }
+
+    /// Get left HWHM value at a specific index
+    #[cfg(feature = "writer")]
+    pub fn get_left_hwhm_at(&self, index: usize) -> Option<f32> {
+        self.lwhm_array.get(index).copied()
+    }
+
+    /// Get right HWHM value at a specific index
+    #[cfg(feature = "writer")]
+    pub fn get_right_hwhm_at(&self, index: usize) -> Option<f32> {
+        self.rwhm_array.get(index).copied()
+    }
+
     /// Find the nearest peak to a given m/z within tolerance
     pub fn get_nearest_peak(&self, mz: f64, mz_tol_ppm: f64, rt: f32) -> Option<XicPeak> {
         if self.peaks_count == 0 {
@@ -494,10 +522,28 @@ pub enum XicMethod {
     Nearest = 1,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 pub struct MzRange {
     pub min_mz: f64,
     pub max_mz: f64,
+}
+
+// Manual PartialEq using bit comparison for HashMap compatibility
+impl PartialEq for MzRange {
+    fn eq(&self, other: &Self) -> bool {
+        self.min_mz.to_bits() == other.min_mz.to_bits() &&
+        self.max_mz.to_bits() == other.max_mz.to_bits()
+    }
+}
+
+impl Eq for MzRange {}
+
+#[cfg(feature = "writer")]
+impl std::hash::Hash for MzRange {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.min_mz.to_bits().hash(state);
+        self.max_mz.to_bits().hash(state);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

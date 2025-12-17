@@ -10,6 +10,9 @@ mod query_utils;
 mod rtree;
 mod xml;
 
+#[cfg(feature = "writer")]
+mod writer;
+
 use anyhow_ext::*;
 use rusqlite::Connection;
 use std::path::PathBuf;

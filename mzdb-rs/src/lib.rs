@@ -60,6 +60,9 @@ pub mod query_utils;
 pub mod rtree;
 pub mod xml;
 
+#[cfg(feature = "writer")]
+pub mod writer;
+
 // Re-export main types for convenience
 pub use model::{
     AcquisitionMode, BBSizes, BoundingBox, BoundingBoxIndex, ByteOrder, DataEncoding,
