@@ -283,7 +283,7 @@ pub struct InstrumentConfiguration {
     /// Unique name for this configuration
     pub name: String,
     /// XML param tree
-    pub param_tree: String,
+    pub param_tree: Option<String>,
     /// XML list of instrument components
     pub component_list: String,
     /// Reference to shared param tree

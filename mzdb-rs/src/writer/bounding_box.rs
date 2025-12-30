@@ -316,7 +316,7 @@ fn write_peak_data(
             PeakEncoding::HighRes | PeakEncoding::NoLoss => {
                 let mz = spectrum_data.get_mz_at(i)?;
                 let mz_bytes = if swap_bytes {
-                    mz.swap_bytes().to_ne_bytes()
+                    mz.to_bits().swap_bytes().to_ne_bytes()
                 } else {
                     mz.to_ne_bytes()
                 };

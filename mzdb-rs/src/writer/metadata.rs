@@ -53,7 +53,7 @@ impl WriterMetadata {
                 id: 1,
                 name: "any2mzdb".to_string(),
                 // FIXME: this is a hack, we inject here the pwiz-mzdb version for mzdb-access backward compat, we should update mzdb-access instead
-                version: "0.9.10",
+                version: "0.9.10".to_string(),
                 //version: env!("CARGO_PKG_VERSION").to_string(),
                 param_tree: "".to_string(),
                 shared_param_tree_id: None,
@@ -71,7 +71,7 @@ impl WriterMetadata {
                 param_tree: None,
                 component_list: "".to_string(),
                 shared_param_tree_id: None,
-                software_id: Some(1),
+                software_id: 1,
             }],
             data_processings: vec![],
             processing_methods: vec![],
@@ -85,6 +85,7 @@ pub(crate) fn insert_metadata(
     metadata: &WriterMetadata,
     bb_sizes: &BBSizes,
     is_dia: bool,
+    mzdb_param_tree: &str,
 ) -> Result<()> {
     // Insert data processings
     insert_data_processings(conn, metadata)?;
@@ -105,7 +106,7 @@ pub(crate) fn insert_metadata(
     insert_instrument_configurations(conn, metadata)?;
     
     // Insert mzDB header
-    insert_mzdb_header(conn, metadata, bb_sizes)?;
+    insert_mzdb_header(conn, metadata, bb_sizes, mzdb_param_tree)?;
     
     // Insert runs
     insert_runs(conn, metadata, is_dia)?;
@@ -263,22 +264,30 @@ fn insert_mzdb_header(
     conn: &Connection,
     _metadata: &WriterMetadata,
     bb_sizes: &BBSizes,
+    mzdb_param_tree: &str,
 ) -> Result<()> {
     let mut stmt = conn.prepare("INSERT INTO mzdb VALUES (?, ?, ?, ?, ?)")?;
     
-    // Create param_tree XML with BB sizes
-    let param_tree = format!(
-        r#"<paramTree>
+    // Create param_tree XML with BB sizes wrapped in <userParams>
+    let mut param_tree = format!(
+        r#"<paramTree><userParams>
 <userParam name="ms1_bb_mz_width" value="{}" type="xsd:float"/>
 <userParam name="ms1_bb_time_width" value="{}" type="xsd:float"/>
 <userParam name="msn_bb_mz_width" value="{}" type="xsd:float"/>
 <userParam name="msn_bb_time_width" value="{}" type="xsd:float"/>
-</paramTree>"#,
+</userParams>"#,
         bb_sizes.bb_mz_height_ms1,
         bb_sizes.bb_rt_width_ms1,
         bb_sizes.bb_mz_height_msn,
         bb_sizes.bb_rt_width_msn,
     );
+    
+    // Add method texts if provided (legacy instrumentMethods for backward compatibility)
+    if !mzdb_param_tree.is_empty() {
+        param_tree.push_str(mzdb_param_tree);
+    }
+    
+    param_tree.push_str("</paramTree>");
     
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

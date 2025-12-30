@@ -149,7 +149,7 @@ pub struct MzdbParamTree {
 }
 
 /// Data acquisition mode for spectra
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum DataMode {
     /// Profile (continuous) data
@@ -161,7 +161,7 @@ pub enum DataMode {
 }
 
 /// Peak encoding format specifying byte sizes
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum PeakEncoding {
     /// Low resolution: 32-bit m/z (8 bytes per peak)
@@ -173,7 +173,7 @@ pub enum PeakEncoding {
 }
 
 /// Byte order for binary data
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ByteOrder {
     /// Big-endian byte order
     BigEndian,

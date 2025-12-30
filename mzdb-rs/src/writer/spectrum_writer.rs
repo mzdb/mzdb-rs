@@ -171,8 +171,8 @@ pub(crate) fn insert_spectrum(
 }
 
 /// Get or create a bounding box and add a new spectrum slice
-fn get_bb_with_next_spectrum_slice(
-    writer: &mut MzDbWriter,
+fn get_bb_with_next_spectrum_slice<'a>(
+    writer: &'a mut MzDbWriter,
     spectrum: &Spectrum,
     spectrum_id: i64,
     spectrum_time: f32,
@@ -182,7 +182,7 @@ fn get_bb_with_next_spectrum_slice(
     peak_idx: usize,
     min_mz: f64,
     max_mz: f64,
-) -> Result<&mut crate::writer::bounding_box::BoundingBoxWriter> {
+) -> Result<&'a mut crate::writer::bounding_box::BoundingBoxWriter> {
     let run_slice_id = if let Some(id) = writer.run_slice_factory.get_run_slice_id(ms_level, min_mz, max_mz) {
         id
     } else {

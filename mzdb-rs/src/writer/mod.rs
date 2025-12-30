@@ -56,6 +56,9 @@ mod run_slice;
 mod metadata;
 mod spectrum_writer;
 
+#[cfg(feature = "thermo-writer")]
+pub mod thermo;
+
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Statement};
 use std::path::Path;
@@ -92,6 +95,9 @@ pub struct MzDbWriter {
     
     /// Whether this is DIA/SWATH data
     is_dia: bool,
+    
+    /// mzDB table param_tree (for method texts)
+    mzdb_param_tree: String,
     
     /// Model version (currently 0.7)
     model_version: f32,
@@ -134,6 +140,7 @@ impl MzDbWriter {
         metadata: WriterMetadata,
         bb_sizes: BBSizes,
         is_dia: bool,
+        mzdb_param_tree: String,
     ) -> Result<Self> {
         Ok(Self {
             connection: None,
@@ -141,6 +148,7 @@ impl MzDbWriter {
             metadata,
             bb_sizes,
             is_dia,
+            mzdb_param_tree,
             model_version: 0.7,
             inserted_spectra_count: 0,
             bb_cache: BoundingBoxCache::new(bb_sizes),
@@ -191,7 +199,7 @@ impl MzDbWriter {
         // which is complex in Rust. We'll use direct execute calls instead.
         
         // Insert metadata
-        metadata::insert_metadata(&mut conn, &self.metadata, &self.bb_sizes, self.is_dia)
+        metadata::insert_metadata(&mut conn, &self.metadata, &self.bb_sizes, self.is_dia, &self.mzdb_param_tree)
             .context("Failed to insert metadata")?;
         
         self.connection = Some(conn);
@@ -321,6 +329,7 @@ pub struct MzDbWriterBuilder {
     metadata: Option<WriterMetadata>,
     bb_sizes: Option<BBSizes>,
     is_dia: bool,
+    mzdb_param_tree: String,
 }
 
 impl MzDbWriterBuilder {
@@ -331,6 +340,7 @@ impl MzDbWriterBuilder {
             metadata: None,
             bb_sizes: None,
             is_dia: false,
+            mzdb_param_tree: String::new(),
         }
     }
     
@@ -352,6 +362,12 @@ impl MzDbWriterBuilder {
         self
     }
     
+    /// Set mzDB param_tree (for method texts, etc.)
+    pub fn mzdb_param_tree(mut self, param_tree: String) -> Self {
+        self.mzdb_param_tree = param_tree;
+        self
+    }
+    
     /// Build the writer
     pub fn build(self) -> Result<MzDbWriter> {
         let metadata = self.metadata
@@ -364,7 +380,7 @@ impl MzDbWriterBuilder {
                 bb_rt_width_msn: 60.0,
             });
         
-        MzDbWriter::new(self.db_path, metadata, bb_sizes, self.is_dia)
+        MzDbWriter::new(self.db_path, metadata, bb_sizes, self.is_dia, self.mzdb_param_tree)
     }
 }
 
