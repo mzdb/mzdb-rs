@@ -56,7 +56,7 @@ mod run_slice;
 mod metadata;
 mod spectrum_writer;
 
-#[cfg(feature = "thermo-writer")]
+#[cfg(feature = "thermo2mzdb")]
 pub mod thermo;
 
 use anyhow::{Context, Result};

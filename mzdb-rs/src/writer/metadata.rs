@@ -121,7 +121,7 @@ fn insert_data_processings(conn: &Connection, metadata: &WriterMetadata) -> Resu
     let mut dp_names = std::collections::HashSet::new();
     
     for dp in &metadata.data_processings {
-        dp_names.insert(&dp.name);
+        dp_names.insert(dp.name.as_str());
     }
     
     if dp_names.is_empty() {

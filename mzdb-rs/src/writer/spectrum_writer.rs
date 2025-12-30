@@ -65,7 +65,7 @@ pub(crate) fn insert_spectrum(
             isolation_window_opt,
             0,
             0.0,
-            mz_inc as f32,
+            mz_inc,
         )?;
         bb_first_spectrum_id = bb.spectrum_ids.first().copied().unwrap_or(0);
     } else {
