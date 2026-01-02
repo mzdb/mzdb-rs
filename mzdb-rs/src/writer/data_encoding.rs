@@ -74,9 +74,9 @@ pub(crate) fn insert_data_encodings(
         };
         
         let mode_str = match encoding.mode {
-            DataMode::Profile => "PROFILE",
-            DataMode::Centroid => "CENTROID",
-            DataMode::Fitted => "FITTED",
+            DataMode::Profile => "profile",
+            DataMode::Centroid => "centroid",
+            DataMode::Fitted => "fitted",
         };
         
         let byte_order_str = match encoding.byte_order {

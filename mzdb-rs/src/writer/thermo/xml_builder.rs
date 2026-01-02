@@ -4,10 +4,19 @@
 
 use anyhow::Result;
 use thernio::raw::{RawFile, Analyzer, ActivationType};
-use xmltree::{Element, XMLNode};
+use xmltree::{Element, XMLNode, EmitterConfig};
+
+/// Write an XML element to a string without XML declaration
+fn element_to_string(element: &Element) -> Result<String> {
+    let mut output = Vec::new();
+    let config = EmitterConfig::new()
+        .write_document_declaration(false);
+    element.write_with_config(&mut output, config)?;
+    Ok(String::from_utf8(output)?)
+}
 
 /// Build component list XML for instrument configuration
-pub(crate) fn build_component_list(raw: &RawFile) -> Result<String> {
+pub(crate) fn build_component_list(raw: &mut RawFile) -> Result<String> {
     let mut root = Element::new("componentList");
     root.attributes.insert("count".to_string(), "3".to_string());
     
@@ -62,9 +71,7 @@ pub(crate) fn build_component_list(raw: &RawFile) -> Result<String> {
     root.children.push(XMLNode::Element(detector));
     
     // Convert to string
-    let mut output = Vec::new();
-    root.write(&mut output)?;
-    Ok(String::from_utf8(output)?)
+    element_to_string(&root)
 }
 
 /// Build scan list XML for a spectrum
@@ -96,18 +103,17 @@ pub(crate) fn build_scan_list(scan_number: i32, retention_time: f64) -> Result<S
     
     root.children.push(XMLNode::Element(scan));
     
-    let mut output = Vec::new();
-    root.write(&mut output)?;
-    Ok(String::from_utf8(output)?)
+    element_to_string(&root)
 }
 
 /// Build precursor list XML for MS2+ spectra
 pub(crate) fn build_precursor_list(
     precursor_mzs: &[f64],
     precursor_charge: Option<i32>,
-    isolation_width: f64,
+    collision_energy: Option<f64>,
     activation_type: &str,
-    collision_energy: f64,
+    isolation_width: Option<f64>,
+    isolation_offset: Option<f64>,
 ) -> Result<String> {
     let mut root = Element::new("precursorList");
     root.attributes.insert("count".to_string(), "1".to_string());
@@ -129,27 +135,33 @@ pub(crate) fn build_precursor_list(
         cv_target.attributes.insert("unitName".to_string(), "m/z".to_string());
         iso_window.children.push(XMLNode::Element(cv_target));
         
-        // Lower offset
-        let mut cv_lower = Element::new("cvParam");
-        cv_lower.attributes.insert("cvRef".to_string(), "MS".to_string());
-        cv_lower.attributes.insert("accession".to_string(), "MS:1000828".to_string());
-        cv_lower.attributes.insert("name".to_string(), "isolation window lower offset".to_string());
-        cv_lower.attributes.insert("value".to_string(), format!("{:.2}", isolation_width / 2.0));
-        cv_lower.attributes.insert("unitCvRef".to_string(), "MS".to_string());
-        cv_lower.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
-        cv_lower.attributes.insert("unitName".to_string(), "m/z".to_string());
-        iso_window.children.push(XMLNode::Element(cv_lower));
-        
-        // Upper offset
-        let mut cv_upper = Element::new("cvParam");
-        cv_upper.attributes.insert("cvRef".to_string(), "MS".to_string());
-        cv_upper.attributes.insert("accession".to_string(), "MS:1000829".to_string());
-        cv_upper.attributes.insert("name".to_string(), "isolation window upper offset".to_string());
-        cv_upper.attributes.insert("value".to_string(), format!("{:.2}", isolation_width / 2.0));
-        cv_upper.attributes.insert("unitCvRef".to_string(), "MS".to_string());
-        cv_upper.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
-        cv_upper.attributes.insert("unitName".to_string(), "m/z".to_string());
-        iso_window.children.push(XMLNode::Element(cv_upper));
+        // Add isolation window lower/upper offset if width is available
+        if let Some(width) = isolation_width {
+            let offset = isolation_offset.unwrap_or(0.0);
+            let half_width = width / 2.0;
+            
+            // Lower offset (MS:1000828)
+            let mut cv_lower = Element::new("cvParam");
+            cv_lower.attributes.insert("cvRef".to_string(), "MS".to_string());
+            cv_lower.attributes.insert("accession".to_string(), "MS:1000828".to_string());
+            cv_lower.attributes.insert("name".to_string(), "isolation window lower offset".to_string());
+            cv_lower.attributes.insert("value".to_string(), format!("{:.6}", half_width - offset));
+            cv_lower.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+            cv_lower.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+            cv_lower.attributes.insert("unitName".to_string(), "m/z".to_string());
+            iso_window.children.push(XMLNode::Element(cv_lower));
+            
+            // Upper offset (MS:1000829)
+            let mut cv_upper = Element::new("cvParam");
+            cv_upper.attributes.insert("cvRef".to_string(), "MS".to_string());
+            cv_upper.attributes.insert("accession".to_string(), "MS:1000829".to_string());
+            cv_upper.attributes.insert("name".to_string(), "isolation window upper offset".to_string());
+            cv_upper.attributes.insert("value".to_string(), format!("{:.6}", half_width + offset));
+            cv_upper.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+            cv_upper.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+            cv_upper.attributes.insert("unitName".to_string(), "m/z".to_string());
+            iso_window.children.push(XMLNode::Element(cv_upper));
+        }
     }
     
     precursor.children.push(XMLNode::Element(iso_window));
@@ -186,45 +198,49 @@ pub(crate) fn build_precursor_list(
         precursor.children.push(XMLNode::Element(selected_ion_list));
     }
     
-    // Activation
-    let mut activation = Element::new("activation");
-    
-    // Activation method
-    let (act_accession, act_name) = match activation_type {
-        "CID" => ("MS:1000133", "collision-induced dissociation"),
-        "HCD" => ("MS:1000422", "beam-type collision-induced dissociation"),
-        "ETD" => ("MS:1000598", "electron transfer dissociation"),
-        "ECD" => ("MS:1000250", "electron capture dissociation"),
-        _ => ("MS:1000133", "collision-induced dissociation"),
-    };
-    
-    let mut cv_act = Element::new("cvParam");
-    cv_act.attributes.insert("cvRef".to_string(), "MS".to_string());
-    cv_act.attributes.insert("accession".to_string(), act_accession.to_string());
-    cv_act.attributes.insert("name".to_string(), act_name.to_string());
-    cv_act.attributes.insert("value".to_string(), "".to_string());
-    activation.children.push(XMLNode::Element(cv_act));
-    
-    // Collision energy
-    if collision_energy > 0.0 {
-        let mut cv_ce = Element::new("cvParam");
-        cv_ce.attributes.insert("cvRef".to_string(), "MS".to_string());
-        cv_ce.attributes.insert("accession".to_string(), "MS:1000045".to_string());
-        cv_ce.attributes.insert("name".to_string(), "collision energy".to_string());
-        cv_ce.attributes.insert("value".to_string(), format!("{:.2}", collision_energy));
-        cv_ce.attributes.insert("unitCvRef".to_string(), "UO".to_string());
-        cv_ce.attributes.insert("unitAccession".to_string(), "UO:0000266".to_string());
-        cv_ce.attributes.insert("unitName".to_string(), "electronvolt".to_string());
-        activation.children.push(XMLNode::Element(cv_ce));
+    // Activation - only add if we have activation info
+    if !activation_type.is_empty() {
+        let mut activation = Element::new("activation");
+        
+        // Activation method
+        let (act_accession, act_name) = match activation_type {
+            "CID" => ("MS:1000133", "collision-induced dissociation"),
+            "HCD" => ("MS:1000422", "beam-type collision-induced dissociation"),
+            "ETD" => ("MS:1000598", "electron transfer dissociation"),
+            "ECD" => ("MS:1000250", "electron capture dissociation"),
+            "PQD" => ("MS:1000599", "pulsed q dissociation"),
+            "UVPD" => ("MS:1003246", "ultraviolet photodissociation"),
+            _ => ("MS:1000044", "dissociation method"), // Generic fallback
+        };
+        
+        let mut cv_act = Element::new("cvParam");
+        cv_act.attributes.insert("cvRef".to_string(), "MS".to_string());
+        cv_act.attributes.insert("accession".to_string(), act_accession.to_string());
+        cv_act.attributes.insert("name".to_string(), act_name.to_string());
+        cv_act.attributes.insert("value".to_string(), "".to_string());
+        activation.children.push(XMLNode::Element(cv_act));
+        
+        // Collision energy if available
+        if let Some(ce) = collision_energy {
+            if ce > 0.0 {
+                let mut cv_ce = Element::new("cvParam");
+                cv_ce.attributes.insert("cvRef".to_string(), "MS".to_string());
+                cv_ce.attributes.insert("accession".to_string(), "MS:1000045".to_string());
+                cv_ce.attributes.insert("name".to_string(), "collision energy".to_string());
+                cv_ce.attributes.insert("value".to_string(), format!("{:.2}", ce));
+                cv_ce.attributes.insert("unitCvRef".to_string(), "UO".to_string());
+                cv_ce.attributes.insert("unitAccession".to_string(), "UO:0000266".to_string());
+                cv_ce.attributes.insert("unitName".to_string(), "electronvolt".to_string());
+                activation.children.push(XMLNode::Element(cv_ce));
+            }
+        }
+        
+        precursor.children.push(XMLNode::Element(activation));
     }
-    
-    precursor.children.push(XMLNode::Element(activation));
     
     root.children.push(XMLNode::Element(precursor));
     
-    let mut output = Vec::new();
-    root.write(&mut output)?;
-    Ok(String::from_utf8(output)?)
+    element_to_string(&root)
 }
 
 /// Build param tree XML with CV parameters
@@ -247,9 +263,7 @@ pub(crate) fn build_param_tree(params: &[(&str, &str, &str, &str)]) -> Result<St
     
     root.children.push(XMLNode::Element(cv_params));
     
-    let mut output = Vec::new();
-    root.write(&mut output)?;
-    Ok(String::from_utf8(output)?)
+    element_to_string(&root)
 }
 
 /// Determine activation type string from ActivationType enum

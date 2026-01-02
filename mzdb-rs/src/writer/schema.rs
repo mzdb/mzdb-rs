@@ -280,10 +280,10 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(MZDB_SCHEMA).unwrap();
         
-        // Verify key tables exist
+        // Verify key regular tables exist
         let tables = vec![
             "data_processing", "software", "sample", "source_file",
-            "run", "run_slice", "bounding_box", "tmp_spectrum"
+            "run", "run_slice", "bounding_box"
         ];
         
         for table in tables {
@@ -294,5 +294,13 @@ mod tests {
             ).unwrap();
             assert_eq!(result, 1, "Table {} should exist", table);
         }
+        
+        // Verify temporary table exists (check sqlite_temp_master for temporary tables)
+        let tmp_result: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_temp_master WHERE type='table' AND name='tmp_spectrum'",
+            [],
+            |row| row.get(0)
+        ).unwrap();
+        assert_eq!(tmp_result, 1, "Temporary table tmp_spectrum should exist");
     }
 }

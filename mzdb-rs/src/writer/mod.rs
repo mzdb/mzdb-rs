@@ -240,11 +240,12 @@ impl MzDbWriter {
     /// 5. Creates all indexes
     /// 6. Commits the transaction
     pub fn close(mut self) -> Result<()> {
+        // Flush remaining bounding boxes (needs the connection still in self)
+        self.flush_all_bb_rows()?;
+        
+        // Now take the connection
         let conn = self.connection.take()
             .context("No active connection")?;
-        
-        // Flush remaining bounding boxes
-        self.flush_all_bb_rows()?;
         
         // Convert temporary spectrum table to permanent
         conn.execute("CREATE TABLE spectrum AS SELECT * FROM tmp_spectrum;", [])
@@ -259,16 +260,15 @@ impl MzDbWriter {
         // Create indexes
         self.create_indexes(&conn)?;
         
+        // Update sqlite_sequence before committing
+        conn.execute(
+            "INSERT OR REPLACE INTO sqlite_sequence VALUES ('spectrum', ?1);",
+            [self.inserted_spectra_count]
+        )?;
+        
         // Commit transaction
         conn.execute_batch("COMMIT TRANSACTION;")
             .context("Failed to commit transaction")?;
-        
-        // Update sqlite_sequence
-        let conn2 = Connection::open(&self.db_path)?;
-        conn2.execute(
-            "INSERT INTO sqlite_sequence VALUES ('spectrum', ?1);",
-            [self.inserted_spectra_count]
-        )?;
         
         Ok(())
     }

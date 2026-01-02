@@ -20,8 +20,6 @@ struct ConversionStats {
     max_rt: f64,
     min_precursor_mz: f64,
     max_precursor_mz: f64,
-    min_charge: i32,
-    max_charge: i32,
     activation_types: std::collections::HashSet<String>,
 }
 
@@ -32,8 +30,6 @@ impl ConversionStats {
             max_rt: f64::MIN,
             min_precursor_mz: f64::MAX,
             max_precursor_mz: f64::MIN,
-            min_charge: i32::MAX,
-            max_charge: i32::MIN,
             ..Default::default()
         }
     }
@@ -164,11 +160,30 @@ pub fn convert_raw_to_mzdb(
         println!("    Vial: {}", seq_row.vial);
     }
     
-    // Collect statistics
+    // First pass: collect statistics from all scans
     let mut stats = ConversionStats::new();
+    let num_scans = raw.num_scans();
+    
+    // Clone scan events to avoid borrow conflict with raw.scan()
+    let scan_events: Vec<_> = raw.scan_events().to_vec();
+    
+    for scan_num in 1..=num_scans {
+        let scan = raw.scan(scan_num)
+            .with_context(|| format!("Failed to read scan {} for statistics", scan_num))?;
+        
+        // Get activation type from scan event (0-indexed)
+        let activation_type = if scan.ms_level > 1 && scan_num <= scan_events.len() {
+            activation_type_to_string(scan_events[scan_num - 1].activation)
+        } else {
+            ""
+        };
+        
+        // Update statistics
+        stats.update_from_scan(&scan, activation_type);
+    }
     
     // Build metadata from RAW file (returns metadata + method texts)
-    let (metadata, ms_method_text, lc_method_text) = build_metadata(&mut raw, &stats)?;
+    let (metadata, ms_method_text, _lc_method_text) = build_metadata(&mut raw, &stats)?;
     
     // Build mzdb param_tree with legacy instrumentMethods for backward compatibility
     let mzdb_param_tree = if ms_method_text.is_some() {
@@ -188,8 +203,10 @@ pub fn convert_raw_to_mzdb(
     writer.open()
         .context("Failed to open mzDB writer")?;
     
-    // Convert all scans
-    let num_scans = raw.num_scans();
+    // Convert all scans (scan_events already retrieved above)
+    let mut current_cycle: i64 = 0;
+    let mut last_ms_level: u8 = 0;
+    
     for scan_num in 1..=num_scans {
         if scan_num % 100 == 0 {
             println!("  Processing scan {}/{}", scan_num, num_scans);
@@ -198,23 +215,36 @@ pub fn convert_raw_to_mzdb(
         let scan = raw.scan(scan_num)
             .with_context(|| format!("Failed to read scan {}", scan_num))?;
         
-        // Determine activation type
-        let activation_type = if scan.ms_level > 1 {
-            "CID" // Default, could be enhanced
+        // Track cycle number: increment when we see an MS1 scan
+        // (a cycle is typically MS1 followed by all its MS2/MS3 scans)
+        if scan.ms_level == 1 && (last_ms_level != 1 || scan_num == 1) {
+            current_cycle += 1;
+        }
+        last_ms_level = scan.ms_level;
+        
+        // Get scan event for this scan (0-indexed)
+        let scan_event = if scan_num <= scan_events.len() {
+            Some(&scan_events[scan_num - 1])
         } else {
-            ""
+            None
         };
         
-        // Update statistics
-        stats.update_from_scan(&scan, activation_type);
-        
         // Convert to mzDB spectrum
-        let spectrum = convert_scan_to_spectrum(&raw, scan_num, &scan)?;
+        let spectrum = convert_scan_to_spectrum(scan_num, &scan, scan_event, current_cycle, &raw)?;
         
-        // Determine data encoding
+        // Determine data encoding based on scan mode
+        let mode = if let Some(event) = scan_event {
+            match event.scan_mode {
+                thernio::raw::ScanMode::Centroid => DataMode::Centroid,
+                thernio::raw::ScanMode::Profile => DataMode::Profile,
+            }
+        } else {
+            DataMode::Centroid
+        };
+        
         let encoding = DataEncoding {
             id: 0, // Will be assigned by registry
-            mode: DataMode::Centroid, // Thermo data is typically centroided
+            mode,
             peak_encoding: PeakEncoding::HighRes, // 64-bit m/z precision
             compression: "none".to_string(),
             byte_order: ByteOrder::LittleEndian,
@@ -341,7 +371,10 @@ fn build_run_user_texts(ms_method: Option<&str>, lc_method: Option<&str>) -> Res
     }
     
     let mut output = Vec::new();
-    user_texts.write(&mut output)?;
+    // Use write_with_config to avoid XML declaration
+    let config = xmltree::EmitterConfig::new()
+        .write_document_declaration(false);
+    user_texts.write_with_config(&mut output, config)?;
     Ok(String::from_utf8(output)?)
 }
 
@@ -364,7 +397,10 @@ fn build_mzdb_user_texts(ms_method: Option<&str>) -> Result<String> {
     }
     
     let mut output = Vec::new();
-    user_texts.write(&mut output)?;
+    // Use write_inner to avoid XML declaration
+    let config = xmltree::EmitterConfig::new()
+        .write_document_declaration(false);
+    user_texts.write_with_config(&mut output, config)?;
     Ok(String::from_utf8(output)?)
 }
 
@@ -401,18 +437,43 @@ fn filetime_to_iso8601(filetime: u64) -> String {
 
 /// Build WriterMetadata from RAW file information
 /// Returns (metadata, ms_method_text, lc_method_text)
-fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetadata, Option<String>, Option<String>)> {
+fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterMetadata, Option<String>, Option<String>)> {
+    // First, build the component list which requires mutable borrow
+    let component_list = build_component_list(raw)?;
+    
+    // Now get the other data (immutable borrows)
     let seq_row = raw.sequencer_row();
     let header = raw.header();
     let autosampler = raw.autosampler_info();
     let (low_mz, high_mz) = raw.mz_range();
+    let model_name = raw.model().to_string();
     
     // Convert creation date
     let creation_date = filetime_to_iso8601(header.audit_start.time);
     
+    // Pre-declare all formatted strings to ensure they live long enough
+    let version_str = header.version.to_string();
+    let sample_type_str = format!("{:?}", seq_row.injection.sample_type);
+    let vol_str = format!("{:.2}", seq_row.injection.injection_volume);
+    let weight_str = format!("{:.3}", seq_row.injection.sample_weight);
+    let sample_vol_str = format!("{:.2}", seq_row.injection.sample_volume);
+    let dilution_str = format!("{:.3}", seq_row.injection.dilution_factor);
+    let tray_str = format!("{}:{}", autosampler.tray_index, autosampler.vial_index);
+    let start_time_str = format!("{:.2}", raw.start_time());
+    let _end_time_str = format!("{:.2}", raw.end_time());
+    let _low_mz_str = format!("{:.4}", low_mz);
+    let _high_mz_str = format!("{:.4}", high_mz);
+    let ms1_str = stats.ms1_count.to_string();
+    let ms2_str = stats.ms2_count.to_string();
+    let ms3_str = stats.ms3_count.to_string();
+    let min_rt_str = format!("{:.4}", stats.min_rt);
+    let max_rt_str = format!("{:.4}", stats.max_rt);
+    let min_mz_str = format!("{:.4}", stats.min_precursor_mz);
+    let max_mz_str = format!("{:.4}", stats.max_precursor_mz);
+    
     // Software - include embedded method info if available
     let mut software_params = Vec::new();
-    let mut instruments_str;
+    let instruments_str: String;
     if let Some(method) = raw.embedded_method() {
         if !method.instruments.is_empty() {
             instruments_str = method.instruments.join(", ");
@@ -433,15 +494,13 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
     };
     
     // Instrument configuration with more detailed param tree
-    let component_list = build_component_list(raw)?;
-    
     let mut inst_params = vec![
-        ("MS", "MS:1000494", "Thermo Scientific instrument model", raw.model()),
+        ("MS", "MS:1000494", "Thermo Scientific instrument model", model_name.as_str()),
     ];
     
     // Add file version
     if header.version > 0 {
-        inst_params.push(("MS", "MS:1000569", "RAW file version", &header.version.to_string()));
+        inst_params.push(("MS", "MS:1000569", "RAW file version", version_str.as_str()));
     }
     
     // Add instrument method path if available
@@ -453,7 +512,7 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
     
     let inst_config = InstrumentConfiguration {
         id: 1,
-        name: raw.model().to_string(),
+        name: model_name.clone(),
         param_tree: Some(inst_param_tree),
         component_list,
         shared_param_tree_id: None,
@@ -466,9 +525,8 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
     ];
     
     // Add sample type
-    let sample_type_str = format!("{:?}", seq_row.injection.sample_type);
     if !sample_type_str.is_empty() && sample_type_str != "Unknown" {
-        sample_params.push(("MS", "MS:1000001", "sample type", &sample_type_str));
+        sample_params.push(("MS", "MS:1000001", "sample type", sample_type_str.as_str()));
     }
     
     // Add comment if available
@@ -478,26 +536,22 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
     
     // Add injection volume
     if seq_row.injection.injection_volume > 0.0 {
-        let vol_str = format!("{:.2}", seq_row.injection.injection_volume);
-        sample_params.push(("MS", "MS:1000005", "injection volume", &vol_str));
+        sample_params.push(("MS", "MS:1000005", "injection volume", vol_str.as_str()));
     }
     
     // Add sample weight
     if seq_row.injection.sample_weight > 0.0 {
-        let weight_str = format!("{:.3}", seq_row.injection.sample_weight);
-        sample_params.push(("MS", "MS:1000006", "sample weight", &weight_str));
+        sample_params.push(("MS", "MS:1000006", "sample weight", weight_str.as_str()));
     }
     
     // Add sample volume
     if seq_row.injection.sample_volume > 0.0 {
-        let vol_str = format!("{:.2}", seq_row.injection.sample_volume);
-        sample_params.push(("MS", "MS:1000007", "sample volume", &vol_str));
+        sample_params.push(("MS", "MS:1000007", "sample volume", sample_vol_str.as_str()));
     }
     
     // Add dilution factor
     if seq_row.injection.dilution_factor > 0.0 && seq_row.injection.dilution_factor != 1.0 {
-        let dilution_str = format!("{:.3}", seq_row.injection.dilution_factor);
-        sample_params.push(("MS", "MS:1000008", "dilution factor", &dilution_str));
+        sample_params.push(("MS", "MS:1000008", "dilution factor", dilution_str.as_str()));
     }
     
     // Add vial position
@@ -507,8 +561,7 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
     
     // Add autosampler tray info
     if autosampler.vials_per_tray > 0 {
-        let tray_str = format!("{}:{}", autosampler.tray_index, autosampler.vial_index);
-        sample_params.push(("MS", "MS:1000010", "autosampler position", &tray_str));
+        sample_params.push(("MS", "MS:1000010", "autosampler position", tray_str.as_str()));
     }
     
     if !autosampler.tray_name.is_empty() {
@@ -575,44 +628,31 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
     };
     
     // Run with comprehensive scan statistics and method texts
-    let start_time_str = format!("{:.2}", raw.start_time());
-    let end_time_str = format!("{:.2}", raw.end_time());
-    let low_mz_str = format!("{:.4}", low_mz);
-    let high_mz_str = format!("{:.4}", high_mz);
-    
     let mut run_params = vec![
         ("MS", "MS:1000016", "scan start time", start_time_str.as_str()),
-        ("MS", "MS:1000011", "mass resolution", "1.0"), // Default, not available in thernio
     ];
     
     // Add MS level counts if available
     if stats.ms1_count > 0 {
-        let ms1_str = stats.ms1_count.to_string();
-        run_params.push(("PRIDE", "PRIDE:0000481", "Number of MS1 spectra", &ms1_str));
+        run_params.push(("PRIDE", "PRIDE:0000481", "Number of MS1 spectra", ms1_str.as_str()));
     }
     if stats.ms2_count > 0 {
-        let ms2_str = stats.ms2_count.to_string();
-        run_params.push(("PRIDE", "PRIDE:0000482", "Number of MS2 spectra", &ms2_str));
+        run_params.push(("PRIDE", "PRIDE:0000482", "Number of MS2 spectra", ms2_str.as_str()));
     }
     if stats.ms3_count > 0 {
-        let ms3_str = stats.ms3_count.to_string();
-        run_params.push(("PRIDE", "PRIDE:0000483", "Number of MS3 spectra", &ms3_str));
+        run_params.push(("PRIDE", "PRIDE:0000483", "Number of MS3 spectra", ms3_str.as_str()));
     }
     
     // Add RT range from stats
     if stats.max_rt > 0.0 {
-        let min_rt_str = format!("{:.4}", stats.min_rt);
-        let max_rt_str = format!("{:.4}", stats.max_rt);
-        run_params.push(("PRIDE", "PRIDE:0000474", "MS min RT", &min_rt_str));
-        run_params.push(("PRIDE", "PRIDE:0000475", "MS max RT", &max_rt_str));
+        run_params.push(("PRIDE", "PRIDE:0000474", "MS min RT", min_rt_str.as_str()));
+        run_params.push(("PRIDE", "PRIDE:0000475", "MS max RT", max_rt_str.as_str()));
     }
     
     // Add precursor m/z range from stats
     if stats.max_precursor_mz > 0.0 {
-        let min_mz_str = format!("{:.4}", stats.min_precursor_mz);
-        let max_mz_str = format!("{:.4}", stats.max_precursor_mz);
-        run_params.push(("PRIDE", "PRIDE:0000476", "MS min MZ", &min_mz_str));
-        run_params.push(("PRIDE", "PRIDE:0000477", "MS max MZ", &max_mz_str));
+        run_params.push(("PRIDE", "PRIDE:0000476", "MS min MZ", min_mz_str.as_str()));
+        run_params.push(("PRIDE", "PRIDE:0000477", "MS max MZ", max_mz_str.as_str()));
     }
     
     // Build basic param tree
@@ -674,27 +714,58 @@ fn build_metadata(raw: &RawFile, stats: &ConversionStats) -> Result<(WriterMetad
 
 /// Convert a RAW scan to an mzDB Spectrum
 fn convert_scan_to_spectrum(
-    raw: &RawFile,
     scan_num: usize,
     scan: &thernio::raw::Scan,
+    scan_event: Option<&thernio::raw::ScanEvent>,
+    cycle: i64,
+    raw: &thernio::raw::RawFile,
 ) -> Result<Spectrum> {
     // Build scan list XML
     let scan_list_str = build_scan_list(scan_num as i32, scan.retention_time)?;
     
+    // Get charge state from trailer extra (0-based index for trailer_extra)
+    let charge_state = raw.charge_state(scan_num - 1)
+        .map(|c| c as i32);
+    
+    // Get isolation width and offset from scan's reactions
+    let (isolation_width, isolation_offset) = scan.reactions.first()
+        .map(|r| (Some(r.isolation_width), Some(r.isolation_offset)))
+        .unwrap_or((None, None));
+    
     // Build precursor list XML for MS2+
     let precursor_list_str = if scan.ms_level > 1 && !scan.precursor_mzs.is_empty() {
-        // Get activation type from scan event if available
-        let activation_type = "CID"; // Default, could be enhanced by parsing scan events
-        let collision_energy = 35.0; // Default, could be extracted from scan event
-        let isolation_width = 2.0; // Default isolation width
+        // Get activation type and collision energy from scan event if available
+        let (activation_type, collision_energy) = if let Some(event) = scan_event {
+            let act = activation_type_to_string(event.activation);
+            let ce = event.collision_energies.first().copied();
+            (act, ce)
+        } else {
+            // Fallback: try to get collision energy from scan reactions
+            let ce = scan.collision_energy();
+            ("", ce)
+        };
         
-        Some(build_precursor_list(
-            &scan.precursor_mzs,
-            None, // charge state - not readily available in thernio
-            isolation_width,
-            activation_type,
-            collision_energy,
-        )?)
+        // Only build precursor list if we have activation info
+        if !activation_type.is_empty() {
+            Some(build_precursor_list(
+                &scan.precursor_mzs,
+                charge_state,
+                collision_energy,
+                activation_type,
+                isolation_width,
+                isolation_offset,
+            )?)
+        } else {
+            // Build minimal precursor list without activation details
+            Some(build_precursor_list(
+                &scan.precursor_mzs,
+                charge_state,
+                scan.collision_energy(),
+                "",
+                isolation_width,
+                isolation_offset,
+            )?)
+        }
     } else {
         None
     };
@@ -709,11 +780,28 @@ fn convert_scan_to_spectrum(
         _ => spec_params.push(("MS", "MS:1000580", "MSn spectrum", "")),
     }
     
-    // Centroid mode (Thermo data is typically centroided)
-    spec_params.push(("MS", "MS:1000127", "centroid spectrum", ""));
-    
-    // Positive/negative mode - default to positive
-    spec_params.push(("MS", "MS:1000130", "positive scan", ""));
+    // Scan mode (centroid/profile) from scan event
+    if let Some(event) = scan_event {
+        match event.scan_mode {
+            thernio::raw::ScanMode::Centroid => {
+                spec_params.push(("MS", "MS:1000127", "centroid spectrum", ""));
+            }
+            thernio::raw::ScanMode::Profile => {
+                spec_params.push(("MS", "MS:1000128", "profile spectrum", ""));
+            }
+        }
+        
+        // Polarity from scan event
+        match event.polarity {
+            thernio::raw::Polarity::Positive => {
+                spec_params.push(("MS", "MS:1000130", "positive scan", ""));
+            }
+            thernio::raw::Polarity::Negative => {
+                spec_params.push(("MS", "MS:1000129", "negative scan", ""));
+            }
+            _ => {} // Don't add polarity if unknown
+        }
+    }
     
     // Base peak m/z and intensity
     let bp_mz_str = format!("{:.6}", scan.base_peak_mz);
@@ -735,24 +823,27 @@ fn convert_scan_to_spectrum(
     
     let param_tree_str = build_param_tree(&spec_params)?;
     
+    // Get activation type for header
+    let activation_type = if scan.ms_level > 1 {
+        scan_event.map(|e| activation_type_to_string(e.activation).to_string())
+    } else {
+        None
+    };
+    
     // Create spectrum header
     let header = SpectrumHeader {
         id: scan_num as i64,
         initial_id: scan.index as i64,
         title: format!("Scan {}", scan_num),
-        cycle: 1, // Could be enhanced by tracking cycles
+        cycle,
         time: (scan.retention_time * 60.0) as f32, // Convert minutes to seconds
         ms_level: scan.ms_level as i64,
-        activation_type: if scan.ms_level > 1 {
-            Some("CID".to_string())
-        } else {
-            None
-        },
+        activation_type,
         tic: scan.total_ion_current as f32,
         base_peak_mz: scan.base_peak_mz,
         base_peak_intensity: scan.base_peak_intensity as f32,
         precursor_mz: scan.precursor_mzs.first().copied(),
-        precursor_charge: None, // Not readily available in thernio
+        precursor_charge: charge_state,
         peaks_count: scan.spectrum.len() as i64,
         param_tree_str: Some(param_tree_str),
         scan_list_str: Some(scan_list_str),
@@ -776,10 +867,19 @@ fn convert_scan_to_spectrum(
         intensity_array.push(peak.intensity);
     }
     
-    // Create encoding (will be registered by writer)
+    // Create encoding - mode determined by caller based on scan_event
+    let mode = if let Some(event) = scan_event {
+        match event.scan_mode {
+            thernio::raw::ScanMode::Centroid => DataMode::Centroid,
+            thernio::raw::ScanMode::Profile => DataMode::Profile,
+        }
+    } else {
+        DataMode::Centroid
+    };
+    
     let encoding = DataEncoding {
         id: 0,
-        mode: DataMode::Centroid,
+        mode,
         peak_encoding: PeakEncoding::HighRes,
         compression: "none".to_string(),
         byte_order: ByteOrder::LittleEndian,

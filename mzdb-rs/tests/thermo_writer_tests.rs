@@ -468,7 +468,7 @@ fn test_spectrum_scan_list_structure() -> Result<()> {
     
     // Get first spectrum's scan_list
     let scan_list: Option<String> = conn.query_row(
-        "SELECT scan_list_str FROM spectrum LIMIT 1",
+        "SELECT scan_list FROM spectrum LIMIT 1",
         [],
         |row| row.get(0),
     )?;
@@ -503,7 +503,7 @@ fn test_spectrum_precursor_list_structure() -> Result<()> {
     
     // Get first MS2 spectrum's precursor_list
     let precursor_list: Option<String> = conn.query_row(
-        "SELECT precursor_list_str FROM spectrum WHERE ms_level > 1 LIMIT 1",
+        "SELECT precursor_list FROM spectrum WHERE ms_level > 1 LIMIT 1",
         [],
         |row| row.get(0),
     )?;
@@ -585,13 +585,16 @@ fn test_bounding_box_creation() -> Result<()> {
     let bb_count: i32 = conn.query_row("SELECT COUNT(*) FROM bounding_box", [], |row| row.get(0))?;
     assert!(bb_count > 0, "No bounding boxes created");
     
-    // Check rtree entries
+    // Check rtree entries (only MS1 BBs get rtree entries in DDA mode)
     let rtree_count: i32 = conn.query_row(
         "SELECT COUNT(*) FROM bounding_box_rtree",
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(rtree_count, bb_count, "R-tree count mismatch");
+    // R-tree count may be less than total BB count for DDA files
+    // where only MS1 bounding boxes are indexed
+    assert!(rtree_count > 0, "No R-tree entries created");
+    assert!(rtree_count <= bb_count, "R-tree count should not exceed BB count");
     
     conn.close().map_err(|(_, e)| e)?;
     
@@ -701,8 +704,8 @@ fn test_xml_well_formedness() -> Result<()> {
         ("mzdb", "param_tree"),
         ("run", "param_tree"),
         ("instrument_configuration", "component_list"),
-        ("spectrum", "scan_list_str"),
-        ("spectrum", "param_tree_str"),
+        ("spectrum", "scan_list"),
+        ("spectrum", "param_tree"),
     ];
     
     for (table, field) in fields {
