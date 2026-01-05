@@ -212,10 +212,16 @@ impl BoundingBoxCache {
 }
 
 /// Wrapper for f64 that implements Ord for sorting
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 struct OrderedFloat(f64);
 
 impl Eq for OrderedFloat {}
+
+impl PartialOrd for OrderedFloat {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl Ord for OrderedFloat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -424,7 +430,7 @@ pub(crate) fn flush_bb_row(
         bb.spectrum_slices = complete_slices;
         
         // Serialize and insert
-        insert_bounding_box(conn, &bb, &writer.run_slice_factory)?;
+        insert_bounding_box(conn, &bb)?;
         
         // Insert R-tree index
         insert_rtree_index(conn, &bb, &writer.run_slice_factory, writer.is_dia)?;
@@ -440,7 +446,6 @@ pub(crate) fn flush_bb_row(
 fn insert_bounding_box(
     conn: &rusqlite::Connection,
     bb: &BoundingBoxWriter,
-    run_slice_factory: &crate::writer::RunSliceFactory,
 ) -> Result<i64> {
     let bb_data = serialize_bounding_box(bb)?;
     

@@ -2,7 +2,7 @@
 //!
 //! Handles metadata structures and insertion for the mzDB writer.
 
-use anyhow::{Context, Result};
+use anyhow_ext::Result;
 use rusqlite::Connection;
 
 use crate::metadata::*;

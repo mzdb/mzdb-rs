@@ -6,7 +6,7 @@ use thernio::raw::RawFile;
 
 use crate::metadata::*;
 use crate::model::*;
-use crate::writer::{MzDbWriter, MzDbWriterBuilder, WriterMetadata};
+use crate::writer::{MzDbWriterBuilder, WriterMetadata};
 
 use super::xml_builder::*;
 
@@ -721,7 +721,7 @@ fn convert_scan_to_spectrum(
     raw: &thernio::raw::RawFile,
 ) -> Result<Spectrum> {
     // Build scan list XML
-    let scan_list_str = build_scan_list(scan_num as i32, scan.retention_time)?;
+    let scan_list_str = build_scan_list(scan.retention_time)?;
     
     // Get charge state from trailer extra (0-based index for trailer_extra)
     let charge_state = raw.charge_state(scan_num - 1)

@@ -145,6 +145,7 @@ impl ChromatogramData {
 
 /// Chromatogram type based on name pattern
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ChromatogramType {
     /// Total Ion Current
     TIC,

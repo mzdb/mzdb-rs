@@ -75,7 +75,7 @@ pub(crate) fn build_component_list(raw: &mut RawFile) -> Result<String> {
 }
 
 /// Build scan list XML for a spectrum
-pub(crate) fn build_scan_list(scan_number: i32, retention_time: f64) -> Result<String> {
+pub(crate) fn build_scan_list(retention_time: f64) -> Result<String> {
     let mut root = Element::new("scanList");
     root.attributes.insert("count".to_string(), "1".to_string());
     

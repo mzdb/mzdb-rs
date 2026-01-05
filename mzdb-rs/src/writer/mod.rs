@@ -23,6 +23,8 @@
 //! # Example
 //!
 //! ```no_run
+//! # #[cfg(feature = "thermo2mzdb")]
+//! # fn main() -> anyhow::Result<()> {
 //! use mzdb::writer::{MzDbWriter, MzDbWriterBuilder};
 //! use mzdb::{BBSizes, DataMode, PeakEncoding, ByteOrder};
 //! 
@@ -46,8 +48,25 @@
 //! // ... spectrum insertion logic ...
 //!
 //! writer.close()?;
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok(())
+//! # }
+//! # #[cfg(not(feature = "thermo2mzdb"))]
+//! # fn main() {}
 //! ```
+
+// Allow dead code and various clippy warnings in this module - 
+// most types are only used when thermo2mzdb feature is enabled
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(clippy::clone_on_copy)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::unwrap_or_default)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::unnecessary_lazy_evaluations)]
+#![allow(clippy::wrong_self_convention)]
 
 mod schema;
 mod bounding_box;
@@ -63,7 +82,6 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, Statement};
 use std::path::Path;
 
-use crate::metadata::*;
 use crate::model::*;
 
 pub use bounding_box::{BoundingBoxCache, BoundingBoxWriter};

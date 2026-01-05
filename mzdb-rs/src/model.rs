@@ -29,6 +29,7 @@ pub const ACQUISITION_MODE_UNKNOWN: &str = "unknown acquisition mode";
 
 /// Mass spectrometry acquisition mode
 #[derive(Copy, Clone, Debug, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum AcquisitionMode {
     /// Data Dependent Acquisition
     DDA,

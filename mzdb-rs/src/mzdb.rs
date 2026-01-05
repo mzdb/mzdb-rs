@@ -155,7 +155,7 @@ impl MzDbReader {
     ///     println!("MS1 spectrum: {}", spectrum.header.id);
     /// }
     /// ```
-    pub fn iter_spectra(&self, ms_level: Option<u8>) -> Result<SpectrumIterator> {
+    pub fn iter_spectra(&self, ms_level: Option<u8>) -> Result<SpectrumIterator<'_>> {
         SpectrumIterator::new(&self.connection, &self.entity_cache, ms_level)
     }
 

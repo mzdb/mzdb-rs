@@ -31,12 +31,12 @@ const SQL_QUERY_ALL_MS_LEVELS: &str =
     "SELECT bounding_box.* FROM bounding_box, spectrum \
      WHERE spectrum.id = bounding_box.first_spectrum_id";
 
-pub fn create_bb_iter_stmt_for_all_ms_levels(db: &Connection) -> Result<Statement> {
+pub fn create_bb_iter_stmt_for_all_ms_levels(db: &Connection) -> Result<Statement<'_>> {
     let stmt = db.prepare(SQL_QUERY_ALL_MS_LEVELS).dot()?;
     Ok(stmt)
 }
 
-pub fn create_bb_iter_stmt_for_single_ms_level(db: &Connection, ms_level: u8) -> Result<Statement> {
+pub fn create_bb_iter_stmt_for_single_ms_level(db: &Connection, ms_level: u8) -> Result<Statement<'_>> {
     let stmt = db
         .prepare(&format!(
             "SELECT bounding_box.* FROM bounding_box, spectrum \
@@ -305,16 +305,16 @@ impl<'a> SpectrumIterator<'a> {
     fn read_next_bb(&mut self) -> Result<Option<BoundingBox>> {
         self.ensure_rows()?;
         
-        if let Some(ref mut rows) = self.rows {
-            if let Some(row) = rows.next().dot()? {
-                return Ok(Some(BoundingBox {
-                    id: row.get(0)?,
-                    first_spectrum_id: row.get(3)?,
-                    last_spectrum_id: row.get(4)?,
-                    run_slice_id: row.get(2)?,
-                    blob_data: row.get(1)?,
-                }));
-            }
+        if let Some(ref mut rows) = self.rows
+            && let Some(row) = rows.next().dot()?
+        {
+            return Ok(Some(BoundingBox {
+                id: row.get(0)?,
+                first_spectrum_id: row.get(3)?,
+                last_spectrum_id: row.get(4)?,
+                run_slice_id: row.get(2)?,
+                blob_data: row.get(1)?,
+            }));
         }
         
         Ok(None)

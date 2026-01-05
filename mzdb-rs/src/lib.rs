@@ -11,6 +11,7 @@
 //! - **Metadata**: Full access to all metadata tables (samples, instruments, software, etc.)
 //! - **R-tree Queries**: Efficient spatial queries using SQLite R-tree indices
 //! - **DIA/SWATH Support**: Access MSn data with parent m/z filtering
+//! - **Signal Processing** (with `processing` feature): Savitzky-Golay smoothing, peakel detection
 //!
 //! # Quick Start
 //!
@@ -35,6 +36,29 @@
 //! }
 //! ```
 //!
+//! # Signal Processing (requires `processing` feature)
+//!
+//! ```no_run
+//! # #[cfg(feature = "processing")]
+//! # {
+//! use mzdb::processing::{SavitzkyGolaySmoother, SignalSmoother, SmartPeakelFinder, PeakelFinder};
+//!
+//! // Create time-intensity data
+//! let data: Vec<(f32, f64)> = vec![
+//!     (1.0, 100.0), (2.0, 200.0), (3.0, 500.0),
+//!     (4.0, 400.0), (5.0, 100.0),
+//! ];
+//!
+//! // Smooth the signal
+//! let smoother = SavitzkyGolaySmoother::new(2, 2, 1);
+//! let smoothed = smoother.smooth_time_intensity_pairs(&data);
+//!
+//! // Detect peaks
+//! let finder = SmartPeakelFinder::new();
+//! let peakels = finder.find_peakels_indices(&data);
+//! # }
+//! ```
+//!
 //! # Module Organization
 //!
 //! - [`model`]: Core data structures (Spectrum, DataEncoding, etc.)
@@ -47,6 +71,7 @@
 //! - [`cache`]: Query caching utilities
 //! - [`mzdb`]: Core mzDB operations
 //! - [`query_utils`]: Database query helper functions
+//! - [`processing`]: Signal processing algorithms (requires `processing` feature)
 
 pub mod cache;
 pub mod chromatogram;
@@ -62,6 +87,14 @@ pub mod xml;
 
 #[cfg(feature = "writer")]
 pub mod writer;
+
+#[cfg(feature = "processing")]
+pub mod processing;
+
+pub mod conversion;
+
+// Re-export conversion types (always available)
+pub use conversion::{MgfWriter, MgfWriterWithStats, MgfExportOptions, MgfExportStats};
 
 // Re-export main types for convenience
 pub use model::{

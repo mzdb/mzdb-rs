@@ -361,12 +361,12 @@ fn read_spectrum_slice_data(
             let peak_start_pos: usize = peaks_start_pos + i * peak_size;
             let (mz, _offset) = bytes_to_double(peak_start_pos, pe == PeakEncoding::LowRes);
 
-            if let Some(min) = min_mz {
-                if mz >= min && mz <= max_mz_threshold {
-                    filtered_peaks_count += 1;
-                    if filtered_peaks_start_idx == 0 {
-                        filtered_peaks_start_idx = peak_start_pos;
-                    }
+            if let Some(min) = min_mz
+                && mz >= min && mz <= max_mz_threshold
+            {
+                filtered_peaks_count += 1;
+                if filtered_peaks_start_idx == 0 {
+                    filtered_peaks_start_idx = peak_start_pos;
                 }
             }
             i += 1;
@@ -640,6 +640,7 @@ pub fn get_msn_spectrum_slices(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn get_spectrum_slices_in_ranges(
     connection: &Connection,
     min_mz: f64,
@@ -785,12 +786,12 @@ fn merge_spectrum_data_list(
     let mut final_lwhm_array: Option<Vec<f32>> = None;
     let mut final_rwhm_array: Option<Vec<f32>> = None;
 
-    if let Some(first_spectrum_data) = spectrum_data_list.first() {
-        if !first_spectrum_data.lwhm_array.is_empty() && !first_spectrum_data.rwhm_array.is_empty()
-        {
-            final_lwhm_array = Some(Vec::with_capacity(peaks_count));
-            final_rwhm_array = Some(Vec::with_capacity(peaks_count));
-        }
+    if let Some(first_spectrum_data) = spectrum_data_list.first()
+        && !first_spectrum_data.lwhm_array.is_empty()
+        && !first_spectrum_data.rwhm_array.is_empty()
+    {
+        final_lwhm_array = Some(Vec::with_capacity(peaks_count));
+        final_rwhm_array = Some(Vec::with_capacity(peaks_count));
     }
 
     let data_encoding = spectrum_data_list[0].data_encoding.clone();
@@ -850,6 +851,7 @@ pub fn get_ms_xic(
     Ok(spectrum_slices_to_xic(spectrum_slices, mz, mz_tol_ppm, method))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn get_msn_xic(
     connection: &Connection,
     parent_mz: f64,
