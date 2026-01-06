@@ -85,6 +85,7 @@ use std::path::Path;
 use crate::model::*;
 
 pub use bounding_box::{BoundingBoxCache, BoundingBoxWriter};
+pub use bounding_box::{serialize_to_bounding_box, insert_bounding_box_data, insert_msn_rtree_entry};
 pub use data_encoding::DataEncodingRegistry;
 pub use run_slice::RunSliceFactory;
 pub use schema::MZDB_SCHEMA;

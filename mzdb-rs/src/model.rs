@@ -13,6 +13,28 @@ use std::collections::HashMap;
 use crate::model::DataMode::Fitted;
 
 // ============================================================================
+// Data Point Trait
+// ============================================================================
+
+/// Trait for types that provide access to spectrum data points (m/z and intensity arrays)
+/// 
+/// This trait allows generic serialization of spectrum data without requiring
+/// a specific struct type. Both `SpectrumData` and simpler types like 
+/// `SimpleSpectrumData` can implement this trait.
+pub trait DataPointProvider {
+    /// Get a reference to the m/z values array
+    fn mz_array(&self) -> &[f64];
+    
+    /// Get a reference to the intensity values array
+    fn intensity_array(&self) -> &[f32];
+    
+    /// Get the number of data points
+    fn data_points_count(&self) -> usize {
+        self.mz_array().len()
+    }
+}
+
+// ============================================================================
 // Acquisition mode constants and enum
 // ============================================================================
 
@@ -370,6 +392,20 @@ impl SpectrumData {
             intensity: self.intensity_array[new_idx],
             rt,
         })
+    }
+}
+
+impl DataPointProvider for SpectrumData {
+    fn mz_array(&self) -> &[f64] {
+        &self.mz_array
+    }
+    
+    fn intensity_array(&self) -> &[f32] {
+        &self.intensity_array
+    }
+    
+    fn data_points_count(&self) -> usize {
+        self.peaks_count
     }
 }
 

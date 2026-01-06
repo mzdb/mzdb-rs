@@ -10,6 +10,7 @@ categories = ["science", "database"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
 
 [dependencies]
 anyhow = "1.0"
@@ -25,6 +26,13 @@ serde_rusqlite = "0.36"
 serde_with = "3.11"
 strum_macros = "0.26"
 
+# Optional dependencies for the CLI feature (bins)
+env_logger = { version = "0.11", optional= true }
+
+# Optional dependencies for diafication module
+ordered-float = { version = "4.2", optional= true } # should be generalizedto all modules?
+rmpv = { version = "1.0", optional= true }
+
 # Optional dependencies for thermo writer
 thernio = { path = "../../rusteomics/thernio", optional = true, features = ["raw"] }
 xmltree = { version = "0.12", optional = true }
@@ -38,6 +46,8 @@ thiserror = { version = "1.0", optional = true }
 [features]
 default = []
 writer = []
+cli = ["env_logger"]
+dda2dia = ["cli","writer", "ordered-float", "rmpv"]
 thermo2mzdb = ["writer", "thernio", "xmltree"]
 processing = ["nalgebra", "statrs", "thiserror"]
 processing-parallel = ["processing", "rayon"]
@@ -59,6 +69,16 @@ path = "src/bin/mzdb2mgf.rs"
 name = "mzdb2peakeldb"
 path = "src/bin/mzdb2peakeldb.rs"
 required-features = ["processing"]
+
+[[bin]]
+name = "dda2dia"
+path = "src/bin/dda2dia.rs"
+required-features = ["cli","dda2dia"]
+
+[[bin]]
+name = "mzdbcheck"
+path = "src/bin/mzdbcheck.rs"
+required-features = ["cli"]
 
 [lib]
 name = "mzdb"

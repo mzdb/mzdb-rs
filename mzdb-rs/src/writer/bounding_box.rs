@@ -511,3 +511,91 @@ fn insert_rtree_index(
     
     Ok(())
 }
+
+// ============================================================================
+// Generic spectrum serialization utilities
+// ============================================================================
+
+use crate::model::DataPointProvider;
+
+/// Serialize multiple spectrum slices to binary bounding box format
+/// 
+/// Uses the standard mzDB bounding box format (64-bit m/z, 32-bit intensity):
+/// - For each spectrum slice:
+///   - spectrum_id (4 bytes, i32, little-endian)
+///   - data_points_count (4 bytes, i32, little-endian)
+///   - For each data point:
+///     - m/z (8 bytes, f64, little-endian)
+///     - intensity (4 bytes, f32, little-endian)
+///
+/// # Arguments
+/// * `spectra` - Iterator of (spectrum_id, data) tuples where data implements `DataPointProvider`
+pub fn serialize_to_bounding_box<'a, D, I>(spectra: I) -> Vec<u8>
+where
+    D: DataPointProvider + 'a,
+    I: Iterator<Item = (i64, &'a D)>,
+{
+    let mut buffer = Vec::new();
+    
+    for (spectrum_id, data) in spectra {
+        // Write spectrum ID (i32, little-endian)
+        buffer.extend_from_slice(&(spectrum_id as i32).to_le_bytes());
+        
+        // Write data points count (i32, little-endian)
+        buffer.extend_from_slice(&(data.data_points_count() as i32).to_le_bytes());
+        
+        // Write data points (f64 m/z + f32 intensity, little-endian)
+        for (mz, intensity) in data.mz_array().iter().zip(data.intensity_array().iter()) {
+            buffer.extend_from_slice(&mz.to_le_bytes());
+            buffer.extend_from_slice(&intensity.to_le_bytes());
+        }
+    }
+    
+    buffer
+}
+
+/// Insert a bounding box into the database
+/// 
+/// # Arguments
+/// * `conn` - Database connection
+/// * `bb_data` - Serialized bounding box data (use `serialize_to_bounding_box`)
+/// * `run_slice_id` - Run slice ID
+/// * `first_spectrum_id` - First spectrum ID in the bounding box
+/// * `last_spectrum_id` - Last spectrum ID in the bounding box
+/// 
+/// Returns the bounding box ID
+pub fn insert_bounding_box_data(
+    conn: &rusqlite::Connection,
+    bb_data: &[u8],
+    run_slice_id: i64,
+    first_spectrum_id: i64,
+    last_spectrum_id: i64,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO bounding_box (data, run_slice_id, first_spectrum_id, last_spectrum_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![bb_data, run_slice_id, first_spectrum_id, last_spectrum_id],
+    )?;
+    
+    Ok(conn.last_insert_rowid())
+}
+
+/// Insert an MSn R-tree entry for a DIA bounding box
+pub fn insert_msn_rtree_entry(
+    conn: &rusqlite::Connection,
+    bb_id: i64,
+    ms_level: i64,
+    parent_mz_min: f64,
+    parent_mz_max: f64,
+    mz_min: f64,
+    mz_max: f64,
+    time_min: f64,
+    time_max: f64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO bounding_box_msn_rtree (id, min_ms_level, max_ms_level, min_parent_mz, max_parent_mz, min_mz, max_mz, min_time, max_time)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![bb_id, ms_level, ms_level, parent_mz_min, parent_mz_max, mz_min, mz_max, time_min, time_max],
+    )?;
+    Ok(())
+}

@@ -67,10 +67,10 @@ pub struct BoundingBoxRTreeEntry {
 pub struct BoundingBoxMsnRTreeEntry {
     /// Bounding box ID (references bounding_box.id)
     pub id: i64,
-    /// Minimum MS level
-    pub min_ms_level: i64,
-    /// Maximum MS level
-    pub max_ms_level: i64,
+    /// Minimum MS level (stored as f64 in R-tree, but represents an integer)
+    pub min_ms_level: f64,
+    /// Maximum MS level (stored as f64 in R-tree, but represents an integer)
+    pub max_ms_level: f64,
     /// Minimum parent m/z (for DIA isolation window)
     pub min_parent_mz: f64,
     /// Maximum parent m/z (for DIA isolation window)
@@ -125,7 +125,8 @@ impl BoundingBoxRTreeEntry {
 impl BoundingBoxMsnRTreeEntry {
     /// Check if this entry matches a given MS level
     pub fn matches_ms_level(&self, ms_level: i64) -> bool {
-        ms_level >= self.min_ms_level && ms_level <= self.max_ms_level
+        let ms_level_f = ms_level as f64;
+        ms_level_f >= self.min_ms_level && ms_level_f <= self.max_ms_level
     }
     
     /// Check if this entry contains a given parent m/z (for DIA)
@@ -404,7 +405,7 @@ pub fn query_msn_bounding_boxes_for_dia(
          AND max_parent_mz >= ?2 AND min_parent_mz <= ?3"
     )?;
     
-    let entries = stmt.query_map([ms_level, min_parent_mz as i64, max_parent_mz as i64], |row| {
+    let entries = stmt.query_map(rusqlite::params![ms_level, min_parent_mz, max_parent_mz], |row| {
         Ok(BoundingBoxMsnRTreeEntry {
             id: row.get(0)?,
             min_ms_level: row.get(1)?,
@@ -621,8 +622,8 @@ mod tests {
     fn test_msn_rtree_entry_methods() {
         let entry = BoundingBoxMsnRTreeEntry {
             id: 1,
-            min_ms_level: 2,
-            max_ms_level: 2,
+            min_ms_level: 2.0,
+            max_ms_level: 2.0,
             min_parent_mz: 490.0,
             max_parent_mz: 510.0,
             min_mz: 100.0,

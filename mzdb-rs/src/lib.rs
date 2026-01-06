@@ -96,10 +96,16 @@ pub mod conversion;
 // Re-export conversion types (always available)
 pub use conversion::{MgfWriter, MgfWriterWithStats, MgfExportOptions, MgfExportStats};
 
+#[cfg(feature = "dda2dia")]
+pub use conversion::{
+    Dda2DiaConverter, DiaConversionOptions, DiaConversionStats,
+    Peakel, PeakelDbReader, DiaWindow, generate_dia_windows,
+};
+
 // Re-export main types for convenience
 pub use model::{
     AcquisitionMode, BBSizes, BoundingBox, BoundingBoxIndex, ByteOrder, DataEncoding,
-    DataEncodingsCache, DataMode, DataPrecision, EntityCache, MzRange, PeakEncoding,
+    DataEncodingsCache, DataMode, DataPointProvider, DataPrecision, EntityCache, MzRange, PeakEncoding,
     Spectrum, SpectrumData, SpectrumHeader, SpectrumSlice, XicMethod, XicPeak,
     RunSlice, RunSliceHeader, RunSliceData,
 };
