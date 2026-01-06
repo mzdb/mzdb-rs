@@ -15,12 +15,18 @@
 //!
 //! # MS2 peakel detection for DIA data
 //! mzdb2peakeldb -i input.mzDB -o output.peakeldb --ms-level 2
+//!
+//! # Use 4 threads for parallel processing
+//! mzdb2peakeldb -i input.mzDB -o output.peakeldb --threads 4
+//!
+//! # Use all available CPUs
+//! mzdb2peakeldb -i input.mzDB -o output.peakeldb --threads auto
 //! ```
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rusqlite::{Connection, params};
 
@@ -82,6 +88,10 @@ struct Args {
     #[arg(long = "format", default_value = "sqlite")]
     format: String,
 
+    /// Number of threads: 1 for single-threaded, 'auto' for all CPUs, or a specific number
+    #[arg(long = "threads", default_value = "1")]
+    threads: String,
+
     /// Verbosity level (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -111,6 +121,32 @@ impl Default for Ms1PeakelDetectionConfig {
     }
 }
 
+/// Parse and validate the threads parameter, returns the number of threads to use
+fn parse_threads(threads_arg: &str) -> Result<usize> {
+    let available_cpus = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    
+    let requested = if threads_arg.eq_ignore_ascii_case("auto") {
+        available_cpus
+    } else {
+        threads_arg.parse::<usize>()
+            .map_err(|_| anyhow::anyhow!("Invalid threads value '{}'. Use a positive number or 'auto'", threads_arg))?
+    };
+    
+    if requested < 1 {
+        bail!("Threads must be at least 1, got {}", requested);
+    }
+    
+    if requested > available_cpus {
+        eprintln!("Warning: Requested {} threads but only {} CPUs available. Capping to {}.", 
+                  requested, available_cpus, available_cpus);
+        Ok(available_cpus)
+    } else {
+        Ok(requested)
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -127,6 +163,23 @@ fn main() -> Result<()> {
         .format_timestamp_millis()
         .init();
 
+    // Parse and validate threads parameter
+    let num_threads = parse_threads(&args.threads)?;
+    
+    // Check if parallel processing is available
+    if num_threads > 1 {
+        #[cfg(feature = "processing-parallel")]
+        {
+            println!("Parallel processing enabled with {} threads", num_threads);
+        }
+        #[cfg(not(feature = "processing-parallel"))]
+        {
+            eprintln!("Warning: Parallel processing requested but 'processing-parallel' feature is not enabled.");
+            eprintln!("Rebuild with: cargo build --features processing-parallel");
+            eprintln!("Falling back to single-threaded mode.");
+        }
+    }
+
     // Print configuration
     println!("mzdb2peakeldb - Peakel Detection");
     println!("================================");
@@ -139,6 +192,7 @@ fn main() -> Result<()> {
     println!("Max consecutive gaps: {}", args.max_consecutive_gaps);
     println!("Algorithm: {}", args.algo);
     println!("Output format: {}", args.format);
+    println!("Threads: {}", num_threads);
     println!();
 
     // Open the mzDB file
@@ -159,7 +213,7 @@ fn main() -> Result<()> {
         1 => {
             #[cfg(feature = "processing")]
             {
-                run_ms1_detection(&args, &reader)?;
+                run_ms1_detection(&args, &reader, num_threads)?;
             }
             #[cfg(not(feature = "processing"))]
             {
@@ -171,7 +225,7 @@ fn main() -> Result<()> {
         2 => {
             #[cfg(feature = "processing")]
             {
-                run_ms2_dia_detection(&args, &reader)?;
+                run_ms2_dia_detection(&args, &reader, num_threads)?;
             }
             #[cfg(not(feature = "processing"))]
             {
@@ -197,7 +251,7 @@ fn main() -> Result<()> {
 // ============================================================================
 
 #[cfg(feature = "processing")]
-fn run_ms1_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
+fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
     let config = Ms1PeakelDetectionConfig {
         mz_tol_ppm: args.mz_tol_ppm,
         min_peaks_count: args.min_peaks,
@@ -208,7 +262,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
     };
 
     println!("Detecting MS1 peakels...");
-    let peakels = detect_ms1_peakels(reader, &config)?;
+    let peakels = detect_ms1_peakels(reader, &config, num_threads)?;
     
     if peakels.is_empty() {
         println!("No peakels detected. Check if the file contains MS1 data.");
@@ -216,6 +270,10 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
     }
 
     println!("Detected {} MS1 peakels", peakels.len());
+
+    // Check if mzDB file is DIA
+    let is_dia = reader.is_dia().unwrap_or(false);
+    println!("DIA experiment: {}", is_dia);
 
     // Get input filename for metadata
     let input_filename = args.mzdb_file_path
@@ -227,7 +285,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
     match args.format.as_str() {
         "sqlite" => {
             println!("Writing SQLite peakelDB...");
-            write_ms1_peakeldb(&args.output_file_path, input_filename, &peakels)?;
+            write_ms1_peakeldb(&args.output_file_path, input_filename, is_dia, &peakels)?;
         }
         "tsv" => {
             println!("Writing TSV file...");
@@ -235,7 +293,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
         }
         _ => {
             eprintln!("Warning: Unknown format '{}', defaulting to SQLite", args.format);
-            write_ms1_peakeldb(&args.output_file_path, input_filename, &peakels)?;
+            write_ms1_peakeldb(&args.output_file_path, input_filename, is_dia, &peakels)?;
         }
     }
 
@@ -248,7 +306,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
 }
 
 #[cfg(feature = "processing")]
-fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig) -> Result<Vec<Peakel>> {
+fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig, num_threads: usize) -> Result<Vec<Peakel>> {
     // Get MS1 spectrum headers sorted by time
     let headers = mzdb.get_spectrum_headers();
     let ms1_headers: Vec<_> = headers.iter()
@@ -283,6 +341,38 @@ fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig) -> R
     
     println!("  Found {} m/z bins with peaks", peaks_by_mz_bin.len());
     
+    // Convert to Vec for parallel processing
+    let bins: Vec<(i64, Vec<(f64, f32, i64, f32)>)> = peaks_by_mz_bin.into_iter().collect();
+    let total_bins = bins.len();
+    
+    println!("  Detecting peakels in each m/z bin...");
+    
+    // Choose between parallel and sequential processing
+    let all_peakels = if num_threads > 1 {
+        #[cfg(feature = "processing-parallel")]
+        {
+            detect_peakels_parallel(&bins, config, total_bins, num_threads)
+        }
+        #[cfg(not(feature = "processing-parallel"))]
+        {
+            detect_peakels_sequential(&bins, config, total_bins)
+        }
+    } else {
+        detect_peakels_sequential(&bins, config, total_bins)
+    };
+    
+    println!("  Detected {} peakels total", all_peakels.len());
+    
+    Ok(all_peakels)
+}
+
+/// Sequential peakel detection (single-threaded)
+#[cfg(feature = "processing")]
+fn detect_peakels_sequential(
+    bins: &[(i64, Vec<(f64, f32, i64, f32)>)],
+    config: &Ms1PeakelDetectionConfig,
+    total_bins: usize,
+) -> Vec<Peakel> {
     // Create peakel finder
     let finder: Box<dyn PeakelFinder> = match config.algorithm.as_str() {
         "smart" => {
@@ -297,67 +387,186 @@ fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig) -> R
         _ => Box::new(BasicPeakelFinder::default_params()),
     };
     
-    // Process each m/z bin to find peakels
-    println!("  Detecting peakels in each m/z bin...");
     let mut all_peakels = Vec::new();
     let mut bins_processed = 0;
-    let total_bins = peaks_by_mz_bin.len();
     
-    for (_bin, mut peaks) in peaks_by_mz_bin {
+    for (_bin, peaks) in bins {
         bins_processed += 1;
         if bins_processed % 10000 == 0 {
             println!("    Processed {}/{} bins, found {} peakels so far", 
                 bins_processed, total_bins, all_peakels.len());
         }
         
-        if peaks.len() < config.min_peaks_count {
+        let mut bin_peakels = process_single_bin(peaks, config, finder.as_ref());
+        all_peakels.append(&mut bin_peakels);
+    }
+    
+    all_peakels
+}
+
+/// Parallel peakel detection using producer-consumer pattern
+/// 
+/// Strategy: Use a bounded queue where producer sends batches of bins
+/// and consumer threads process them. Memory is bounded by queue size.
+#[cfg(all(feature = "processing", feature = "processing-parallel"))]
+fn detect_peakels_parallel(
+    bins: &[(i64, Vec<(f64, f32, i64, f32)>)],
+    config: &Ms1PeakelDetectionConfig,
+    total_bins: usize,
+    num_threads: usize,
+) -> Vec<Peakel> {
+    use crossbeam_channel::bounded;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    
+    let queue_size = num_threads * 2;
+    let batch_size = std::cmp::max(100, total_bins / (num_threads * 4)); // Adaptive batch size
+    
+    println!("    Using {} threads with queue size {} and batch size {}", 
+             num_threads, queue_size, batch_size);
+    
+    // Create bounded channel for bin batches
+    type BinBatch = Vec<(i64, Vec<(f64, f32, i64, f32)>)>;
+    let (tx, rx) = bounded::<BinBatch>(queue_size);
+    
+    // Shared results collector and progress counter
+    let results: Mutex<Vec<Peakel>> = Mutex::new(Vec::new());
+    let bins_processed = AtomicUsize::new(0);
+    
+    // Use std::thread::scope for scoped threads
+    std::thread::scope(|scope| {
+        // Spawn consumer threads
+        for _ in 0..num_threads {
+            let rx = rx.clone();
+            let results = &results;
+            let bins_processed = &bins_processed;
+            
+            scope.spawn(move || {
+                // Create thread-local peakel finder
+                let finder: Box<dyn PeakelFinder + Send + Sync> = match config.algorithm.as_str() {
+                    "smart" => {
+                        let finder_config = SmartPeakelFinderConfig {
+                            min_peaks_count: config.min_peaks_count,
+                            use_smoothing: true,
+                            use_baseline_remover: false,
+                            ..Default::default()
+                        };
+                        Box::new(SmartPeakelFinder::with_config(finder_config))
+                    }
+                    _ => Box::new(BasicPeakelFinder::default_params()),
+                };
+                
+                let mut thread_peakels: Vec<Peakel> = Vec::new();
+                
+                // Process batches until channel is closed
+                while let Ok(batch) = rx.recv() {
+                    for (_bin_id, peaks) in batch {
+                        let mut bin_peakels = process_single_bin(&peaks, config, finder.as_ref());
+                        thread_peakels.append(&mut bin_peakels);
+                        
+                        let count = bins_processed.fetch_add(1, Ordering::Relaxed);
+                        if count % 10000 == 0 {
+                            println!("    Processed ~{}/{} bins", count, total_bins);
+                        }
+                    }
+                }
+                
+                // Collect results
+                if let Ok(mut guard) = results.lock() {
+                    guard.append(&mut thread_peakels);
+                }
+            });
+        }
+        
+        // Drop extra receiver clone
+        drop(rx);
+        
+        // Producer: send bins in batches
+        let mut current_batch: BinBatch = Vec::with_capacity(batch_size);
+        
+        for (bin_id, peaks) in bins {
+            current_batch.push((*bin_id, peaks.clone()));
+            
+            if current_batch.len() >= batch_size {
+                // Send batch (blocks if queue is full)
+                let batch_to_send = std::mem::take(&mut current_batch);
+                if tx.send(batch_to_send).is_err() {
+                    println!("    Warning: Failed to send batch to queue");
+                    break;
+                }
+                current_batch.reserve(batch_size);
+            }
+        }
+        
+        // Send remaining bins
+        if !current_batch.is_empty() {
+            let _ = tx.send(current_batch);
+        }
+        
+        // Drop sender to signal completion
+        drop(tx);
+        
+        // Threads are automatically joined when scope exits
+    });
+    
+    // Extract results
+    results.into_inner().unwrap_or_default()
+}
+
+/// Process a single m/z bin to find peakels
+#[cfg(feature = "processing")]
+fn process_single_bin(
+    peaks: &[(f64, f32, i64, f32)],
+    config: &Ms1PeakelDetectionConfig,
+    finder: &dyn PeakelFinder,
+) -> Vec<Peakel> {
+    if peaks.len() < config.min_peaks_count {
+        return Vec::new();
+    }
+    
+    // Sort peaks by retention time
+    let mut sorted_peaks = peaks.to_vec();
+    sorted_peaks.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+    
+    // Build RT-intensity pairs for peakel detection
+    let rt_int_pairs: Vec<(f32, f64)> = sorted_peaks.iter()
+        .map(|&(_, intensity, _, rt)| (rt, intensity as f64))
+        .collect();
+    
+    // Find peakels
+    let peakel_indices = finder.find_peakels_indices(&rt_int_pairs);
+    
+    // Convert detected indices to Peakel objects
+    let mut bin_peakels = Vec::new();
+    for (start, end) in peakel_indices {
+        if end - start + 1 < config.min_peaks_count {
             continue;
         }
         
-        // Sort peaks by retention time
-        peaks.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+        let peakel_peaks = &sorted_peaks[start..=end];
         
-        // Build RT-intensity pairs for peakel detection
-        let rt_int_pairs: Vec<(f32, f64)> = peaks.iter()
-            .map(|&(_, intensity, _, rt)| (rt, intensity as f64))
-            .collect();
+        let spectrum_ids: Vec<i64> = peakel_peaks.iter().map(|p| p.2).collect();
+        let elution_times: Vec<f32> = peakel_peaks.iter().map(|p| p.3).collect();
+        let mz_values: Vec<f64> = peakel_peaks.iter().map(|p| p.0).collect();
+        let intensity_values: Vec<f32> = peakel_peaks.iter().map(|p| p.1).collect();
         
-        // Find peakels
-        let peakel_indices = finder.find_peakels_indices(&rt_int_pairs);
+        let peakel = Peakel::new(
+            spectrum_ids,
+            elution_times,
+            mz_values,
+            intensity_values,
+            None,
+            None,
+        );
         
-        // Convert detected indices to Peakel objects
-        for (start, end) in peakel_indices {
-            if end - start + 1 < config.min_peaks_count {
-                continue;
-            }
-            
-            let peakel_peaks = &peaks[start..=end];
-            
-            let spectrum_ids: Vec<i64> = peakel_peaks.iter().map(|p| p.2).collect();
-            let elution_times: Vec<f32> = peakel_peaks.iter().map(|p| p.3).collect();
-            let mz_values: Vec<f64> = peakel_peaks.iter().map(|p| p.0).collect();
-            let intensity_values: Vec<f32> = peakel_peaks.iter().map(|p| p.1).collect();
-            
-            let peakel = Peakel::new(
-                spectrum_ids,
-                elution_times,
-                mz_values,
-                intensity_values,
-                None,
-                None,
-            );
-            
-            all_peakels.push(peakel);
-        }
+        bin_peakels.push(peakel);
     }
     
-    println!("  Detected {} peakels total", all_peakels.len());
-    
-    Ok(all_peakels)
+    bin_peakels
 }
 
 #[cfg(feature = "processing")]
-fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, peakels: &[Peakel]) -> Result<()> {
+fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, is_dia: bool, peakels: &[Peakel]) -> Result<()> {
     // Remove existing file if present
     if path.as_ref().exists() {
         std::fs::remove_file(path.as_ref())?;
@@ -382,7 +591,7 @@ fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, peakels: &[P
     conn.execute(
         "INSERT INTO peakeldb_file (id, name, description, raw_file_name, is_dia_experiment, 
          creation_timestamp, modification_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        params![1, mzdb_filename, "Generated by mzdb2peakeldb", mzdb_filename, false, &now, &now],
+        params![1, mzdb_filename, "Generated by mzdb2peakeldb", mzdb_filename, is_dia, &now, &now],
     )?;
 
     // Insert lcms_map record
@@ -397,8 +606,8 @@ fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, peakels: &[P
     let mut peakel_stmt = conn.prepare(
         "INSERT INTO peakel (id, moz, elution_time, duration, gap_count, apex_intensity, area,
          amplitude, intensity_cv, left_hwhm_mean, left_hwhm_cv, right_hwhm_mean, right_hwhm_cv,
-         peak_count, peaks, first_spectrum_id, apex_spectrum_id, last_spectrum_id, 
-         is_selected, serialized_properties, map_id)
+         is_interfering, peak_count, peaks, serialized_properties,
+         first_spectrum_id, apex_spectrum_id, last_spectrum_id, map_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )?;
 
@@ -431,6 +640,10 @@ fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, peakels: &[P
         let last_spectrum_id = peakel.spectrum_ids.last().copied().unwrap_or(0);
         let amplitude = apex_intensity / min_intensity.max(1.0);
 
+        // Use Option for nullable HWHM values (null if not computed)
+        let left_hwhm_opt: Option<f32> = if left_hwhm_mean > 0.0 { Some(left_hwhm_mean as f32) } else { None };
+        let right_hwhm_opt: Option<f32> = if right_hwhm_mean > 0.0 { Some(right_hwhm_mean as f32) } else { None };
+
         peakel_stmt.execute(params![
             peakel_id,
             mz,
@@ -441,17 +654,17 @@ fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, peakels: &[P
             area,
             amplitude,
             0.0, // intensity_cv
-            left_hwhm_mean,
-            0.0, // left_hwhm_cv
-            right_hwhm_mean,
-            0.0, // right_hwhm_cv
+            left_hwhm_opt,
+            Option::<f32>::None, // left_hwhm_cv
+            right_hwhm_opt,
+            Option::<f32>::None, // right_hwhm_cv
+            false, // is_interfering
             peak_count,
             peaks_blob,
+            Option::<String>::None, // serialized_properties
             first_spectrum_id,
             apex_spectrum_id,
             last_spectrum_id,
-            false, // is_selected
-            Option::<String>::None, // serialized_properties
             1, // map_id
         ])?;
 
@@ -559,7 +772,7 @@ fn print_ms1_statistics(peakels: &[Peakel]) {
 // ============================================================================
 
 #[cfg(feature = "processing")]
-fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
+fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
     let config = DiaMs2PeakelConfig {
         mz_tol_ppm: args.mz_tol_ppm,
         min_intensity: args.min_intensity,
@@ -572,7 +785,7 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader) -> Result<()> {
     let detector = DiaMs2PeakelDetector::with_config(config);
     
     println!("Detecting MS2 peakels (DIA mode)...");
-    let (windows, peakels) = detector.detect_all_peakels(reader)?;
+    let (windows, peakels) = detector.detect_all_peakels_with_threads(reader, num_threads)?;
     
     println!();
     println!("=== DIA MS2 Peakel Detection Results ===");
@@ -807,7 +1020,7 @@ CREATE TABLE lcms_map (
 
 CREATE TABLE peakel (
     id INTEGER NOT NULL PRIMARY KEY,
-    moz REAL NOT NULL,
+    moz DOUBLE NOT NULL,
     elution_time REAL NOT NULL,
     duration REAL NOT NULL,
     gap_count INTEGER NOT NULL,
@@ -815,19 +1028,20 @@ CREATE TABLE peakel (
     area REAL NOT NULL,
     amplitude REAL NOT NULL,
     intensity_cv REAL NOT NULL,
-    left_hwhm_mean REAL NOT NULL,
-    left_hwhm_cv REAL NOT NULL,
-    right_hwhm_mean REAL NOT NULL,
-    right_hwhm_cv REAL NOT NULL,
+    left_hwhm_mean REAL,
+    left_hwhm_cv REAL,
+    right_hwhm_mean REAL,
+    right_hwhm_cv REAL,
+    is_interfering BOOLEAN NOT NULL,
     peak_count INTEGER NOT NULL,
     peaks BLOB NOT NULL,
+    serialized_properties TEXT,
     first_spectrum_id INTEGER NOT NULL,
     apex_spectrum_id INTEGER NOT NULL,
     last_spectrum_id INTEGER NOT NULL,
-    is_selected BOOLEAN NOT NULL DEFAULT 0,
-    serialized_properties TEXT,
     map_id INTEGER NOT NULL,
     FOREIGN KEY (map_id) REFERENCES lcms_map (id)
+);
 );
 
 CREATE VIRTUAL TABLE peakel_rtree USING rtree(

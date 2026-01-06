@@ -872,7 +872,9 @@ fn write_simplified_dia_mzdb(
     // Commit transaction
     conn.execute_batch("COMMIT;")?;
 
-    // Optimize
+    // Reclaim disk space and optimize
+    log::info!("Running VACUUM to reclaim disk space...");
+    conn.execute_batch("VACUUM;")?;
     conn.execute_batch("PRAGMA optimize;")?;
 
     log::info!(

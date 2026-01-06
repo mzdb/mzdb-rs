@@ -305,16 +305,16 @@ impl<'a> SpectrumIterator<'a> {
     fn read_next_bb(&mut self) -> Result<Option<BoundingBox>> {
         self.ensure_rows()?;
         
-        if let Some(ref mut rows) = self.rows
-            && let Some(row) = rows.next().dot()?
-        {
-            return Ok(Some(BoundingBox {
-                id: row.get(0)?,
-                first_spectrum_id: row.get(3)?,
-                last_spectrum_id: row.get(4)?,
-                run_slice_id: row.get(2)?,
-                blob_data: row.get(1)?,
-            }));
+        if let Some(ref mut rows) = self.rows {
+            if let Some(row) = rows.next().dot()? {
+                return Ok(Some(BoundingBox {
+                    id: row.get(0)?,
+                    first_spectrum_id: row.get(3)?,
+                    last_spectrum_id: row.get(4)?,
+                    run_slice_id: row.get(2)?,
+                    blob_data: row.get(1)?,
+                }));
+            }
         }
         
         Ok(None)
@@ -420,4 +420,187 @@ impl<'a> FallibleIterator for SpectrumIterator<'a> {
         }
     }
 }
+
+// ============================================================================
+// DIA Spectrum Iterator - efficient iteration over MS2 spectra by isolation window
+// ============================================================================
+
+/// Create a SQL statement for iterating bounding boxes filtered by main_precursor_mz
+/// This is much more efficient than loading all MS2 spectra and filtering in memory.
+pub fn create_bb_iter_stmt_for_dia_window(
+    db: &Connection, 
+    _main_precursor_mz: f64,
+) -> Result<Statement<'_>> {
+    let stmt = db
+        .prepare(
+            "SELECT bounding_box.* FROM bounding_box, spectrum \
+             WHERE spectrum.id = bounding_box.first_spectrum_id \
+             AND spectrum.ms_level = 2 \
+             AND spectrum.main_precursor_mz = ?1 \
+             ORDER BY spectrum.time"
+        )
+        .dot()?;
+    
+    Ok(stmt)
+}
+
+/// Iterate over bounding boxes for a specific DIA isolation window
+pub fn for_each_bb_dia<F>(
+    db: &Connection, 
+    main_precursor_mz: f64, 
+    mut on_each_bb: F
+) -> Result<()>
+where
+    F: FnMut(BoundingBox) -> Result<()>,
+{
+    let mut stmt = db
+        .prepare(
+            "SELECT bounding_box.* FROM bounding_box, spectrum \
+             WHERE spectrum.id = bounding_box.first_spectrum_id \
+             AND spectrum.ms_level = 2 \
+             AND spectrum.main_precursor_mz = ?1 \
+             ORDER BY spectrum.time"
+        )
+        .dot()?;
+    
+    let rows = stmt
+        .query_map([main_precursor_mz], |row| {
+            rusqlite::Result::Ok(BoundingBox {
+                id: row.get(0)?,
+                first_spectrum_id: row.get(3)?,
+                last_spectrum_id: row.get(4)?,
+                run_slice_id: row.get(2)?,
+                blob_data: row.get(1)?,
+            })
+        })
+        .dot()?;
+
+    for bb_res in rows {
+        on_each_bb(bb_res?)?;
+    }
+
+    Ok(())
+}
+
+/// Iterate over MS2 spectra for a specific DIA isolation window (by main_precursor_mz)
+/// 
+/// This is much more efficient than `for_each_spectrum` with post-filtering because
+/// it uses SQL to filter directly on main_precursor_mz, avoiding loading unnecessary data.
+/// 
+/// Spectra are returned in retention time order.
+pub fn for_each_dia_spectrum<F>(
+    db: &Connection,
+    entity_cache: &EntityCache,
+    main_precursor_mz: f64,
+    mut on_each_spectrum: F,
+) -> Result<()>
+where
+    F: FnMut(&Spectrum) -> Result<()>,
+{
+    use std::collections::BTreeMap;
+    
+    // Collect bounding boxes grouped by first_spectrum_id
+    let mut bb_by_first_spec: BTreeMap<i64, Vec<BoundingBox>> = BTreeMap::new();
+
+    for_each_bb_dia(db, main_precursor_mz, |bb: BoundingBox| {
+        bb_by_first_spec.entry(bb.first_spectrum_id).or_default().push(bb);
+        Ok(())
+    })?;
+
+    // Process each spectrum's bounding boxes
+    let mut spectrum_buffer = Vec::with_capacity(1);
+    
+    for (_first_spec_id, bbs) in bb_by_first_spec {
+        spectrum_buffer.clear();
+        bb_row_buffer_to_spectrum_buffer(&bbs, &mut spectrum_buffer, entity_cache)
+            .dot()?;
+        
+        for s in &spectrum_buffer {
+            on_each_spectrum(s)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// DIA Spectrum Iterator - iterates over MS2 spectra for a specific isolation window
+/// 
+/// This is the iterator-based equivalent of `for_each_dia_spectrum`.
+pub struct DiaSpectrumIterator {
+    spectrum_buffer: Vec<Spectrum>,
+    spectrum_buffer_idx: usize,
+}
+
+impl DiaSpectrumIterator {
+    /// Create a new DIA spectrum iterator for the given isolation window
+    pub fn new(
+        db: &Connection,
+        entity_cache: &EntityCache,
+        main_precursor_mz: f64,
+    ) -> Result<Self> {
+        use std::collections::BTreeMap;
+        
+        let mut spectrum_buffer = Vec::with_capacity(500);
+        
+        // Collect bounding boxes grouped by first_spectrum_id
+        let mut bb_by_first_spec: BTreeMap<i64, Vec<BoundingBox>> = BTreeMap::new();
+
+        for_each_bb_dia(db, main_precursor_mz, |bb: BoundingBox| {
+            bb_by_first_spec.entry(bb.first_spectrum_id).or_default().push(bb);
+            Ok(())
+        })?;
+
+        // Process each spectrum's bounding boxes
+        let mut temp_buffer = Vec::with_capacity(1);
+        
+        for (_first_spec_id, bbs) in bb_by_first_spec {
+            temp_buffer.clear();
+            bb_row_buffer_to_spectrum_buffer(&bbs, &mut temp_buffer, entity_cache)
+                .dot()?;
+            spectrum_buffer.extend(temp_buffer.drain(..));
+        }
+
+        // Sort by retention time
+        spectrum_buffer.sort_by(|s1, s2| {
+            s1.header.time.partial_cmp(&s2.header.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(Self {
+            spectrum_buffer,
+            spectrum_buffer_idx: 0,
+        })
+    }
+    
+    /// Get the number of spectra in this iterator
+    pub fn len(&self) -> usize {
+        self.spectrum_buffer.len()
+    }
+    
+    /// Check if the iterator is empty
+    pub fn is_empty(&self) -> bool {
+        self.spectrum_buffer.is_empty()
+    }
+    
+    /// Consume the iterator and return all spectra as a Vec
+    pub fn collect_vec(self) -> Vec<Spectrum> {
+        self.spectrum_buffer
+    }
+}
+
+impl FallibleIterator for DiaSpectrumIterator {
+    type Item = Spectrum;
+    type Error = anyhow::Error;
+
+    fn next(&mut self) -> Result<Option<Self::Item>> {
+        if self.spectrum_buffer_idx < self.spectrum_buffer.len() {
+            let spectrum = self.spectrum_buffer[self.spectrum_buffer_idx].clone();
+            self.spectrum_buffer_idx += 1;
+            Ok(Some(spectrum))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 

@@ -13,6 +13,7 @@ use crate::iterator::{for_each_spectrum as iterator_for_each_spectrum, SpectrumI
 use crate::metadata::*;
 use crate::model::*;
 use crate::queries::*;
+use crate::queries_extended::is_dia_data;
 use crate::rtree::*;
 
 /// Main entry point for reading mzDB files
@@ -254,6 +255,62 @@ impl MzDbReader {
         });
         
         Ok(spectra)
+    }
+
+    /// Get MS2 spectra for a DIA isolation window using efficient SQL filtering
+    ///
+    /// This method is much faster than `get_ms2_spectra_for_isolation_window` because
+    /// it uses SQL to filter by `main_precursor_mz` directly, avoiding individual
+    /// spectrum queries.
+    ///
+    /// # Arguments
+    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
+    ///   (as stored in the spectrum table's `main_precursor_mz` column)
+    ///
+    /// # Returns
+    /// A vector of spectra sorted by retention time
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mzdb::MzDbReader;
+    ///
+    /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
+    /// // Use exact precursor m/z from the file (e.g., 500.0)
+    /// let spectra = reader.get_dia_spectra_for_window(500.0).unwrap();
+    /// println!("Found {} MS2 spectra in window 500.0 m/z", spectra.len());
+    /// ```
+    pub fn get_dia_spectra_for_window(
+        &self,
+        main_precursor_mz: f64,
+    ) -> Result<Vec<Spectrum>> {
+        use crate::iterator::DiaSpectrumIterator;
+        
+        let iter = DiaSpectrumIterator::new(&self.connection, &self.entity_cache, main_precursor_mz)?;
+        Ok(iter.collect_vec())
+    }
+
+    /// Iterate over MS2 spectra for a DIA isolation window using a callback
+    ///
+    /// This is the callback-based version of `get_dia_spectra_for_window`.
+    /// Uses efficient SQL filtering by `main_precursor_mz`.
+    ///
+    /// # Arguments
+    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
+    /// * `on_each_spectrum` - Callback function called for each spectrum
+    pub fn for_each_dia_spectrum<F>(
+        &self,
+        main_precursor_mz: f64,
+        on_each_spectrum: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Spectrum) -> Result<()>,
+    {
+        crate::iterator::for_each_dia_spectrum(
+            &self.connection,
+            &self.entity_cache,
+            main_precursor_mz,
+            on_each_spectrum,
+        )
     }
 
     /// Get all unique isolation windows (precursor m/z values) for MS2 spectra
@@ -527,6 +584,14 @@ impl MzDbReader {
     /// Check if MSn R-tree index is available (for DIA)
     pub fn has_msn_rtree(&self) -> Result<bool> {
         has_msn_rtree(&self.connection)
+    }
+
+    /// Check if the file appears to be DIA data
+    ///
+    /// DIA data typically has many MS2 spectra with similar precursor m/z patterns
+    /// and an MSn R-tree index.
+    pub fn is_dia(&self) -> Result<bool> {
+        is_dia_data(&self.connection)
     }
 
     /// Get R-tree statistics
