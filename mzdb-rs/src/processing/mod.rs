@@ -9,6 +9,7 @@
 //! - **Peak detection**: Basic, Smart, and Histogram-based peakel finder algorithms
 //! - **Math utilities**: Derivative analysis, histogram computation, statistical functions
 //! - **MS utilities**: m/z tolerance conversions, isotope pattern calculations
+//! - **DIA processing**: MS2 peakel detection for Data Independent Acquisition data
 //!
 //! # Example
 //!
@@ -38,11 +39,13 @@
 //! - [`math`]: Mathematical utilities (derivatives, histograms, statistics)
 //! - [`ms`]: Mass spectrometry utilities (m/z conversions, isotope patterns)
 //! - [`model`]: Core data structures (Peak, Peakel, Feature, etc.)
+//! - [`dia`]: DIA (Data Independent Acquisition) MS2 peakel detection
 
 pub mod signal;
 pub mod math;
 pub mod ms;
 pub mod model;
+pub mod dia;
 
 // Re-export commonly used types
 pub use model::{
@@ -74,4 +77,10 @@ pub use math::{
     calc_ternary_slopes, LocalExtremum, find_local_extrema, filter_significant_extrema,
     HistogramBin, compute_histogram, compute_histogram_2d,
     median, mad, robust_noise_threshold,
+};
+
+// Re-export DIA types
+pub use dia::{
+    IsolationWindow, PeaksData, DiaMs2PeakelRecord, DiaMs2PeakelConfig,
+    DiaMs2PeakelDetector, write_dia_peakels_tsv, write_dia_peakeldb,
 };

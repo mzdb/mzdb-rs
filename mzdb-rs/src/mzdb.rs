@@ -204,6 +204,80 @@ impl MzDbReader {
     }
 
     // ========================================================================
+    // DIA (Data Independent Acquisition) support
+    // ========================================================================
+
+    /// Get all MS2 spectra for a specific isolation window (by precursor m/z)
+    ///
+    /// This method retrieves all MS2 spectra that fall within a specified isolation
+    /// window, which is useful for DIA data processing where spectra are grouped
+    /// by their precursor m/z range.
+    ///
+    /// # Arguments
+    /// * `window_mz` - The center m/z of the isolation window
+    /// * `mz_tolerance` - The m/z tolerance for matching (default: 0.5 Da)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mzdb::MzDbReader;
+    ///
+    /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
+    /// let spectra = reader.get_ms2_spectra_for_isolation_window(500.0, 0.5).unwrap();
+    /// println!("Found {} MS2 spectra in window 500.0 m/z", spectra.len());
+    /// ```
+    pub fn get_ms2_spectra_for_isolation_window(
+        &self,
+        window_mz: f64,
+        mz_tolerance: f64,
+    ) -> Result<Vec<Spectrum>> {
+        let min_mz = window_mz - mz_tolerance;
+        let max_mz = window_mz + mz_tolerance;
+        
+        let mut spectra = Vec::new();
+        
+        for header in self.get_spectrum_headers() {
+            if header.ms_level == 2 {
+                if let Some(prec_mz) = header.precursor_mz {
+                    if prec_mz >= min_mz && prec_mz <= max_mz {
+                        if let Ok(spectrum) = self.get_spectrum(header.id) {
+                            spectra.push(spectrum);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort by retention time for proper chromatographic processing
+        spectra.sort_by(|a, b| {
+            a.header.time.partial_cmp(&b.header.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        Ok(spectra)
+    }
+
+    /// Get all unique isolation windows (precursor m/z values) for MS2 spectra
+    ///
+    /// This is useful for discovering all DIA windows in a file before processing.
+    /// Windows are grouped by rounding to 0.1 m/z.
+    pub fn get_isolation_windows(&self) -> Vec<f64> {
+        use std::collections::BTreeSet;
+        
+        let mut windows: BTreeSet<i64> = BTreeSet::new();
+        for header in self.get_spectrum_headers() {
+            if header.ms_level == 2 {
+                if let Some(prec_mz) = header.precursor_mz {
+                    // Round to 1 decimal place for grouping
+                    let window_key = (prec_mz * 10.0).round() as i64;
+                    windows.insert(window_key);
+                }
+            }
+        }
+        
+        windows.into_iter().map(|k| k as f64 / 10.0).collect()
+    }
+
+    // ========================================================================
     // Chromatogram access
     // ========================================================================
 
