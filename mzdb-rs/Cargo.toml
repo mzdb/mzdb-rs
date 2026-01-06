@@ -51,6 +51,7 @@ writer = []
 cli = ["clap","env_logger"]
 dda2dia = ["cli","writer", "ordered-float", "rmpv"]
 thermo2mzdb = ["writer", "thernio", "xmltree"]
+shrinkdia = ["cli", "processing", "ordered-float", "rmpv"]
 processing = ["nalgebra", "statrs", "thiserror","rmp-serde"]
 processing-parallel = ["processing", "rayon"]
 all = ["processing-parallel","thermo2mzdb"]
@@ -81,6 +82,11 @@ required-features = ["cli","dda2dia"]
 name = "mzdbcheck"
 path = "src/bin/mzdbcheck.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "shrinkdia"
+path = "src/bin/shrinkdia.rs"
+required-features = ["cli", "shrinkdia"]
 
 [lib]
 name = "mzdb"

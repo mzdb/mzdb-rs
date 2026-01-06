@@ -10,6 +10,7 @@
 //! - **Math utilities**: Derivative analysis, histogram computation, statistical functions
 //! - **MS utilities**: m/z tolerance conversions, isotope pattern calculations
 //! - **DIA processing**: MS2 peakel detection for Data Independent Acquisition data
+//! - **DIA simplifier** (with `shrinkdia` feature): Simplify DIA files using peakels
 //!
 //! # Example
 //!
@@ -40,12 +41,16 @@
 //! - [`ms`]: Mass spectrometry utilities (m/z conversions, isotope patterns)
 //! - [`model`]: Core data structures (Peak, Peakel, Feature, etc.)
 //! - [`dia`]: DIA (Data Independent Acquisition) MS2 peakel detection
+//! - [`dia_simplifier`]: DIA file simplification (requires `shrinkdia` feature)
 
 pub mod signal;
 pub mod math;
 pub mod ms;
 pub mod model;
 pub mod dia;
+
+#[cfg(all(feature = "ordered-float", feature = "rmpv"))]
+pub mod dia_simplifier;
 
 // Re-export commonly used types
 pub use model::{
@@ -83,4 +88,12 @@ pub use math::{
 pub use dia::{
     IsolationWindow, PeaksData, DiaMs2PeakelRecord, DiaMs2PeakelConfig,
     DiaMs2PeakelDetector, write_dia_peakels_tsv, write_dia_peakeldb,
+};
+
+// Re-export DIA simplifier types (when feature enabled)
+#[cfg(all(feature = "ordered-float", feature = "rmpv"))]
+pub use dia_simplifier::{
+    DiaSimplifier, DiaSimplifierConfig, SimplifiedSpectrum,
+    SimplifierPeakel, PeakelDbReader, SimplificationStats,
+    SpectrumHeader,
 };
