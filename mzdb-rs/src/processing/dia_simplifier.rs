@@ -35,6 +35,7 @@ use rusqlite::{params, Connection};
 
 use crate::processing::dia::IsolationWindow;
 use crate::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel};
+use crate::processing::staggered::{StaggeredDiaDetector, StaggeredDiaInfo};
 use crate::writer::{
     DiaWriteContext, DiaSpectrumParams,
     calculate_time_bounds, calculate_mz_bounds, calculate_mz_bounds_from_arrays, find_base_peak,
@@ -172,7 +173,43 @@ impl DiaSimplifier {
         // Read isolation windows
         log::info!("Reading isolation windows...");
         let isolation_windows = peakeldb.read_isolation_windows()?;
-        log::info!("Found {} isolation windows", isolation_windows.len());
+        let original_window_count = isolation_windows.len();
+        log::info!("Found {} isolation windows", original_window_count);
+
+        // Detect staggered DIA mode
+        log::info!("Checking for staggered DIA acquisition...");
+        let stagger_info = detect_staggered_from_mzdb(&mzdb_conn)?;
+        
+        let (staggered_detected, staggered_offset, unstaggered_window_count) = if stagger_info.is_staggered {
+            log::info!("╔══════════════════════════════════════════════════════════════╗");
+            log::info!("║              STAGGERED DIA DETECTED                          ║");
+            log::info!("╠══════════════════════════════════════════════════════════════╣");
+            log::info!("║  Window offset: {:.2} Da                                      ", stagger_info.window_offset);
+            log::info!("║  Window width:  {:.2} Da                                      ", stagger_info.window_width);
+            log::info!("║  Cycle A windows (odd):  {}                                   ", stagger_info.cycle_a_windows.len());
+            log::info!("║  Cycle B windows (even): {}                                   ", stagger_info.cycle_b_windows.len());
+            log::info!("║  Unstaggered windows:    {}                                   ", stagger_info.unstaggered_windows.len());
+            log::info!("╚══════════════════════════════════════════════════════════════╝");
+            
+            // Log sample windows
+            if !stagger_info.cycle_a_windows.is_empty() {
+                let sample_a: Vec<_> = stagger_info.cycle_a_windows.iter().take(5).map(|w| format!("{:.1}", w.target_mz)).collect();
+                log::info!("  Cycle A sample: {} ...", sample_a.join(", "));
+            }
+            if !stagger_info.cycle_b_windows.is_empty() {
+                let sample_b: Vec<_> = stagger_info.cycle_b_windows.iter().take(5).map(|w| format!("{:.1}", w.target_mz)).collect();
+                log::info!("  Cycle B sample: {} ...", sample_b.join(", "));
+            }
+            if !stagger_info.unstaggered_windows.is_empty() {
+                let sample_u: Vec<_> = stagger_info.unstaggered_windows.iter().take(5).map(|w| format!("{:.1}-{:.1}", w.lower_mz, w.upper_mz)).collect();
+                log::info!("  Unstaggered sample: {} ...", sample_u.join(", "));
+            }
+            
+            (true, stagger_info.window_offset, stagger_info.unstaggered_windows.len())
+        } else {
+            log::info!("Standard (non-staggered) DIA mode");
+            (false, 0.0, 0)
+        };
 
         // Build isolation window lookup
         let window_lookup: HashMap<i64, IsolationWindow> = isolation_windows
@@ -229,12 +266,22 @@ impl DiaSimplifier {
             original_ms2_count,
             simplified_ms2_count,
             data_point_count,
+            staggered_detected,
+            staggered_offset,
+            original_window_count,
+            unstaggered_window_count,
         };
 
         log::info!("Done! Stats: {:?}", stats);
 
         Ok(stats)
     }
+}
+
+/// Detect staggered DIA from mzDB connection
+fn detect_staggered_from_mzdb(conn: &Connection) -> Result<StaggeredDiaInfo> {
+    let detector = StaggeredDiaDetector::new();
+    detector.detect(conn)
 }
 
 impl Default for DiaSimplifier {
@@ -250,6 +297,14 @@ pub struct SimplificationStats {
     pub original_ms2_count: usize,
     pub simplified_ms2_count: usize,
     pub data_point_count: usize,
+    /// Whether staggered DIA was detected
+    pub staggered_detected: bool,
+    /// The detected window offset (0.0 if not staggered)
+    pub staggered_offset: f64,
+    /// Number of original isolation windows
+    pub original_window_count: usize,
+    /// Number of unstaggered windows (if staggered was detected)
+    pub unstaggered_window_count: usize,
 }
 
 // ============================================================================

@@ -42,6 +42,7 @@
 //! - [`model`]: Core data structures (Peak, Peakel, Feature, etc.)
 //! - [`dia`]: DIA (Data Independent Acquisition) MS2 peakel detection
 //! - [`dia_simplifier`]: DIA file simplification (requires `shrinkdia` feature)
+//! - [`staggered`]: Staggered DIA detection and unstaggering support
 
 pub mod signal;
 pub mod math;
@@ -49,6 +50,7 @@ pub mod ms;
 pub mod model;
 pub mod dia;
 pub mod peakeldb;
+pub mod staggered;
 
 #[cfg(feature = "shrinkdia")]
 pub mod dia_simplifier;
@@ -107,4 +109,14 @@ pub use peakeldb::{
 pub use dia_simplifier::{
     DiaSimplifier, DiaSimplifierConfig, SimplifiedSpectrum,
     SimplificationStats, SpectrumHeader,
+};
+
+// Re-export staggered DIA types
+pub use staggered::{
+    StaggeredDiaDetector, StaggeredDiaInfo, StaggeredPeakelConfig,
+    UnstaggeredWindow, UnstaggeredWindowType,
+    MzTolerance, SingleObservationStrategy, MultipleMatchStrategy,
+    StaggeredPeakelMatcher, PeakelMatchResult, MatchedPeakelPair,
+    SingleObservationPeakel, AmbiguousMatch, CycleType,
+    PeakelMerger, MergedPeakel, MergeStats, MergeConfig,
 };
