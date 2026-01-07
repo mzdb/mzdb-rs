@@ -32,7 +32,6 @@ use smallvec::SmallVec;
 
 use mzdb::MzDbReader;
 
-#[cfg(feature = "processing")]
 use mzdb::processing::{
     SmartPeakelFinder, SmartPeakelFinderConfig, PeakelFinder, BasicPeakelFinder,
     Peakel,
@@ -41,7 +40,6 @@ use mzdb::processing::{
     DiaMs2PeakelRecord,
     // PeakelDB types
     Ms1PeakelDbWriter, Ms2PeakelDbWriter,
-    write_ms1_peakels_tsv, print_ms1_statistics, print_ms2_statistics,
 };
 
 /// Detect peakels from mzDB files and export to peakelDB
@@ -231,30 +229,8 @@ fn main() -> Result<()> {
     println!();
 
     match args.ms_level {
-        1 => {
-            #[cfg(feature = "processing")]
-            {
-                run_ms1_detection(&args, &reader, num_threads)?;
-            }
-            #[cfg(not(feature = "processing"))]
-            {
-                eprintln!("Error: MS1 peakel detection requires the 'processing' feature.");
-                eprintln!("Please rebuild with: cargo build --features processing");
-                std::process::exit(1);
-            }
-        }
-        2 => {
-            #[cfg(feature = "processing")]
-            {
-                run_ms2_dia_detection(&args, &reader, num_threads)?;
-            }
-            #[cfg(not(feature = "processing"))]
-            {
-                eprintln!("Error: MS2 DIA peakel detection requires the 'processing' feature.");
-                eprintln!("Please rebuild with: cargo build --features processing");
-                std::process::exit(1);
-            }
-        }
+        1 => run_ms1_detection(&args, &reader, num_threads)?,
+        2 => run_ms2_dia_detection(&args, &reader, num_threads)?,
         _ => {
             eprintln!("Error: Invalid MS level {}. Supported values: 1, 2", args.ms_level);
             std::process::exit(1);
@@ -271,7 +247,6 @@ fn main() -> Result<()> {
 // MS1 Peakel Detection
 // ============================================================================
 
-#[cfg(feature = "processing")]
 fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
     let config = Ms1PeakelDetectionConfig {
         mz_tol_ppm: args.mz_tol_ppm,
@@ -326,7 +301,6 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
     Ok(())
 }
 
-#[cfg(feature = "processing")]
 fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig, num_threads: usize) -> Result<Vec<Peakel>> {
     // Get MS1 spectrum headers sorted by time
     let headers = mzdb.get_spectrum_headers();
@@ -388,7 +362,6 @@ fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig, num_
 }
 
 /// Sequential peakel detection (single-threaded)
-#[cfg(feature = "processing")]
 fn detect_peakels_sequential(
     bins: &[(i64, Vec<(f64, f32, i64, f32)>)],
     config: &Ms1PeakelDetectionConfig,
@@ -418,7 +391,7 @@ fn detect_peakels_sequential(
 /// 
 /// Strategy: Use a bounded queue where producer sends batches of bins
 /// and consumer threads process them. Memory is bounded by queue size.
-#[cfg(all(feature = "processing", feature = "processing-parallel"))]
+#[cfg(feature = "processing-parallel")]
 fn detect_peakels_parallel(
     bins: &[(i64, Vec<(f64, f32, i64, f32)>)],
     config: &Ms1PeakelDetectionConfig,
@@ -513,7 +486,6 @@ fn detect_peakels_parallel(
 }
 
 /// Process a single m/z bin to find peakels
-#[cfg(feature = "processing")]
 fn process_single_bin(
     peaks: &[(f64, f32, i64, f32)],
     config: &Ms1PeakelDetectionConfig,
@@ -564,7 +536,6 @@ fn process_single_bin(
     bin_peakels
 }
 
-#[cfg(feature = "processing")]
 fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, is_dia: bool, peakels: &[Peakel]) -> Result<()> {
     let writer = Ms1PeakelDbWriter::create(&path)?;
     writer.write_peakels(mzdb_filename, is_dia, peakels)?;
@@ -576,7 +547,6 @@ fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, is_dia: bool
 // MS2 DIA Peakel Detection
 // ============================================================================
 
-#[cfg(feature = "processing")]
 fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
     let config = DiaMs2PeakelConfig {
         mz_tol_ppm: args.mz_tol_ppm,
@@ -622,20 +592,26 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
             peakel.apex_intensity, peakel.peaks_count);
     }
     
+    // Get input filename for metadata
+    let input_filename = args.mzdb_file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown.mzDB");
+
     // Write output
     println!();
     match args.format.as_str() {
         "sqlite" => {
             println!("Writing SQLite peakelDB (MS2/DIA format)...");
-            write_ms2_dia_peakeldb(&args.output_file_path, &windows, &peakels)?;
+            write_ms2_dia_peakeldb(&args.output_file_path, input_filename, &windows, &peakels)?;
         }
         "tsv" => {
             println!("Writing TSV file...");
-            write_dia_peakels_tsv(&args.output_file_path, &peakels)?;
+            write_ms2_peakels_tsv(&args.output_file_path, &peakels)?;
         }
         _ => {
             eprintln!("Warning: Unknown format '{}', defaulting to SQLite", args.format);
-            write_ms2_dia_peakeldb(&args.output_file_path, &windows, &peakels)?;
+            write_ms2_dia_peakeldb(&args.output_file_path, input_filename, &windows, &peakels)?;
         }
     }
     
@@ -647,30 +623,30 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
     Ok(())
 }
 
-#[cfg(feature = "processing")]
 fn write_ms2_dia_peakeldb(
     path: &PathBuf,
+    mzdb_filename: &str,
     windows: &[IsolationWindow],
     peakels: &[DiaMs2PeakelRecord],
 ) -> Result<()> {
     let writer = Ms2PeakelDbWriter::create(path)?;
-    writer.write_peakels(windows, peakels)?;
+    writer.write_peakels(mzdb_filename, windows, peakels)?;
     println!("DIA MS2 peakelDB created with {} isolation windows and {} peakels",
              windows.len(), peakels.len());
     Ok(())
 }
 
 /// Write DIA MS2 peakels to a TSV file
-#[cfg(feature = "processing")]
-fn write_dia_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Result<()> {
+fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Result<()> {
     use std::io::Write;
     use std::fs::File;
 
     let mut file = File::create(path)?;
 
+    // Header with MS2-specific fields (isolation_window_id, precursor_mz)
     writeln!(
         file,
-        "id\tmz\telution_time\tduration\tgap_count\tapex_intensity\tarea\tamplitude\tpeaks_count\t\
+        "id\tmoz\telution_time\tduration\tgap_count\tapex_intensity\tarea\tamplitude\tpeak_count\t\
          first_spectrum_id\tapex_spectrum_id\tlast_spectrum_id\tisolation_window_id\tprecursor_mz"
     )?;
 
@@ -696,6 +672,103 @@ fn write_dia_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Resu
     }
 
     log::info!("TSV file created with {} peakels", peakels.len());
-
     Ok(())
+}
+
+/// Write MS1 peakels to a TSV file
+fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<()> {
+    use std::io::Write;
+    use std::fs::File;
+    use mzdb::processing::HasPeakelData;
+    
+    let mut file = File::create(path)?;
+    
+    writeln!(file, "id\tmoz\telution_time\tduration\tapex_intensity\tarea\tpeak_count\tfirst_spectrum_id\tapex_spectrum_id\tlast_spectrum_id")?;
+    
+    for (idx, peakel) in peakels.iter().enumerate() {
+        writeln!(
+            file,
+            "{}\t{:.6}\t{:.4}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}",
+            idx + 1,
+            peakel.calc_mz(),
+            peakel.apex_elution_time().unwrap_or(0.0),
+            peakel.calc_duration(),
+            peakel.apex_intensity().unwrap_or(0.0),
+            peakel.area(),
+            peakel.peaks_count(),
+            peakel.first_spectrum_id().unwrap_or(0),
+            peakel.apex_spectrum_id().unwrap_or(0),
+            peakel.last_spectrum_id().unwrap_or(0),
+        )?;
+    }
+    
+    Ok(())
+}
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+/// Print peakel statistics (common implementation)
+fn print_statistics(
+    title: &str,
+    count: usize,
+    total_area: f64,
+    avg_duration: f32,
+    avg_peaks: f32,
+    min_mz: f64,
+    max_mz: f64,
+    min_rt: f32,
+    max_rt: f32,
+) {
+    println!();
+    println!("=== {} ===", title);
+    println!("Total peakels: {}", count);
+    println!("Total area: {:.2e}", total_area);
+    println!("Average duration: {:.2}s", avg_duration);
+    println!("Average peaks per peakel: {:.1}", avg_peaks);
+    println!("m/z range: {:.2} - {:.2}", min_mz, max_mz);
+    println!("RT range: {:.2}s - {:.2}s", min_rt, max_rt);
+}
+
+/// Print MS1 peakel statistics to stdout
+fn print_ms1_statistics(peakels: &[Peakel]) {
+    use mzdb::processing::HasPeakelData;
+
+    if peakels.is_empty() {
+        return;
+    }
+
+    let n = peakels.len() as f32;
+    print_statistics(
+        "MS1 Peakel Statistics",
+        peakels.len(),
+        peakels.iter().map(|p| p.area() as f64).sum(),
+        peakels.iter().map(|p| p.calc_duration()).sum::<f32>() / n,
+        peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
+        peakels.iter().map(|p| p.calc_mz()).fold(f64::INFINITY, f64::min),
+        peakels.iter().map(|p| p.calc_mz()).fold(f64::NEG_INFINITY, f64::max),
+        peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::INFINITY, f32::min),
+        peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::NEG_INFINITY, f32::max),
+    );
+}
+
+/// Print MS2 DIA peakel statistics to stdout
+fn print_ms2_statistics(peakels: &[DiaMs2PeakelRecord]) {
+    if peakels.is_empty() {
+        return;
+    }
+
+    let n = peakels.len() as f32;
+    print_statistics(
+        "MS2 DIA Peakel Statistics",
+        peakels.len(),
+        peakels.iter().map(|p| p.area as f64).sum(),
+        peakels.iter().map(|p| p.duration).sum::<f32>() / n,
+        peakels.iter().map(|p| p.peaks_count as f32).sum::<f32>() / n,
+        peakels.iter().map(|p| p.mz).fold(f64::INFINITY, f64::min),
+        peakels.iter().map(|p| p.mz).fold(f64::NEG_INFINITY, f64::max),
+        peakels.iter().map(|p| p.elution_time).fold(f32::INFINITY, f32::min),
+        peakels.iter().map(|p| p.elution_time).fold(f32::NEG_INFINITY, f32::max),
+    );
 }

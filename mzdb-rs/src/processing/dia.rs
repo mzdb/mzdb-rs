@@ -810,13 +810,14 @@ impl Default for DiaMs2PeakelDetector {
 /// For more control, use `Ms2PeakelDbWriter` directly.
 pub fn write_dia_peakeldb(
     path: &PathBuf,
+    mzdb_filename: &str,
     windows: &[IsolationWindow],
     peakels: &[DiaMs2PeakelRecord],
 ) -> anyhow_ext::Result<()> {
     use crate::processing::peakeldb::Ms2PeakelDbWriter;
     
     let writer = Ms2PeakelDbWriter::create(path)?;
-    writer.write_peakels(windows, peakels)?;
+    writer.write_peakels(mzdb_filename, windows, peakels)?;
     
     log::info!("DIA MS2 peakelDB created with {} isolation windows and {} peakels",
                windows.len(), peakels.len());

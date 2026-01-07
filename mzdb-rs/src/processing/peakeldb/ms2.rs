@@ -1,8 +1,16 @@
 //! MS2 DIA PeakelDB - Format for DIA MS2 peakels with isolation windows
 //!
 //! This module provides utilities for creating and reading MS2 DIA peakelDB files.
-//! The MS2 format includes isolation_window table for DIA data and uses
-//! MessagePack-encoded peaks blob.
+//! The schema is aligned with the MS1 peakelDB format for consistency, with additional
+//! tables for DIA-specific data (isolation windows).
+//!
+//! # Schema Overview
+//!
+//! - `peakeldb_file`: File-level metadata (same as MS1)
+//! - `lcms_map`: Map metadata with ms_level=2 (same as MS1)
+//! - `isolation_window`: DIA-specific isolation window definitions
+//! - `peakel`: Peakel data with isolation_window_id and precursor_mz
+//! - `peakel_rtree`: R-tree spatial index for fast queries
 
 use std::path::Path;
 
@@ -10,25 +18,41 @@ use anyhow_ext::{Context, Result};
 use rusqlite::{params, Connection};
 
 use crate::processing::dia::{IsolationWindow, DiaMs2PeakelRecord, PeaksData};
-use super::common::{chrono_lite_timestamp, parse_peaks_blob};
+use super::common::{chrono_lite_timestamp, parse_peaks_blob, ExtendedPeakel, PeakelData};
 
 // ============================================================================
 // Schema
 // ============================================================================
 
-/// MS2 DIA PeakelDB schema
+/// MS2 DIA PeakelDB schema (aligned with MS1 schema)
 pub struct Ms2PeakelDbSchema;
 
 impl Ms2PeakelDbSchema {
     /// SQL schema for MS2 DIA peakelDB
+    ///
+    /// This schema is aligned with the MS1 peakelDB schema for consistency:
+    /// - Same table names: peakeldb_file, lcms_map, peakel, peakel_rtree
+    /// - Same base field names: moz (not mz), peak_count (not peaks_count)
+    /// - Additional: isolation_window table and related foreign keys
     pub const SCHEMA: &'static str = r#"
-CREATE TABLE peakeldb_info (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE peakeldb_file (
+    id INTEGER NOT NULL PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
+    raw_file_name TEXT NOT NULL,
+    is_dia_experiment BOOLEAN NOT NULL,
     creation_timestamp TEXT NOT NULL,
+    modification_timestamp TEXT NOT NULL,
+    serialized_properties TEXT
+);
+
+CREATE TABLE lcms_map (
+    id INTEGER NOT NULL PRIMARY KEY,
+    ms_level INTEGER NOT NULL,
     peakel_count INTEGER NOT NULL,
-    ms_level INTEGER NOT NULL DEFAULT 2
+    serialized_properties TEXT,
+    peakeldb_file_id INTEGER NOT NULL,
+    FOREIGN KEY (peakeldb_file_id) REFERENCES peakeldb_file (id)
 );
 
 CREATE TABLE isolation_window (
@@ -36,79 +60,46 @@ CREATE TABLE isolation_window (
     target_mz REAL NOT NULL,
     lower_mz REAL NOT NULL,
     upper_mz REAL NOT NULL,
-    spectrum_count INTEGER NOT NULL
+    spectrum_count INTEGER NOT NULL,
+    map_id INTEGER NOT NULL,
+    FOREIGN KEY (map_id) REFERENCES lcms_map (id)
 );
 
 CREATE TABLE peakel (
-    id INTEGER PRIMARY KEY,
-    mz REAL NOT NULL,
+    id INTEGER NOT NULL PRIMARY KEY,
+    moz REAL NOT NULL,
     elution_time REAL NOT NULL,
     duration REAL NOT NULL,
     gap_count INTEGER NOT NULL,
     apex_intensity REAL NOT NULL,
     area REAL NOT NULL,
     amplitude REAL NOT NULL,
-    peaks_count INTEGER NOT NULL,
+    peak_count INTEGER NOT NULL,
+    peaks BLOB NOT NULL,
+    serialized_properties TEXT,
     first_spectrum_id INTEGER NOT NULL,
     apex_spectrum_id INTEGER NOT NULL,
     last_spectrum_id INTEGER NOT NULL,
     isolation_window_id INTEGER NOT NULL,
     precursor_mz REAL NOT NULL,
-    peaks BLOB NOT NULL,
-    FOREIGN KEY (isolation_window_id) REFERENCES isolation_window(id)
+    map_id INTEGER NOT NULL,
+    FOREIGN KEY (isolation_window_id) REFERENCES isolation_window (id),
+    FOREIGN KEY (map_id) REFERENCES lcms_map (id)
 );
-
-CREATE INDEX peakel_mz_idx ON peakel (mz);
-CREATE INDEX peakel_rt_idx ON peakel (elution_time);
-CREATE INDEX peakel_isolation_window_idx ON peakel (isolation_window_id);
-CREATE INDEX peakel_precursor_mz_idx ON peakel (precursor_mz);
 
 CREATE VIRTUAL TABLE peakel_rtree USING rtree(
     id,
     min_mz, max_mz,
-    min_time, max_time
+    min_time, max_time,
+    min_intensity, max_intensity
 );
+
+CREATE INDEX peakel_moz_idx ON peakel (moz);
+CREATE INDEX peakel_elution_time_idx ON peakel (elution_time);
+CREATE INDEX peakel_isolation_window_idx ON peakel (isolation_window_id);
+CREATE INDEX peakel_precursor_mz_idx ON peakel (precursor_mz);
+CREATE INDEX peakel_map_id_idx ON peakel (map_id);
 "#;
-}
-
-// ============================================================================
-// Data Structures
-// ============================================================================
-
-/// A peakel read from the peakeldb with full peaks data
-#[derive(Debug, Clone)]
-pub struct SimplifierPeakel {
-    pub id: i64,
-    pub mz: f64,
-    pub elution_time: f32,
-    pub duration: f32,
-    pub gap_count: i32,
-    pub apex_intensity: f32,
-    pub area: f32,
-    pub amplitude: f32,
-    pub peaks_count: i32,
-    pub first_spectrum_id: i64,
-    pub apex_spectrum_id: i64,
-    pub last_spectrum_id: i64,
-    pub isolation_window_id: i64,
-    pub precursor_mz: f64,
-    /// Spectrum IDs at each data point
-    pub spectrum_ids: Vec<i64>,
-    /// Retention times at each data point (seconds)
-    pub elution_times: Vec<f32>,
-    /// m/z values at each data point
-    pub mz_values: Vec<f64>,
-    /// Intensities at each data point
-    pub intensities: Vec<f32>,
-}
-
-impl SimplifierPeakel {
-    /// Get the index of the apex spectrum in this peakel's data arrays
-    pub fn apex_index(&self) -> Option<usize> {
-        self.spectrum_ids
-            .iter()
-            .position(|&id| id == self.apex_spectrum_id)
-    }
 }
 
 // ============================================================================
@@ -152,34 +143,34 @@ impl Ms2PeakelDbReader {
     }
 
     /// Read all peakels from the database
-    pub fn read_all_peakels(&self) -> Result<Vec<SimplifierPeakel>> {
+    pub fn read_all_peakels(&self) -> Result<Vec<ExtendedPeakel>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, mz, elution_time, duration, gap_count, apex_intensity,
-                    area, amplitude, peaks_count, first_spectrum_id, 
-                    apex_spectrum_id, last_spectrum_id, isolation_window_id,
-                    precursor_mz, peaks
+            "SELECT id, moz, elution_time, duration, gap_count, apex_intensity,
+                    area, amplitude, peak_count, peaks, serialized_properties,
+                    first_spectrum_id, apex_spectrum_id, last_spectrum_id,
+                    isolation_window_id, precursor_mz
              FROM peakel
              ORDER BY id",
         )?;
 
         let peakel_iter = stmt.query_map([], |row| {
-            let peaks_blob: Vec<u8> = row.get(14)?;
+            let peaks_blob: Vec<u8> = row.get(9)?;
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f32>(2)?,
-                row.get::<_, f32>(3)?,
-                row.get::<_, i32>(4)?,
-                row.get::<_, f32>(5)?,
-                row.get::<_, f32>(6)?,
-                row.get::<_, f32>(7)?,
-                row.get::<_, i32>(8)?,
-                row.get::<_, i64>(9)?,
-                row.get::<_, i64>(10)?,
-                row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
-                row.get::<_, f64>(13)?,
-                peaks_blob,
+                row.get::<_, i64>(0)?,    // id
+                row.get::<_, f64>(1)?,    // moz -> mz
+                row.get::<_, f32>(2)?,    // elution_time
+                row.get::<_, f32>(3)?,    // duration
+                row.get::<_, i32>(4)?,    // gap_count
+                row.get::<_, f32>(5)?,    // apex_intensity
+                row.get::<_, f32>(6)?,    // area
+                row.get::<_, f32>(7)?,    // amplitude
+                row.get::<_, i32>(8)?,    // peak_count -> peaks_count
+                peaks_blob,               // peaks (index 9)
+                row.get::<_, i64>(11)?,   // first_spectrum_id
+                row.get::<_, i64>(12)?,   // apex_spectrum_id
+                row.get::<_, i64>(13)?,   // last_spectrum_id
+                row.get::<_, i64>(14)?,   // isolation_window_id
+                row.get::<_, f64>(15)?,   // precursor_mz
             ))
         })?;
 
@@ -196,19 +187,21 @@ impl Ms2PeakelDbReader {
                 area,
                 amplitude,
                 peaks_count,
+                peaks_blob,
                 first_spectrum_id,
                 apex_spectrum_id,
                 last_spectrum_id,
                 isolation_window_id,
                 precursor_mz,
-                peaks_blob,
             ) = result?;
 
             // Parse the MessagePack peaks blob
             let (spectrum_ids, elution_times, mz_values, intensities) =
                 parse_peaks_blob(&peaks_blob)?;
 
-            peakels.push(SimplifierPeakel {
+            let data = PeakelData::from_vectors(spectrum_ids, elution_times, mz_values, intensities);
+
+            peakels.push(ExtendedPeakel::new_ms2_dia(
                 id,
                 mz,
                 elution_time,
@@ -223,11 +216,8 @@ impl Ms2PeakelDbReader {
                 last_spectrum_id,
                 isolation_window_id,
                 precursor_mz,
-                spectrum_ids,
-                elution_times,
-                mz_values,
-                intensities,
-            });
+                data,
+            ));
         }
 
         log::info!("Loaded {} peakels from peakeldb", peakels.len());
@@ -275,27 +265,35 @@ impl Ms2PeakelDbWriter {
     /// Write DIA MS2 peakels to the database
     ///
     /// # Arguments
+    /// * `mzdb_filename` - Name of the source mzDB file
     /// * `windows` - Isolation windows to write
     /// * `peakels` - Peakels to write
     pub fn write_peakels(
         &self,
+        mzdb_filename: &str,
         windows: &[IsolationWindow],
         peakels: &[DiaMs2PeakelRecord],
     ) -> Result<()> {
-        // Insert peakeldb_info
+        // Insert peakeldb_file record (aligned with MS1 schema)
         let timestamp = chrono_lite_timestamp();
         self.conn.execute(
-            "INSERT INTO peakeldb_info (id, name, description, creation_timestamp, peakel_count, ms_level) 
-             VALUES (1, 'DIA MS2 peakelDB', 'Generated by mzdb-rs', ?1, ?2, 2)",
-            params![timestamp, peakels.len()],
+            "INSERT INTO peakeldb_file (id, name, description, raw_file_name, is_dia_experiment, 
+             creation_timestamp, modification_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![1, mzdb_filename, "Generated by mzdb2peakeldb", mzdb_filename, true, &timestamp, &timestamp],
         )?;
 
-        // Insert isolation windows
+        // Insert lcms_map record (aligned with MS1 schema)
+        self.conn.execute(
+            "INSERT INTO lcms_map (id, ms_level, peakel_count, peakeldb_file_id) VALUES (?, ?, ?, ?)",
+            params![1, 2, peakels.len() as i32, 1],
+        )?;
+
+        // Insert isolation windows (with map_id foreign key)
         self.conn.execute("BEGIN TRANSACTION", [])?;
         {
             let mut stmt = self.conn.prepare(
-                "INSERT INTO isolation_window (id, target_mz, lower_mz, upper_mz, spectrum_count) 
-                 VALUES (?1, ?2, ?3, ?4, ?5)"
+                "INSERT INTO isolation_window (id, target_mz, lower_mz, upper_mz, spectrum_count, map_id) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )?;
 
             for window in windows {
@@ -305,6 +303,7 @@ impl Ms2PeakelDbWriter {
                     window.lower_mz,
                     window.upper_mz,
                     window.spectrum_count,
+                    1, // map_id
                 ])?;
             }
         }
@@ -314,15 +313,16 @@ impl Ms2PeakelDbWriter {
         self.conn.execute("BEGIN TRANSACTION", [])?;
         {
             let mut stmt = self.conn.prepare(
-                "INSERT INTO peakel (id, mz, elution_time, duration, gap_count, apex_intensity, area, 
-                 amplitude, peaks_count, first_spectrum_id, apex_spectrum_id, last_spectrum_id, 
-                 isolation_window_id, precursor_mz, peaks) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+                "INSERT INTO peakel (id, moz, elution_time, duration, gap_count, apex_intensity, area, 
+                 amplitude, peak_count, peaks, serialized_properties,
+                 first_spectrum_id, apex_spectrum_id, last_spectrum_id, 
+                 isolation_window_id, precursor_mz, map_id) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
             )?;
 
             let mut rtree_stmt = self.conn.prepare(
-                "INSERT INTO peakel_rtree (id, min_mz, max_mz, min_time, max_time) 
-                 VALUES (?1, ?2, ?3, ?4, ?5)"
+                "INSERT INTO peakel_rtree (id, min_mz, max_mz, min_time, max_time, min_intensity, max_intensity) 
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
             )?;
 
             for peakel in peakels {
@@ -334,6 +334,7 @@ impl Ms2PeakelDbWriter {
                 let max_mz = peakel.peaks.mz_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let min_time = peakel.peaks.elution_times.iter().cloned().fold(f32::INFINITY, f32::min);
                 let max_time = peakel.peaks.elution_times.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let min_intensity = peakel.peaks.intensity_values.iter().cloned().fold(f32::INFINITY, f32::min);
 
                 stmt.execute(params![
                     peakel.id,
@@ -345,12 +346,14 @@ impl Ms2PeakelDbWriter {
                     peakel.area,
                     peakel.amplitude,
                     peakel.peaks_count,
+                    peaks_blob,
+                    Option::<String>::None, // serialized_properties
                     peakel.first_spectrum_id,
                     peakel.apex_spectrum_id,
                     peakel.last_spectrum_id,
                     peakel.isolation_window_id,
                     peakel.precursor_mz,
-                    peaks_blob,
+                    1, // map_id
                 ])?;
 
                 rtree_stmt.execute(params![
@@ -359,6 +362,8 @@ impl Ms2PeakelDbWriter {
                     max_mz,
                     min_time as f64,
                     max_time as f64,
+                    min_intensity as f64,
+                    peakel.apex_intensity as f64,
                 ])?;
             }
         }
@@ -402,35 +407,6 @@ fn serialize_peaks_data(peaks: &PeaksData) -> Result<Vec<u8>> {
 }
 
 // ============================================================================
-// Statistics
-// ============================================================================
-
-/// Print MS2 DIA peakel statistics to stdout
-pub fn print_ms2_statistics(peakels: &[DiaMs2PeakelRecord]) {
-    if peakels.is_empty() {
-        return;
-    }
-
-    let total_area: f64 = peakels.iter().map(|p| p.area as f64).sum();
-    let avg_duration = peakels.iter().map(|p| p.duration).sum::<f32>() / peakels.len() as f32;
-    let avg_peaks = peakels.iter().map(|p| p.peaks_count as f32).sum::<f32>() / peakels.len() as f32;
-
-    let min_mz = peakels.iter().map(|p| p.mz).fold(f64::INFINITY, f64::min);
-    let max_mz = peakels.iter().map(|p| p.mz).fold(f64::NEG_INFINITY, f64::max);
-    let min_rt = peakels.iter().map(|p| p.elution_time).fold(f32::INFINITY, f32::min);
-    let max_rt = peakels.iter().map(|p| p.elution_time).fold(f32::NEG_INFINITY, f32::max);
-
-    println!();
-    println!("=== MS2 DIA Peakel Statistics ===");
-    println!("Total peakels: {}", peakels.len());
-    println!("Total area: {:.2e}", total_area);
-    println!("Average duration: {:.2}s", avg_duration);
-    println!("Average peaks per peakel: {:.1}", avg_peaks);
-    println!("m/z range: {:.2} - {:.2}", min_mz, max_mz);
-    println!("RT range: {:.2}s - {:.2}s", min_rt, max_rt);
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -439,28 +415,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_simplifier_peakel_apex_index() {
-        let peakel = SimplifierPeakel {
-            id: 1,
-            mz: 500.0,
-            elution_time: 100.0,
-            duration: 10.0,
-            gap_count: 0,
-            apex_intensity: 10000.0,
-            area: 50000.0,
-            amplitude: 100.0,
-            peaks_count: 5,
-            first_spectrum_id: 100,
-            apex_spectrum_id: 102,
-            last_spectrum_id: 104,
-            isolation_window_id: 1,
-            precursor_mz: 500.0,
-            spectrum_ids: vec![100, 101, 102, 103, 104],
-            elution_times: vec![98.0, 99.0, 100.0, 101.0, 102.0],
-            mz_values: vec![500.0, 500.1, 500.0, 500.1, 500.0],
-            intensities: vec![1000.0, 5000.0, 10000.0, 5000.0, 1000.0],
-        };
+    fn test_extended_peakel_apex_index() {
+        let data = PeakelData::from_vectors(
+            vec![100, 101, 102, 103, 104],
+            vec![98.0, 99.0, 100.0, 101.0, 102.0],
+            vec![500.0, 500.1, 500.0, 500.1, 500.0],
+            vec![1000.0, 5000.0, 10000.0, 5000.0, 1000.0],
+        );
 
-        assert_eq!(peakel.apex_index(), Some(2));
+        let peakel = ExtendedPeakel::new_ms2_dia(
+            1,          // id
+            500.0,      // mz
+            100.0,      // elution_time
+            10.0,       // duration
+            0,          // gap_count
+            10000.0,    // apex_intensity
+            50000.0,    // area
+            100.0,      // amplitude
+            5,          // peaks_count
+            100,        // first_spectrum_id
+            102,        // apex_spectrum_id
+            104,        // last_spectrum_id
+            1,          // isolation_window_id
+            500.0,      // precursor_mz
+            data,
+        );
+
+        assert_eq!(peakel.apex_data_index(), Some(2));
     }
 }

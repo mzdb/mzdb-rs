@@ -3,6 +3,13 @@
 //! This module provides utilities for creating and reading MS1 peakelDB files.
 //! The MS1 format includes lcms_map and peakeldb_file tables for compatibility
 //! with legacy peakelDB tools.
+//!
+//! # Schema Overview
+//!
+//! - `peakeldb_file`: File-level metadata
+//! - `lcms_map`: Map metadata (ms_level, peakel_count)
+//! - `peakel`: Peakel data with all summary fields and peaks blob
+//! - `peakel_rtree`: R-tree spatial index for fast queries
 
 use std::path::Path;
 
@@ -16,20 +23,25 @@ use super::common::chrono_lite_timestamp;
 // Schema
 // ============================================================================
 
-/// MS1 PeakelDB schema
+/// MS1 PeakelDB schema (legacy format)
 pub struct Ms1PeakelDbSchema;
 
 impl Ms1PeakelDbSchema {
     /// SQL schema for MS1 peakelDB
+    ///
+    /// This schema uses legacy field names for backward compatibility:
+    /// - `moz` (not `mz`) for m/z values
+    /// - `peak_count` (not `peaks_count`) for number of peaks
+    /// - Includes `intensity_cv` and `is_interfering` fields
     pub const SCHEMA: &'static str = r#"
 CREATE TABLE peakeldb_file (
     id INTEGER NOT NULL PRIMARY KEY,
-    name VARCHAR NOT NULL,
-    description VARCHAR,
-    raw_file_name VARCHAR NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    raw_file_name TEXT NOT NULL,
     is_dia_experiment BOOLEAN NOT NULL,
-    creation_timestamp VARCHAR NOT NULL,
-    modification_timestamp VARCHAR NOT NULL,
+    creation_timestamp TEXT NOT NULL,
+    modification_timestamp TEXT NOT NULL,
     serialized_properties TEXT
 );
 
@@ -44,7 +56,7 @@ CREATE TABLE lcms_map (
 
 CREATE TABLE peakel (
     id INTEGER NOT NULL PRIMARY KEY,
-    moz DOUBLE NOT NULL,
+    moz REAL NOT NULL,
     elution_time REAL NOT NULL,
     duration REAL NOT NULL,
     gap_count INTEGER NOT NULL,
@@ -88,7 +100,7 @@ CREATE INDEX peakel_map_id_idx ON peakel (map_id);
 #[derive(Debug, Clone)]
 pub struct Ms1PeakelRecord {
     pub id: i64,
-    pub mz: f64,
+    pub moz: f64,
     pub elution_time: f32,
     pub duration: f32,
     pub gap_count: i32,
@@ -282,68 +294,4 @@ pub fn serialize_ms1_peakel_data(peakel: &Peakel) -> Result<Vec<u8>> {
     }
     
     Ok(data)
-}
-
-// ============================================================================
-// TSV Export
-// ============================================================================
-
-/// Write peakels to a TSV file
-pub fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<()> {
-    use std::io::Write;
-    use std::fs::File;
-    
-    let mut file = File::create(path)?;
-    
-    writeln!(file, "id\tmz\telution_time\tduration\tapex_intensity\tarea\tpeaks_count\tfirst_spectrum_id\tapex_spectrum_id\tlast_spectrum_id")?;
-    
-    for (idx, peakel) in peakels.iter().enumerate() {
-        writeln!(
-            file,
-            "{}\t{:.6}\t{:.4}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}",
-            idx + 1,
-            peakel.calc_mz(),
-            peakel.apex_elution_time().unwrap_or(0.0),
-            peakel.calc_duration(),
-            peakel.apex_intensity().unwrap_or(0.0),
-            peakel.area(),
-            peakel.peaks_count(),
-            peakel.first_spectrum_id().unwrap_or(0),
-            peakel.apex_spectrum_id().unwrap_or(0),
-            peakel.last_spectrum_id().unwrap_or(0),
-        )?;
-    }
-    
-    Ok(())
-}
-
-// ============================================================================
-// Statistics
-// ============================================================================
-
-/// Print MS1 peakel statistics to stdout
-pub fn print_ms1_statistics(peakels: &[Peakel]) {
-    if peakels.is_empty() {
-        return;
-    }
-
-    let total_area: f64 = peakels.iter().map(|p| p.area() as f64).sum();
-    let avg_duration: f32 = peakels.iter().map(|p| p.calc_duration()).sum::<f32>() 
-        / peakels.len() as f32;
-    let avg_peaks: f32 = peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() 
-        / peakels.len() as f32;
-    
-    let min_mz = peakels.iter().map(|p| p.calc_mz()).fold(f64::INFINITY, f64::min);
-    let max_mz = peakels.iter().map(|p| p.calc_mz()).fold(f64::NEG_INFINITY, f64::max);
-    let min_rt = peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::INFINITY, f32::min);
-    let max_rt = peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::NEG_INFINITY, f32::max);
-    
-    println!();
-    println!("=== MS1 Peakel Statistics ===");
-    println!("Total peakels: {}", peakels.len());
-    println!("Total area: {:.2e}", total_area);
-    println!("Average duration: {:.2}s", avg_duration);
-    println!("Average peaks per peakel: {:.1}", avg_peaks);
-    println!("m/z range: {:.2} - {:.2}", min_mz, max_mz);
-    println!("RT range: {:.2}s - {:.2}s", min_rt, max_rt);
 }

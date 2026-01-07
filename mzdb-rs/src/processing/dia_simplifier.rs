@@ -34,7 +34,7 @@ use ordered_float::OrderedFloat;
 use rusqlite::{params, Connection};
 
 use crate::processing::dia::IsolationWindow;
-use crate::processing::peakeldb::{Ms2PeakelDbReader, SimplifierPeakel};
+use crate::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel};
 use crate::writer::{
     DiaWriteContext, DiaSpectrumParams,
     calculate_time_bounds, calculate_mz_bounds, calculate_mz_bounds_from_arrays, find_base_peak,
@@ -79,7 +79,7 @@ impl DiaSimplifierConfig {
 }
 
 // ============================================================================
-// Peakel Data Structures (SimplifierPeakel is now in peakeldb::ms2)
+// Peakel Data Structures (uses ExtendedPeakel from peakeldb::common)
 // ============================================================================
 
 /// A data point extracted from a peakel
@@ -280,7 +280,7 @@ fn get_ms2_spectrum_headers(conn: &Connection) -> Result<Vec<SpectrumHeader>> {
 
 /// Extract data points from peakels using the peakel's own intensity data
 fn extract_peakel_data_points(
-    peakels: &[SimplifierPeakel],
+    peakels: &[ExtendedPeakel],
     window_lookup: &HashMap<i64, IsolationWindow>,
     half_window: usize,
 ) -> Result<Vec<PeakelDataPoint>> {
@@ -291,33 +291,38 @@ fn extract_peakel_data_points(
             log::debug!("Processing peakel {}/{}", i, peakels.len());
         }
 
-        // Get isolation window
-        let window = match window_lookup.get(&peakel.isolation_window_id) {
+        // Get isolation window (ExtendedPeakel has Option<i64>)
+        let isolation_window_id = match peakel.isolation_window_id {
+            Some(id) => id,
+            None => continue, // Skip non-DIA peakels
+        };
+        
+        let window = match window_lookup.get(&isolation_window_id) {
             Some(w) => w,
             None => continue,
         };
 
         // Find apex index in the peakel's data arrays
-        let apex_idx = match peakel.apex_index() {
+        let spectrum_ids = peakel.data.spectrum_ids.as_slice();
+        let apex_idx = match peakel.apex_data_index() {
             Some(idx) => idx,
             None => {
                 // Fallback: use middle of array
-                peakel.spectrum_ids.len() / 2
+                spectrum_ids.len() / 2
             }
         };
 
         // Calculate range of indices to include (apex ± half_window)
         let start_idx = apex_idx.saturating_sub(half_window);
-        let end_idx =
-            (apex_idx + half_window).min(peakel.spectrum_ids.len().saturating_sub(1));
+        let end_idx = (apex_idx + half_window).min(spectrum_ids.len().saturating_sub(1));
 
         // Extract data points from the selected indices
         for idx in start_idx..=end_idx {
-            if idx < peakel.spectrum_ids.len() {
+            if idx < spectrum_ids.len() {
                 data_points.push(PeakelDataPoint {
-                    spectrum_id: peakel.spectrum_ids[idx],
-                    mz: peakel.mz_values[idx],
-                    intensity: peakel.intensities[idx],
+                    spectrum_id: peakel.data.spectrum_ids[idx],
+                    mz: peakel.data.mz_values[idx],
+                    intensity: peakel.data.intensities[idx],
                     precursor_mz: window.target_mz,
                     isolation_lower: window.lower_mz,
                     isolation_upper: window.upper_mz,
@@ -716,28 +721,34 @@ mod tests {
 
     #[test]
     fn test_peakel_apex_index() {
-        let peakel = SimplifierPeakel {
-            id: 1,
-            mz: 500.0,
-            elution_time: 100.0,
-            duration: 30.0,
-            gap_count: 0,
-            apex_intensity: 10000.0,
-            area: 50000.0,
-            amplitude: 10.0,
-            peaks_count: 5,
-            first_spectrum_id: 100,
-            apex_spectrum_id: 102,
-            last_spectrum_id: 104,
-            isolation_window_id: 1,
-            precursor_mz: 500.0,
-            spectrum_ids: vec![100, 101, 102, 103, 104],
-            elution_times: vec![98.0, 99.0, 100.0, 101.0, 102.0],
-            mz_values: vec![500.0, 500.1, 500.0, 500.1, 500.0],
-            intensities: vec![1000.0, 5000.0, 10000.0, 5000.0, 1000.0],
-        };
+        use crate::processing::peakeldb::PeakelData;
+        
+        let data = PeakelData::from_vectors(
+            vec![100, 101, 102, 103, 104],
+            vec![98.0, 99.0, 100.0, 101.0, 102.0],
+            vec![500.0, 500.1, 500.0, 500.1, 500.0],
+            vec![1000.0, 5000.0, 10000.0, 5000.0, 1000.0],
+        );
+        
+        let peakel = ExtendedPeakel::new_ms2_dia(
+            1,          // id
+            500.0,      // mz
+            100.0,      // elution_time
+            30.0,       // duration
+            0,          // gap_count
+            10000.0,    // apex_intensity
+            50000.0,    // area
+            10.0,       // amplitude
+            5,          // peaks_count
+            100,        // first_spectrum_id
+            102,        // apex_spectrum_id
+            104,        // last_spectrum_id
+            1,          // isolation_window_id
+            500.0,      // precursor_mz
+            data,
+        );
 
-        assert_eq!(peakel.apex_index(), Some(2));
+        assert_eq!(peakel.apex_data_index(), Some(2));
     }
 
     // XML generation tests are now in writer/xml_builder.rs

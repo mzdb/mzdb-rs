@@ -99,9 +99,7 @@ pub use peakeldb::{
     extract_i64_array, extract_f32_array, extract_f64_array,
     chrono_lite_timestamp,
     Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord, serialize_ms1_peakel_data,
-    Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema, SimplifierPeakel,
-    write_ms1_peakels_tsv, print_ms1_statistics,
-    print_ms2_statistics,
+    Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,
 };
 
 // Re-export DIA simplifier types (when feature enabled)
@@ -109,5 +107,4 @@ pub use peakeldb::{
 pub use dia_simplifier::{
     DiaSimplifier, DiaSimplifierConfig, SimplifiedSpectrum,
     SimplificationStats, SpectrumHeader,
-    // Note: SimplifierPeakel and PeakelDbReader are now in peakeldb module
 };

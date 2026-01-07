@@ -45,11 +45,8 @@ pub use crate::processing::model::HasPeakelData;
 pub use ms1::{
     Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
     serialize_ms1_peakel_data,
-    write_ms1_peakels_tsv, print_ms1_statistics,
 };
 
 pub use ms2::{
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,
-    SimplifierPeakel,
-    print_ms2_statistics,
 };
