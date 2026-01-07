@@ -493,23 +493,8 @@ impl PutativeFeature {
 // XIC Peak (for extracted ion chromatograms)
 // ============================================================================
 
-/// A peak in an extracted ion chromatogram
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct XicPeak {
-    /// m/z value
-    pub mz: f64,
-    /// Intensity value
-    pub intensity: f32,
-    /// Retention time
-    pub rt: f32,
-}
-
-impl XicPeak {
-    /// Create a new XIC peak
-    pub fn new(mz: f64, intensity: f32, rt: f32) -> Self {
-        Self { mz, intensity, rt }
-    }
-}
+// Re-export XicPeak from the main model module to avoid duplication
+pub use crate::model::XicPeak;
 
 // ============================================================================
 // Detected Peak (result of peak detection on XIC)

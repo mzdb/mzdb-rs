@@ -30,7 +30,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{ByteOrder, DataEncoding, DataMode, PeakEncoding};
-use crate::query_utils::get_table_records_count;
+use crate::query_utils::{get_table_records_count, get_data_encoding_by_id};
 
 // ============================================================================
 // Chromatogram structures
@@ -329,48 +329,10 @@ pub fn list_srm_chromatograms(db: &Connection) -> Result<Vec<ChromatogramHeader>
 // Data decoding
 // ============================================================================
 
-/// Get data encoding for a chromatogram
+/// Get data encoding for a chromatogram (uses shared utility function)
 fn get_chromatogram_data_encoding(db: &Connection, data_encoding_id: i64) -> Result<DataEncoding> {
-    let result = db
-        .prepare(
-            "SELECT id, mode, compression, byte_order, mz_precision, intensity_precision \
-             FROM data_encoding WHERE id = ?1"
-        )?
-        .query_row([data_encoding_id], |row| {
-            let mode_str: String = row.get(1)?;
-            let byte_order_str: String = row.get(3)?;
-            let mz_precision: u32 = row.get(4)?;
-            let intensity_precision: u32 = row.get(5)?;
-            
-            let mode = match mode_str.as_str() {
-                "fitted" => DataMode::Fitted,
-                "centroid" => DataMode::Centroid,
-                _ => DataMode::Profile,
-            };
-            
-            let byte_order = if byte_order_str == "little_endian" {
-                ByteOrder::LittleEndian
-            } else {
-                ByteOrder::BigEndian
-            };
-            
-            let peak_encoding = if mz_precision == 32 {
-                PeakEncoding::LowRes
-            } else if intensity_precision == 32 {
-                PeakEncoding::HighRes
-            } else {
-                PeakEncoding::NoLoss
-            };
-            
-            Ok(DataEncoding {
-                id: row.get(0)?,
-                mode,
-                peak_encoding,
-                compression: row.get(2)?,
-                byte_order,
-            })
-        })?;
-    Ok(result)
+    get_data_encoding_by_id(db, data_encoding_id)?
+        .ok_or_else(|| anyhow!("Data encoding with ID {} not found", data_encoding_id))
 }
 
 /// Decode chromatogram data points from blob

@@ -115,7 +115,7 @@ pub struct FittedPeak {
 }
 
 /// A peak in an extracted ion chromatogram (XIC)
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct XicPeak {
     /// m/z value
     pub mz: f64,
@@ -125,51 +125,15 @@ pub struct XicPeak {
     pub rt: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct CvParam {
-    pub cv_ref: String,
-    pub accession: String,
-    pub name: String,
-    pub value: String,
-    pub unit_cv_ref: String,
-    pub unit_accession: String,
-    pub unit_name: String,
+impl XicPeak {
+    /// Create a new XIC peak
+    pub fn new(mz: f64, intensity: f32, rt: f32) -> Self {
+        Self { mz, intensity, rt }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct UserParam {
-    pub cv_ref: String,
-    pub accession: String,
-    pub name: String,
-    pub value: String,
-    pub r#type: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct UserText {
-    pub cv_ref: String,
-    pub accession: String,
-    pub name: String,
-    pub text: String,
-    pub r#type: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ParamTree {
-    pub cv_params: Vec<CvParam>,
-    pub user_params: Vec<UserParam>,
-    pub user_texts: Vec<UserText>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct MzdbParamTree {
-    pub ms1_bb_mz_width: f32,
-    pub msn_bb_mz_width: f32,
-    pub ms1_bb_time_width: f32,
-    pub msn_bb_time_width: f32,
-    pub is_loss_less: i64,
-    pub origin_file_format: String,
-}
+// Note: CvParam, UserParam, UserText, and ParamTree are defined in xml.rs
+// with proper Optional fields for XML parsing. Re-exported from lib.rs.
 
 /// Data acquisition mode for spectra
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

@@ -80,7 +80,6 @@ pub mod metadata;
 pub mod model;
 pub mod mzdb;
 pub mod queries;
-pub mod queries_extended;
 pub mod query_utils;
 pub mod rtree;
 pub mod xml;
@@ -146,8 +145,8 @@ pub use xml::{
     extract_scan_time, find_param_value, find_user_param_value, find_user_text,
 };
 
-// Re-export queries_extended types and functions
-pub use queries_extended::MzDbStats;
+// Re-export queries types and functions
+pub use queries::MzDbStats;
 
 // Re-export query utility functions
 pub use query_utils::{
@@ -155,6 +154,7 @@ pub use query_utils::{
     query_single_i64, query_single_i64_required, query_single_f32, query_single_f64,
     query_single_string, query_all_strings,
     query_single_i64_with_params, query_single_f64_with_params, query_single_string_with_params,
+    parse_data_encoding_from_row, get_data_encoding_by_id,
 };
 
 // Re-export MzDbReader from mzdb module

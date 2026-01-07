@@ -16,15 +16,14 @@
 //! # Example
 //!
 //! ```no_run
-//! use mzdb::MzDbReader;
 //! use mzdb::processing::dia_simplifier::{DiaSimplifier, DiaSimplifierConfig};
 //!
-//! let reader = MzDbReader::open("dia_file.mzDB").unwrap();
+//! let mzdb_path = "dia_file.mzDB";
 //! let peakeldb_path = "peakels.peakeldb";
 //! let output_path = std::path::PathBuf::from("simplified.mzDB");
 //!
 //! let simplifier = DiaSimplifier::new(DiaSimplifierConfig::default());
-//! simplifier.simplify(&reader, peakeldb_path, &output_path).unwrap();
+//! simplifier.simplify(mzdb_path, peakeldb_path, &output_path).unwrap();
 //! ```
 
 use std::collections::{BTreeMap, HashMap};

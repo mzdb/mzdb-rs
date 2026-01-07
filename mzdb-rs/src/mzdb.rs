@@ -13,7 +13,7 @@ use crate::iterator::{for_each_spectrum as iterator_for_each_spectrum, SpectrumI
 use crate::metadata::*;
 use crate::model::*;
 use crate::queries::*;
-use crate::queries_extended::is_dia_data;
+use crate::queries::is_dia_data;
 use crate::rtree::*;
 
 /// Main entry point for reading mzDB files

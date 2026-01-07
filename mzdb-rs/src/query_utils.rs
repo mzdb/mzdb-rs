@@ -198,6 +198,62 @@ pub fn get_table_count_exact(db: &Connection, table_name: &str) -> Result<Option
         .map_err(Into::into)
 }
 
+// ============================================================================
+// Data encoding utilities
+// ============================================================================
+
+use crate::model::{ByteOrder, DataEncoding, DataMode, PeakEncoding};
+
+/// Parse a DataEncoding from a database row.
+/// 
+/// Expected row format: (id, mode, compression, byte_order, mz_precision, intensity_precision)
+/// This is used by both queries.rs and chromatogram.rs for consistent encoding parsing.
+pub fn parse_data_encoding_from_row(row: &rusqlite::Row) -> rusqlite::Result<DataEncoding> {
+    let mode_str: String = row.get(1)?;
+    let byte_order_str: String = row.get(3)?;
+    let mz_precision: u32 = row.get(4)?;
+    let intensity_precision: u32 = row.get(5)?;
+    
+    let mode = match mode_str.as_str() {
+        "fitted" => DataMode::Fitted,
+        "centroid" => DataMode::Centroid,
+        _ => DataMode::Profile,
+    };
+    
+    let byte_order = if byte_order_str == "little_endian" {
+        ByteOrder::LittleEndian
+    } else {
+        ByteOrder::BigEndian
+    };
+    
+    let peak_encoding = if mz_precision == 32 {
+        PeakEncoding::LowRes
+    } else if intensity_precision == 32 {
+        PeakEncoding::HighRes
+    } else {
+        PeakEncoding::NoLoss
+    };
+    
+    Ok(DataEncoding {
+        id: row.get(0)?,
+        mode,
+        peak_encoding,
+        compression: row.get(2)?,
+        byte_order,
+    })
+}
+
+/// Get a data encoding by ID
+pub fn get_data_encoding_by_id(db: &Connection, id: i64) -> Result<Option<DataEncoding>> {
+    db.prepare(
+        "SELECT id, mode, compression, byte_order, mz_precision, intensity_precision \
+         FROM data_encoding WHERE id = ?1"
+    )?
+    .query_row([id], parse_data_encoding_from_row)
+    .optional()
+    .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

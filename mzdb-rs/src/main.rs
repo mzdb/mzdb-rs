@@ -5,7 +5,6 @@ mod metadata;
 mod model;
 mod mzdb;
 mod queries;
-mod queries_extended;
 mod query_utils;
 mod rtree;
 mod xml;
