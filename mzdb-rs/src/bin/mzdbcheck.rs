@@ -18,7 +18,7 @@
 
 use std::env;
 use std::process;
-use anyhow::Result;
+use anyhow_ext::Result;
 use mzdb::MzDbReader;
 
 fn print_usage(program: &str) {

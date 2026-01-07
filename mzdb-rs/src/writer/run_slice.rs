@@ -3,7 +3,8 @@
 //! Manages creation and tracking of run slices, which partition the m/z dimension
 //! of the data for efficient spatial indexing.
 
-use anyhow::{Context, Result};
+use anyhow_ext::{Context, Result};
+use ordered_float::OrderedFloat;
 use rusqlite::Connection;
 use std::collections::HashMap;
 
@@ -12,7 +13,7 @@ use crate::model::RunSliceHeader;
 /// Factory for creating and managing run slices
 pub struct RunSliceFactory {
     /// Map from (ms_level, begin_mz, end_mz) to RunSliceHeader
-    run_slices: HashMap<(i64, OrderedFloat, OrderedFloat), RunSliceHeader>,
+    run_slices: HashMap<(i64, OrderedFloat<f64>, OrderedFloat<f64>), RunSliceHeader>,
     
     /// Map from ID to RunSliceHeader
     run_slices_by_id: HashMap<i64, RunSliceHeader>,
@@ -22,24 +23,6 @@ pub struct RunSliceFactory {
     
     /// Next available run slice ID
     next_id: i64,
-}
-
-/// Wrapper for f64 that implements Eq and Hash for use in HashMap keys
-#[derive(Copy, Clone, Debug)]
-struct OrderedFloat(f64);
-
-impl PartialEq for OrderedFloat {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.to_bits() == other.0.to_bits()
-    }
-}
-
-impl Eq for OrderedFloat {}
-
-impl std::hash::Hash for OrderedFloat {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
 }
 
 impl RunSliceFactory {

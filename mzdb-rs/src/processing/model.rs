@@ -4,6 +4,7 @@
 //! the mzdb-processing library.
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 // ============================================================================
@@ -121,35 +122,41 @@ pub type RtIntensityPairs = Vec<RtIntensityPair>;
 
 /// A peakel is a chromatographic peak - a series of peaks across spectra
 /// representing the elution of a single analyte.
+/// 
+/// Uses SmallVec to store up to 16 points on the stack, spilling to heap
+/// for larger peakels. Most peakels have fewer than 16 data points.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Peakel {
     /// Unique identifier
     pub id: i64,
     /// Spectrum IDs for each data point
-    pub spectrum_ids: Vec<i64>,
+    pub spectrum_ids: SmallVec<[i64; 16]>,
     /// Elution times for each data point
-    pub elution_times: Vec<f32>,
+    pub elution_times: SmallVec<[f32; 16]>,
     /// m/z values for each data point
-    pub mz_values: Vec<f64>,
+    pub mz_values: SmallVec<[f64; 16]>,
     /// Intensity values for each data point
-    pub intensity_values: Vec<f32>,
+    pub intensity_values: SmallVec<[f32; 16]>,
     /// Left HWHM values (optional)
-    pub left_hwhms: Option<Vec<f64>>,
+    pub left_hwhms: Option<SmallVec<[f64; 16]>>,
     /// Right HWHM values (optional)
-    pub right_hwhms: Option<Vec<f64>>,
+    pub right_hwhms: Option<SmallVec<[f64; 16]>>,
     /// Index of the apex (most intense point)
     apex_index: usize,
 }
 
 impl Peakel {
-    /// Create a new peakel from data vectors
+    /// Create a new peakel from SmallVec data
+    /// 
+    /// This is the primary constructor. For peakels with 16 or fewer points,
+    /// data stays on the stack avoiding heap allocation.
     pub fn new(
-        spectrum_ids: Vec<i64>,
-        elution_times: Vec<f32>,
-        mz_values: Vec<f64>,
-        intensity_values: Vec<f32>,
-        left_hwhms: Option<Vec<f64>>,
-        right_hwhms: Option<Vec<f64>>,
+        spectrum_ids: SmallVec<[i64; 16]>,
+        elution_times: SmallVec<[f32; 16]>,
+        mz_values: SmallVec<[f64; 16]>,
+        intensity_values: SmallVec<[f32; 16]>,
+        left_hwhms: Option<SmallVec<[f64; 16]>>,
+        right_hwhms: Option<SmallVec<[f64; 16]>>,
     ) -> Self {
         let apex_index = intensity_values
             .iter()
@@ -166,6 +173,37 @@ impl Peakel {
             intensity_values,
             left_hwhms,
             right_hwhms,
+            apex_index,
+        }
+    }
+    
+    /// Create a new peakel from Vec data
+    /// 
+    /// The vectors are converted to SmallVec internally. Use this for
+    /// convenience when working with existing Vec data.
+    pub fn from_vec(
+        spectrum_ids: Vec<i64>,
+        elution_times: Vec<f32>,
+        mz_values: Vec<f64>,
+        intensity_values: Vec<f32>,
+        left_hwhms: Option<Vec<f64>>,
+        right_hwhms: Option<Vec<f64>>,
+    ) -> Self {
+        let apex_index = intensity_values
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        Self {
+            id: generate_peakel_id(),
+            spectrum_ids: SmallVec::from_vec(spectrum_ids),
+            elution_times: SmallVec::from_vec(elution_times),
+            mz_values: SmallVec::from_vec(mz_values),
+            intensity_values: SmallVec::from_vec(intensity_values),
+            left_hwhms: left_hwhms.map(SmallVec::from_vec),
+            right_hwhms: right_hwhms.map(SmallVec::from_vec),
             apex_index,
         }
     }
@@ -277,14 +315,30 @@ impl Peakel {
 // ============================================================================
 
 /// Builder for constructing Peakels from individual peaks
-#[derive(Clone, Debug, Default)]
+/// 
+/// Uses SmallVec internally to match Peakel's storage, avoiding
+/// conversion overhead when building small peakels.
+#[derive(Clone, Debug)]
 pub struct PeakelBuilder {
-    spectrum_ids: Vec<i64>,
-    elution_times: Vec<f32>,
-    mz_values: Vec<f64>,
-    intensity_values: Vec<f32>,
-    left_hwhms: Vec<f64>,
-    right_hwhms: Vec<f64>,
+    spectrum_ids: SmallVec<[i64; 16]>,
+    elution_times: SmallVec<[f32; 16]>,
+    mz_values: SmallVec<[f64; 16]>,
+    intensity_values: SmallVec<[f32; 16]>,
+    left_hwhms: SmallVec<[f64; 16]>,
+    right_hwhms: SmallVec<[f64; 16]>,
+}
+
+impl Default for PeakelBuilder {
+    fn default() -> Self {
+        Self {
+            spectrum_ids: SmallVec::new(),
+            elution_times: SmallVec::new(),
+            mz_values: SmallVec::new(),
+            intensity_values: SmallVec::new(),
+            left_hwhms: SmallVec::new(),
+            right_hwhms: SmallVec::new(),
+        }
+    }
 }
 
 impl PeakelBuilder {
@@ -294,15 +348,10 @@ impl PeakelBuilder {
     }
 
     /// Create a new peakel builder with capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            spectrum_ids: Vec::with_capacity(capacity),
-            elution_times: Vec::with_capacity(capacity),
-            mz_values: Vec::with_capacity(capacity),
-            intensity_values: Vec::with_capacity(capacity),
-            left_hwhms: Vec::with_capacity(capacity),
-            right_hwhms: Vec::with_capacity(capacity),
-        }
+    pub fn with_capacity(_capacity: usize) -> Self {
+        // SmallVec doesn't have with_capacity for inline storage,
+        // but will grow as needed
+        Self::default()
     }
 
     /// Add a peak to the builder
@@ -546,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_peakel_creation() {
-        let peakel = Peakel::new(
+        let peakel = Peakel::from_vec(
             vec![1, 2, 3],
             vec![1.0, 2.0, 3.0],
             vec![500.0, 500.1, 500.2],
@@ -593,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_peakel_calculations() {
-        let peakel = Peakel::new(
+        let peakel = Peakel::from_vec(
             vec![1, 2, 3],
             vec![1.0, 2.0, 3.0],
             vec![500.0, 500.0, 500.0],

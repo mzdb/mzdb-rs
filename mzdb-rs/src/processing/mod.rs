@@ -49,7 +49,7 @@ pub mod ms;
 pub mod model;
 pub mod dia;
 
-#[cfg(all(feature = "ordered-float", feature = "rmpv"))]
+#[cfg(all(feature = "rmpv"))]
 pub mod dia_simplifier;
 
 // Re-export commonly used types
@@ -91,7 +91,7 @@ pub use dia::{
 };
 
 // Re-export DIA simplifier types (when feature enabled)
-#[cfg(all(feature = "ordered-float", feature = "rmpv"))]
+#[cfg(all(feature = "rmpv"))]
 pub use dia_simplifier::{
     DiaSimplifier, DiaSimplifierConfig, SimplifiedSpectrum,
     SimplifierPeakel, PeakelDbReader, SimplificationStats,

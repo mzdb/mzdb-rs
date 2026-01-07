@@ -5,7 +5,8 @@
 //! - Binary serialization of peak data
 //! - Flushing bounding box rows to the database
 
-use anyhow::{Context, Result};
+use anyhow_ext::{Context, Result};
+use ordered_float::OrderedFloat;
 use std::collections::HashMap;
 
 use crate::model::*;
@@ -208,24 +209,6 @@ impl BoundingBoxCache {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect()
-    }
-}
-
-/// Wrapper for f64 that implements Ord for sorting
-#[derive(Copy, Clone, Debug, PartialEq)]
-struct OrderedFloat(f64);
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 

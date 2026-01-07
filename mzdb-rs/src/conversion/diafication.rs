@@ -23,7 +23,7 @@
 //! converter.convert("output_dia.mzDB").unwrap();
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow_ext::{bail, Context, Result};
 use ordered_float::OrderedFloat;
 use rmpv::Value;
 use rusqlite::{params, Connection};
@@ -262,7 +262,7 @@ fn parse_peaks_blob(data: &[u8]) -> Result<(Vec<i64>, Vec<f32>, Vec<f64>, Vec<f3
 
     if let Value::Array(arrays) = value {
         if arrays.len() != 4 {
-            anyhow::bail!("Expected 4 arrays in peaks blob, got {}", arrays.len());
+            bail!("Expected 4 arrays in peaks blob, got {}", arrays.len());
         }
 
         let spectrum_ids = extract_i64_array(&arrays[0])?;
@@ -272,7 +272,7 @@ fn parse_peaks_blob(data: &[u8]) -> Result<(Vec<i64>, Vec<f32>, Vec<f64>, Vec<f3
 
         Ok((spectrum_ids, elution_times, mz_values, intensities))
     } else {
-        anyhow::bail!("Expected array in peaks blob, got {:?}", value);
+        bail!("Expected array in peaks blob, got {:?}", value);
     }
 }
 
@@ -285,7 +285,7 @@ fn extract_i64_array(value: &Value) -> Result<Vec<i64>> {
             })
             .collect()
     } else {
-        anyhow::bail!("Expected array, got {:?}", value);
+        bail!("Expected array, got {:?}", value);
     }
 }
 
@@ -300,7 +300,7 @@ fn extract_f32_array(value: &Value) -> Result<Vec<f32>> {
             })
             .collect()
     } else {
-        anyhow::bail!("Expected array, got {:?}", value);
+        bail!("Expected array, got {:?}", value);
     }
 }
 
@@ -315,7 +315,7 @@ fn extract_f64_array(value: &Value) -> Result<Vec<f64>> {
             })
             .collect()
     } else {
-        anyhow::bail!("Expected array, got {:?}", value);
+        bail!("Expected array, got {:?}", value);
     }
 }
 

@@ -607,7 +607,7 @@ fn test_peakel_model() {
     let mz_values = vec![500.0, 500.01, 500.02, 500.01, 500.0];
     let intensity_values = vec![100.0f32, 500.0, 1000.0, 500.0, 100.0];
     
-    let peakel = Peakel::new(
+    let peakel = Peakel::from_vec(
         spectrum_ids,
         elution_times,
         mz_values,

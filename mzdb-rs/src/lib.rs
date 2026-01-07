@@ -146,7 +146,7 @@ pub use xml::{
 };
 
 // Re-export queries types and functions
-pub use queries::MzDbStats;
+pub use queries::{MzDbStats, SpectrumParseBuffer, read_spectrum_slice_into_buffer};
 
 // Re-export query utility functions
 pub use query_utils::{
@@ -157,8 +157,8 @@ pub use query_utils::{
     parse_data_encoding_from_row, get_data_encoding_by_id,
 };
 
-// Re-export MzDbReader from mzdb module
-pub use crate::mzdb::MzDbReader;
+// Re-export MzDbReader and builder from mzdb module
+pub use crate::mzdb::{MzDbReader, MzDbReaderBuilder, TempStore};
 
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //!
 //! This module constructs mzDB-compatible XML metadata from Thermo RAW file information.
 
-use anyhow::Result;
+use anyhow_ext::Result;
 use thernio::raw::{RawFile, Analyzer, ActivationType};
 use xmltree::{Element, XMLNode, EmitterConfig};
 

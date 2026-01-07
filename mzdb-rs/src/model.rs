@@ -5,9 +5,10 @@
 //! metadata types.
 #![allow(unused)]
 
-use anyhow::*;
+use anyhow_ext::{anyhow, Result};
 use roxmltree::Document;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::model::DataMode::Fitted;
@@ -283,18 +284,18 @@ impl SpectrumData {
 
     /// Get m/z value at a specific index
     #[cfg(feature = "writer")]
-    pub fn get_mz_at(&self, index: usize) -> Result<f64, anyhow::Error> {
+    pub fn get_mz_at(&self, index: usize) -> Result<f64, anyhow_ext::Error> {
         self.mz_array.get(index)
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds for m/z array", index))
+            .ok_or_else(|| anyhow!("Index {} out of bounds for m/z array", index))
     }
 
     /// Get intensity value at a specific index
     #[cfg(feature = "writer")]
-    pub fn get_intensity_at(&self, index: usize) -> Result<f32, anyhow::Error> {
+    pub fn get_intensity_at(&self, index: usize) -> Result<f32, anyhow_ext::Error> {
         self.intensity_array.get(index)
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds for intensity array", index))
+            .ok_or_else(|| anyhow!("Index {} out of bounds for intensity array", index))
     }
 
     /// Get left HWHM value at a specific index
@@ -512,9 +513,12 @@ pub struct BoundingBox {
 pub struct BoundingBoxIndex {
     pub bb_id: i64,
     pub spectrum_slices_count: usize,
-    pub spectra_ids: Vec<i64>,
-    pub slices_indexes: Vec<usize>,
-    pub peaks_counts: Vec<usize>,
+    /// Spectrum IDs in this bounding box (typically 1-16 spectra per BB)
+    pub spectra_ids: SmallVec<[i64; 16]>,
+    /// Byte offsets for each spectrum slice in the blob data
+    pub slices_indexes: SmallVec<[usize; 16]>,
+    /// Peak counts for each spectrum slice
+    pub peaks_counts: SmallVec<[usize; 16]>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

@@ -33,10 +33,10 @@
 //!     .with_min_peaks(10); // Minimum 10 peaks per spectrum
 //!
 //! MgfWriter::export(&mzdb, "output.mgf", &options)?;
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), anyhow_ext::Error>(())
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow_ext::{Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -280,7 +280,7 @@ impl MgfWriter<File> {
     /// let options = MgfExportOptions::default();
     /// let count = MgfWriter::export(&mzdb, "output.mgf", &options)?;
     /// println!("Exported {} spectra", count);
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), anyhow_ext::Error>(())
     /// ```
     pub fn export<P: AsRef<Path>>(
         mzdb: &MzDbReader,
@@ -329,7 +329,7 @@ impl MgfWriter<File> {
     /// let mzdb = MzDbReader::open("data.mzdb")?;
     /// let count = MgfWriter::export_default(&mzdb, "output.mgf")?;
     /// println!("Exported {} MS2 spectra", count);
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), anyhow_ext::Error>(())
     /// ```
     pub fn export_default<P: AsRef<Path>>(mzdb: &MzDbReader, output_path: P) -> Result<usize> {
         Self::export(mzdb, output_path, &MgfExportOptions::default())

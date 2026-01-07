@@ -2,7 +2,7 @@
 //!
 //! Manages unique data encodings used in the mzDB file and assigns IDs to them.
 
-use anyhow::{Context, Result};
+use anyhow_ext::{Context, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 

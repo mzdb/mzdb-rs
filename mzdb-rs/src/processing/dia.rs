@@ -30,6 +30,8 @@
 use std::collections::{HashSet, BTreeMap};
 use std::path::PathBuf;
 
+use anyhow_ext::anyhow;
+
 use crate::MzDbReader;
 use crate::processing::signal::detection::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder};
 
@@ -93,7 +95,7 @@ impl PeaksData {
     }
 
     /// Serialize to messagepack bytes
-    pub fn to_msgpack(&self) -> anyhow::Result<Vec<u8>> {
+    pub fn to_msgpack(&self) -> anyhow_ext::Result<Vec<u8>> {
         // Serialize as tuple of arrays for compact representation
         let data = (
             &self.spectrum_ids,
@@ -102,15 +104,15 @@ impl PeaksData {
             &self.intensity_values,
         );
         rmp_serde::to_vec(&data)
-            .map_err(|e| anyhow::anyhow!("msgpack serialization error: {}", e))
+            .map_err(|e| anyhow!("msgpack serialization error: {}", e))
     }
     
     /// Deserialize from messagepack bytes
-    pub fn from_msgpack(bytes: &[u8]) -> anyhow::Result<Self> {
+    pub fn from_msgpack(bytes: &[u8]) -> anyhow_ext::Result<Self> {
         let (spectrum_ids, elution_times, mz_values, intensity_values): 
             (Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>) = 
             rmp_serde::from_slice(bytes)
-                .map_err(|e| anyhow::anyhow!("msgpack deserialization error: {}", e))?;
+                .map_err(|e| anyhow!("msgpack deserialization error: {}", e))?;
         
         Ok(Self {
             spectrum_ids,
@@ -299,7 +301,7 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         window: &IsolationWindow,
-    ) -> anyhow::Result<Vec<DiaMs2PeakelRecord>> {
+    ) -> anyhow_ext::Result<Vec<DiaMs2PeakelRecord>> {
         log::info!("Processing isolation window: {:.1} m/z ({} spectra)", 
                    window.target_mz, window.spectrum_count);
         
@@ -558,7 +560,7 @@ impl DiaMs2PeakelDetector {
     pub fn detect_all_peakels(
         &self,
         reader: &MzDbReader,
-    ) -> anyhow::Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
+    ) -> anyhow_ext::Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
         self.detect_all_peakels_with_threads(reader, 1)
     }
 
@@ -570,7 +572,7 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         num_threads: usize,
-    ) -> anyhow::Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
+    ) -> anyhow_ext::Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
         // Discover isolation windows
         let windows = self.discover_isolation_windows(reader);
         
@@ -599,7 +601,7 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         windows: &[IsolationWindow],
-    ) -> anyhow::Result<Vec<DiaMs2PeakelRecord>> {
+    ) -> anyhow_ext::Result<Vec<DiaMs2PeakelRecord>> {
         let mut all_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
         let mut next_id = 1i64;
         
@@ -631,7 +633,7 @@ impl DiaMs2PeakelDetector {
         reader: &MzDbReader,
         windows: &[IsolationWindow],
         num_threads: usize,
-    ) -> anyhow::Result<Vec<DiaMs2PeakelRecord>> {
+    ) -> anyhow_ext::Result<Vec<DiaMs2PeakelRecord>> {
         use crossbeam_channel::bounded;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Mutex;
@@ -730,7 +732,7 @@ impl DiaMs2PeakelDetector {
         
         // Extract results and renumber IDs
         let collected_results = results.into_inner()
-            .map_err(|e| anyhow::anyhow!("Failed to collect results: {:?}", e))?;
+            .map_err(|e| anyhow!("Failed to collect results: {:?}", e))?;
         
         let mut all_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
         let mut next_id = 1i64;
@@ -1014,7 +1016,7 @@ pub fn write_dia_peakeldb(
     path: &PathBuf,
     windows: &[IsolationWindow],
     peakels: &[DiaMs2PeakelRecord],
-) -> anyhow::Result<()> {
+) -> anyhow_ext::Result<()> {
     use rusqlite::Connection;
     
     // Remove existing file if present
@@ -1169,7 +1171,7 @@ pub fn write_dia_peakeldb(
 pub fn write_dia_peakels_tsv(
     path: &PathBuf,
     peakels: &[DiaMs2PeakelRecord],
-) -> anyhow::Result<()> {
+) -> anyhow_ext::Result<()> {
     use std::io::Write;
     use std::fs::File;
     

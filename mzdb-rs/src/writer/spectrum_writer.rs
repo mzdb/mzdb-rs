@@ -3,7 +3,7 @@
 //! Handles the insertion of spectrum data into the mzDB file with automatic
 //! bounding box assignment and caching.
 
-use anyhow::{Context, Result};
+use anyhow_ext::{Context, Result};
 
 use crate::model::*;
 use crate::writer::MzDbWriter;

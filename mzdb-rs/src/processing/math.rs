@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use itertools::Itertools;
+
 // ============================================================================
 // Derivative Analysis
 // ============================================================================
@@ -237,8 +239,11 @@ pub fn compute_histogram(values: &[f64], nb_bins: usize) -> Vec<HistogramBin> {
         return vec![];
     }
 
-    let min_val = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let (min_val, max_val) = match values.iter().cloned().minmax() {
+        itertools::MinMaxResult::NoElements => return vec![],
+        itertools::MinMaxResult::OneElement(v) => return vec![HistogramBin::new(v, v + 1.0)],
+        itertools::MinMaxResult::MinMax(min, max) => (min, max),
+    };
 
     if min_val == max_val {
         return vec![HistogramBin::new(min_val, max_val + 1.0)];
@@ -276,10 +281,14 @@ pub fn compute_histogram_2d(
         return HashMap::new();
     }
 
-    let x_min = x_values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let x_max = x_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let y_min = y_values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let y_max = y_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let (x_min, x_max) = match x_values.iter().cloned().minmax() {
+        itertools::MinMaxResult::MinMax(min, max) => (min, max),
+        _ => return HashMap::new(),
+    };
+    let (y_min, y_max) = match y_values.iter().cloned().minmax() {
+        itertools::MinMaxResult::MinMax(min, max) => (min, max),
+        _ => return HashMap::new(),
+    };
 
     let x_range = x_max - x_min;
     let y_range = y_max - y_min;

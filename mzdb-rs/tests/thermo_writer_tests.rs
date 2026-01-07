@@ -5,7 +5,7 @@
 
 #![cfg(feature = "thermo2mzdb")]
 
-use anyhow::Result;
+use anyhow_ext::Result;
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;

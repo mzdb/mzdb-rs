@@ -2,20 +2,12 @@
 //!
 //! This module provides a mechanism to cache commonly used prepared statements
 //! to avoid re-preparing them on each query execution.
-//!
-//! ## Performance Notes
-//!
-//! The `bytes` crate is available for potential future zero-copy parsing optimizations
-//! in the bounding box blob data parsing. Currently, the standard library's byte slicing
-//! is used, but for high-throughput scenarios, `bytes::Bytes` could provide benefits
-//! through reference counting and avoiding copies.
 #![allow(unused)]
 
 use std::collections::HashMap;
 use std::cell::RefCell;
 
-use anyhow::*;
-use anyhow_ext::Context;
+use anyhow_ext::{anyhow, Context, Result};
 use rusqlite::{Connection, Statement};
 
 use crate::model::{BBSizes, DataEncoding, DataEncodingsCache, EntityCache};

@@ -6,6 +6,8 @@
 //! - SmartPeakelFinder: Advanced detection with smoothing and baseline removal
 //! - HistogramBasedPeakelFinder: Histogram-binning based detection
 
+use itertools::Itertools;
+
 use super::filtering::{
     BaselineRemover, SavitzkyGolaySmoother, SavitzkyGolaySmoothingConfig, SignalSmoother,
     PartialSavitzkyGolaySmoother,
@@ -238,11 +240,11 @@ impl SmartPeakelFinder {
         }
 
         let intensities: Vec<f64> = data.iter().map(|&(_, i)| i).collect();
-        let min_val = intensities.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max_val = intensities
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+        
+        let (min_val, max_val) = match intensities.iter().cloned().minmax() {
+            itertools::MinMaxResult::MinMax(min, max) => (min, max),
+            _ => return 0.0,
+        };
 
         if max_val == min_val {
             return 0.0;

@@ -24,7 +24,7 @@
 //!
 //! ```no_run
 //! # #[cfg(feature = "thermo2mzdb")]
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> anyhow_ext::Result<()> {
 //! use mzdb::writer::{MzDbWriter, MzDbWriterBuilder};
 //! use mzdb::{BBSizes, DataMode, PeakEncoding, ByteOrder};
 //! 
@@ -78,7 +78,7 @@ mod spectrum_writer;
 #[cfg(feature = "thermo2mzdb")]
 pub mod thermo;
 
-use anyhow::{Context, Result};
+use anyhow_ext::{Context, Result};
 use rusqlite::{Connection, Statement};
 use std::path::Path;
 

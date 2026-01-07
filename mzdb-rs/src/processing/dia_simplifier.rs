@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow_ext::{bail, Context, Result};
 use ordered_float::OrderedFloat;
 use rmpv::Value;
 use rusqlite::{params, Connection};
@@ -63,7 +63,7 @@ impl DiaSimplifierConfig {
     /// Create a new config with specified points per peakel
     pub fn with_points(points_per_peakel: usize) -> Result<Self> {
         if points_per_peakel % 2 == 0 {
-            anyhow::bail!("points_per_peakel must be odd (1, 3, 5, etc.)");
+            bail!("points_per_peakel must be odd (1, 3, 5, etc.)");
         }
         Ok(Self {
             points_per_peakel,
@@ -289,7 +289,7 @@ fn parse_peaks_blob(data: &[u8]) -> Result<(Vec<i64>, Vec<f32>, Vec<f64>, Vec<f3
 
     if let Value::Array(arrays) = value {
         if arrays.len() != 4 {
-            anyhow::bail!(
+            bail!(
                 "Expected 4 arrays in peaks blob, got {}",
                 arrays.len()
             );
@@ -302,7 +302,7 @@ fn parse_peaks_blob(data: &[u8]) -> Result<(Vec<i64>, Vec<f32>, Vec<f64>, Vec<f3
 
         Ok((spectrum_ids, elution_times, mz_values, intensities))
     } else {
-        anyhow::bail!("Expected array in peaks blob, got {:?}", value);
+        bail!("Expected array in peaks blob, got {:?}", value);
     }
 }
 
@@ -315,7 +315,7 @@ fn extract_i64_array(value: &Value) -> Result<Vec<i64>> {
             })
             .collect()
     } else {
-        anyhow::bail!("Expected array, got {:?}", value);
+        bail!("Expected array, got {:?}", value);
     }
 }
 
@@ -330,7 +330,7 @@ fn extract_f32_array(value: &Value) -> Result<Vec<f32>> {
             })
             .collect()
     } else {
-        anyhow::bail!("Expected array, got {:?}", value);
+        bail!("Expected array, got {:?}", value);
     }
 }
 
@@ -345,7 +345,7 @@ fn extract_f64_array(value: &Value) -> Result<Vec<f64>> {
             })
             .collect()
     } else {
-        anyhow::bail!("Expected array, got {:?}", value);
+        bail!("Expected array, got {:?}", value);
     }
 }
 

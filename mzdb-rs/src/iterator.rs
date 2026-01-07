@@ -18,10 +18,8 @@
 //! }).unwrap();
 //! ```
 
-use anyhow::*;
-use anyhow_ext::Context;
+use anyhow_ext::{anyhow, Context, Result};
 use fallible_iterator::FallibleIterator;
-use itertools::Itertools;
 use rusqlite::{Connection, Statement};
 
 use crate::model::*;
@@ -175,10 +173,10 @@ fn bb_row_buffer_to_spectrum_buffer(
     let de_cache = &entity_cache.data_encodings_cache;
     let bb_count = bb_row_buffer.len();
 
-    let indexed_bbs = bb_row_buffer
+    let indexed_bbs: Vec<_> = bb_row_buffer
         .iter()
         .map(|bb| index_bbox(bb, de_cache))
-        .collect_vec();
+        .collect();
 
     let first_bb_index = indexed_bbs[0].as_ref().map_err(|e| anyhow!("{}", e))?;
     let n_spectra = first_bb_index.spectra_ids.len();
@@ -476,7 +474,7 @@ impl<'a> SpectrumIterator<'a> {
 
 impl<'a> FallibleIterator for SpectrumIterator<'a> {
     type Item = Spectrum;
-    type Error = anyhow::Error;
+    type Error = anyhow_ext::Error;
 
     fn next(&mut self) -> Result<Option<Self::Item>> {
         // Return buffered spectra first

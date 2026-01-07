@@ -26,9 +26,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow_ext::{anyhow, Context, Result, bail};
 use clap::Parser;
 use rusqlite::{Connection, params};
+use smallvec::SmallVec;
 
 use mzdb::MzDbReader;
 
@@ -131,7 +132,7 @@ fn parse_threads(threads_arg: &str) -> Result<usize> {
         available_cpus
     } else {
         threads_arg.parse::<usize>()
-            .map_err(|_| anyhow::anyhow!("Invalid threads value '{}'. Use a positive number or 'auto'", threads_arg))?
+            .map_err(|_| anyhow!("Invalid threads value '{}'. Use a positive number or 'auto'", threads_arg))?
     };
     
     if requested < 1 {
@@ -545,10 +546,10 @@ fn process_single_bin(
         
         let peakel_peaks = &sorted_peaks[start..=end];
         
-        let spectrum_ids: Vec<i64> = peakel_peaks.iter().map(|p| p.2).collect();
-        let elution_times: Vec<f32> = peakel_peaks.iter().map(|p| p.3).collect();
-        let mz_values: Vec<f64> = peakel_peaks.iter().map(|p| p.0).collect();
-        let intensity_values: Vec<f32> = peakel_peaks.iter().map(|p| p.1).collect();
+        let spectrum_ids: SmallVec<[i64; 16]> = peakel_peaks.iter().map(|p| p.2).collect();
+        let elution_times: SmallVec<[f32; 16]> = peakel_peaks.iter().map(|p| p.3).collect();
+        let mz_values: SmallVec<[f64; 16]> = peakel_peaks.iter().map(|p| p.0).collect();
+        let intensity_values: SmallVec<[f32; 16]> = peakel_peaks.iter().map(|p| p.1).collect();
         
         let peakel = Peakel::new(
             spectrum_ids,
