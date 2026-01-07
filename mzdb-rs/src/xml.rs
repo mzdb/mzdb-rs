@@ -376,17 +376,8 @@ fn collect_user_texts(node: &Node) -> Vec<UserText> {
         .collect()
 }
 
-/// Find a CV param by accession and parse its value as f64
-fn find_cv_param_f64(cv_params: &[CvParam], accession: &str) -> Option<f64> {
-    cv_params
-        .iter()
-        .find(|p| p.accession == accession)
-        .and_then(|p| p.value.as_ref())
-        .and_then(|v| v.parse().ok())
-}
-
-/// Find a CV param by accession and parse its value as i32
-fn find_cv_param_i32(cv_params: &[CvParam], accession: &str) -> Option<i32> {
+/// Find a CV param by accession and parse its value
+fn find_cv_param_value<T: std::str::FromStr>(cv_params: &[CvParam], accession: &str) -> Option<T> {
     cv_params
         .iter()
         .find(|p| p.accession == accession)
@@ -400,6 +391,21 @@ fn find_cv_param_name(cv_params: &[CvParam], accession: &str) -> Option<String> 
         .iter()
         .find(|p| p.accession == accession)
         .and_then(|p| p.name.clone())
+}
+
+/// Parse an XML document and get the root element's count attribute
+/// Returns None if XML is empty, otherwise returns (Document, count)
+fn parse_xml_with_count(xml: &str) -> Result<Option<(Document<'_>, i32)>> {
+    if xml.trim().is_empty() {
+        return Ok(None);
+    }
+    let doc = Document::parse(xml)?;
+    let count = doc
+        .root_element()
+        .attribute("count")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    Ok(Some((doc, count)))
 }
 
 // ============================================================================
@@ -562,8 +568,8 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
             {
                 let sw_cv_params = collect_cv_params(&sw_node);
                 scan_windows.push(ScanWindow {
-                    lower_limit: find_cv_param_f64(&sw_cv_params, SCAN_WINDOW_LOWER_LIMIT),
-                    upper_limit: find_cv_param_f64(&sw_cv_params, SCAN_WINDOW_UPPER_LIMIT),
+                    lower_limit: find_cv_param_value(&sw_cv_params, SCAN_WINDOW_LOWER_LIMIT),
+                    upper_limit: find_cv_param_value(&sw_cv_params, SCAN_WINDOW_UPPER_LIMIT),
                     cv_params: sw_cv_params,
                 });
             }
@@ -573,7 +579,7 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
             instrument_configuration_ref: scan_node
                 .attribute("instrumentConfigurationRef")
                 .map(String::from),
-            scan_start_time: find_cv_param_f64(&scan_cv_params, SCAN_START_TIME),
+            scan_start_time: find_cv_param_value(&scan_cv_params, SCAN_START_TIME),
             time_unit: scan_cv_params
                 .iter()
                 .find(|p| p.accession == SCAN_START_TIME)
@@ -582,7 +588,7 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
                 .iter()
                 .find(|p| p.accession == FILTER_STRING)
                 .and_then(|p| p.value.clone()),
-            ion_injection_time: find_cv_param_f64(&scan_cv_params, ION_INJECTION_TIME),
+            ion_injection_time: find_cv_param_value(&scan_cv_params, ION_INJECTION_TIME),
             scan_windows,
             cv_params: scan_cv_params,
             user_params: scan_user_params,
@@ -638,9 +644,9 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
             .map(|iw_node| {
                 let cv_params = collect_cv_params(&iw_node);
                 IsolationWindow {
-                    target_mz: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_TARGET_MZ),
-                    lower_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_LOWER_OFFSET),
-                    upper_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_UPPER_OFFSET),
+                    target_mz: find_cv_param_value(&cv_params, ISOLATION_WINDOW_TARGET_MZ),
+                    lower_offset: find_cv_param_value(&cv_params, ISOLATION_WINDOW_LOWER_OFFSET),
+                    upper_offset: find_cv_param_value(&cv_params, ISOLATION_WINDOW_UPPER_OFFSET),
                     cv_params,
                 }
             });
@@ -657,9 +663,9 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
             {
                 let cv_params = collect_cv_params(&si_node);
                 selected_ions.push(SelectedIon {
-                    mz: find_cv_param_f64(&cv_params, SELECTED_ION_MZ),
-                    charge: find_cv_param_i32(&cv_params, CHARGE_STATE),
-                    intensity: find_cv_param_f64(&cv_params, PEAK_INTENSITY),
+                    mz: find_cv_param_value(&cv_params, SELECTED_ION_MZ),
+                    charge: find_cv_param_value(&cv_params, CHARGE_STATE),
+                    intensity: find_cv_param_value(&cv_params, PEAK_INTENSITY),
                     cv_params,
                 });
             }
@@ -690,7 +696,7 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
                     .and_then(|p| p.name.clone());
 
                 Activation {
-                    collision_energy: find_cv_param_f64(&cv_params, COLLISION_ENERGY),
+                    collision_energy: find_cv_param_value(&cv_params, COLLISION_ENERGY),
                     activation_type,
                     cv_params,
                 }
@@ -730,9 +736,9 @@ pub fn parse_product_list(xml: &str) -> Result<ProductList> {
             .map(|iw_node| {
                 let cv_params = collect_cv_params(&iw_node);
                 IsolationWindow {
-                    target_mz: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_TARGET_MZ),
-                    lower_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_LOWER_OFFSET),
-                    upper_offset: find_cv_param_f64(&cv_params, ISOLATION_WINDOW_UPPER_OFFSET),
+                    target_mz: find_cv_param_value(&cv_params, ISOLATION_WINDOW_TARGET_MZ),
+                    lower_offset: find_cv_param_value(&cv_params, ISOLATION_WINDOW_LOWER_OFFSET),
+                    upper_offset: find_cv_param_value(&cv_params, ISOLATION_WINDOW_UPPER_OFFSET),
                     cv_params,
                 }
             });

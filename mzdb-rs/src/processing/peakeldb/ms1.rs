@@ -1,0 +1,349 @@
+//! MS1 PeakelDB - Legacy format for MS1 peakels
+//!
+//! This module provides utilities for creating and reading MS1 peakelDB files.
+//! The MS1 format includes lcms_map and peakeldb_file tables for compatibility
+//! with legacy peakelDB tools.
+
+use std::path::Path;
+
+use anyhow_ext::{Context, Result};
+use rusqlite::{params, Connection};
+
+use crate::processing::{Peakel, HasPeakelData};
+use super::common::chrono_lite_timestamp;
+
+// ============================================================================
+// Schema
+// ============================================================================
+
+/// MS1 PeakelDB schema
+pub struct Ms1PeakelDbSchema;
+
+impl Ms1PeakelDbSchema {
+    /// SQL schema for MS1 peakelDB
+    pub const SCHEMA: &'static str = r#"
+CREATE TABLE peakeldb_file (
+    id INTEGER NOT NULL PRIMARY KEY,
+    name VARCHAR NOT NULL,
+    description VARCHAR,
+    raw_file_name VARCHAR NOT NULL,
+    is_dia_experiment BOOLEAN NOT NULL,
+    creation_timestamp VARCHAR NOT NULL,
+    modification_timestamp VARCHAR NOT NULL,
+    serialized_properties TEXT
+);
+
+CREATE TABLE lcms_map (
+    id INTEGER NOT NULL PRIMARY KEY,
+    ms_level INTEGER NOT NULL,
+    peakel_count INTEGER NOT NULL,
+    serialized_properties TEXT,
+    peakeldb_file_id INTEGER NOT NULL,
+    FOREIGN KEY (peakeldb_file_id) REFERENCES peakeldb_file (id)
+);
+
+CREATE TABLE peakel (
+    id INTEGER NOT NULL PRIMARY KEY,
+    moz DOUBLE NOT NULL,
+    elution_time REAL NOT NULL,
+    duration REAL NOT NULL,
+    gap_count INTEGER NOT NULL,
+    apex_intensity REAL NOT NULL,
+    area REAL NOT NULL,
+    amplitude REAL NOT NULL,
+    intensity_cv REAL NOT NULL,
+    left_hwhm_mean REAL,
+    left_hwhm_cv REAL,
+    right_hwhm_mean REAL,
+    right_hwhm_cv REAL,
+    is_interfering BOOLEAN NOT NULL,
+    peak_count INTEGER NOT NULL,
+    peaks BLOB NOT NULL,
+    serialized_properties TEXT,
+    first_spectrum_id INTEGER NOT NULL,
+    apex_spectrum_id INTEGER NOT NULL,
+    last_spectrum_id INTEGER NOT NULL,
+    map_id INTEGER NOT NULL,
+    FOREIGN KEY (map_id) REFERENCES lcms_map (id)
+);
+
+CREATE VIRTUAL TABLE peakel_rtree USING rtree(
+    id,
+    min_mz, max_mz,
+    min_time, max_time,
+    min_intensity, max_intensity
+);
+
+CREATE INDEX peakel_moz_idx ON peakel (moz);
+CREATE INDEX peakel_elution_time_idx ON peakel (elution_time);
+CREATE INDEX peakel_map_id_idx ON peakel (map_id);
+"#;
+}
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+/// MS1 peakel record for database operations
+#[derive(Debug, Clone)]
+pub struct Ms1PeakelRecord {
+    pub id: i64,
+    pub mz: f64,
+    pub elution_time: f32,
+    pub duration: f32,
+    pub gap_count: i32,
+    pub apex_intensity: f32,
+    pub area: f32,
+    pub amplitude: f32,
+    pub intensity_cv: f32,
+    pub left_hwhm_mean: Option<f32>,
+    pub left_hwhm_cv: Option<f32>,
+    pub right_hwhm_mean: Option<f32>,
+    pub right_hwhm_cv: Option<f32>,
+    pub is_interfering: bool,
+    pub peak_count: i32,
+    pub first_spectrum_id: i64,
+    pub apex_spectrum_id: i64,
+    pub last_spectrum_id: i64,
+}
+
+// ============================================================================
+// Writer
+// ============================================================================
+
+/// Writer for MS1 peakelDB files
+pub struct Ms1PeakelDbWriter {
+    conn: Connection,
+}
+
+impl Ms1PeakelDbWriter {
+    /// Create a new MS1 peakelDB file
+    ///
+    /// # Arguments
+    /// * `path` - Path to the output file (will be overwritten if exists)
+    pub fn create<P: AsRef<Path>>(path: P) -> Result<Self> {
+        // Remove existing file if present
+        if path.as_ref().exists() {
+            std::fs::remove_file(path.as_ref())?;
+        }
+
+        let conn = Connection::open(path.as_ref())
+            .context("Failed to create peakelDB file")?;
+
+        // SQLite optimizations
+        conn.execute_batch(
+            "PRAGMA synchronous=OFF;
+             PRAGMA journal_mode=OFF;
+             PRAGMA temp_store=2;
+             PRAGMA cache_size=100000;"
+        )?;
+
+        // Create schema
+        conn.execute_batch(Ms1PeakelDbSchema::SCHEMA)?;
+
+        Ok(Self { conn })
+    }
+
+    /// Write peakels to the database
+    ///
+    /// # Arguments
+    /// * `mzdb_filename` - Name of the source mzDB file
+    /// * `is_dia` - Whether the source is a DIA experiment
+    /// * `peakels` - Slice of peakels to write
+    pub fn write_peakels(
+        &self,
+        mzdb_filename: &str,
+        is_dia: bool,
+        peakels: &[Peakel],
+    ) -> Result<()> {
+        // Insert peakeldb_file record
+        let now = chrono_lite_timestamp();
+        self.conn.execute(
+            "INSERT INTO peakeldb_file (id, name, description, raw_file_name, is_dia_experiment, 
+             creation_timestamp, modification_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![1, mzdb_filename, "Generated by mzdb2peakeldb", mzdb_filename, is_dia, &now, &now],
+        )?;
+
+        // Insert lcms_map record
+        self.conn.execute(
+            "INSERT INTO lcms_map (id, ms_level, peakel_count, peakeldb_file_id) VALUES (?, ?, ?, ?)",
+            params![1, 1, peakels.len() as i32, 1],
+        )?;
+
+        // Insert peakels
+        self.conn.execute("BEGIN TRANSACTION", [])?;
+        
+        let mut peakel_stmt = self.conn.prepare(
+            "INSERT INTO peakel (id, moz, elution_time, duration, gap_count, apex_intensity, area,
+             amplitude, intensity_cv, left_hwhm_mean, left_hwhm_cv, right_hwhm_mean, right_hwhm_cv,
+             is_interfering, peak_count, peaks, serialized_properties,
+             first_spectrum_id, apex_spectrum_id, last_spectrum_id, map_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )?;
+
+        let mut rtree_stmt = self.conn.prepare(
+            "INSERT INTO peakel_rtree (id, min_mz, max_mz, min_time, max_time, min_intensity, max_intensity)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )?;
+
+        for (idx, peakel) in peakels.iter().enumerate() {
+            let peakel_id = (idx + 1) as i64;
+            
+            let mz = peakel.calc_mz();
+            let elution_time = peakel.apex_elution_time().unwrap_or(0.0);
+            let duration = peakel.calc_duration();
+            let apex_intensity = peakel.apex_intensity().unwrap_or(0.0);
+            let area = peakel.area();
+            let peak_count = peakel.peaks_count() as i32;
+            
+            let min_mz = peakel.min_mz();
+            let max_mz = peakel.max_mz();
+            let min_time = peakel.min_time();
+            let max_time = peakel.max_time();
+            let min_intensity = peakel.intensities().iter().cloned().fold(f32::INFINITY, f32::min);
+
+            let peaks_blob = serialize_ms1_peakel_data(peakel)?;
+            let left_hwhm_mean = peakel.left_hwhm_mean();
+            let right_hwhm_mean = peakel.right_hwhm_mean();
+            let first_spectrum_id = peakel.first_spectrum_id().unwrap_or(0);
+            let apex_spectrum_id = peakel.apex_spectrum_id().unwrap_or(0);
+            let last_spectrum_id = peakel.last_spectrum_id().unwrap_or(0);
+            let amplitude = apex_intensity / min_intensity.max(1.0);
+
+            // Use Option for nullable HWHM values (null if not computed)
+            let left_hwhm_opt: Option<f32> = if left_hwhm_mean > 0.0 { Some(left_hwhm_mean as f32) } else { None };
+            let right_hwhm_opt: Option<f32> = if right_hwhm_mean > 0.0 { Some(right_hwhm_mean as f32) } else { None };
+
+            peakel_stmt.execute(params![
+                peakel_id,
+                mz,
+                elution_time,
+                duration,
+                0, // gap_count
+                apex_intensity,
+                area,
+                amplitude,
+                0.0, // intensity_cv
+                left_hwhm_opt,
+                Option::<f32>::None, // left_hwhm_cv
+                right_hwhm_opt,
+                Option::<f32>::None, // right_hwhm_cv
+                false, // is_interfering
+                peak_count,
+                peaks_blob,
+                Option::<String>::None, // serialized_properties
+                first_spectrum_id,
+                apex_spectrum_id,
+                last_spectrum_id,
+                1, // map_id
+            ])?;
+
+            rtree_stmt.execute(params![
+                peakel_id,
+                min_mz,
+                max_mz,
+                min_time,
+                max_time,
+                min_intensity as f64,
+                apex_intensity as f64,
+            ])?;
+        }
+
+        self.conn.execute("COMMIT", [])?;
+        
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Serialization
+// ============================================================================
+
+/// Serialize MS1 peakel data to binary format
+///
+/// Format: [count: u32][spectrum_ids: i64[]][elution_times: f32[]][mz_values: f64[]][intensities: f32[]]
+pub fn serialize_ms1_peakel_data(peakel: &Peakel) -> Result<Vec<u8>> {
+    let n = peakel.peaks_count();
+    let mut data = Vec::with_capacity(4 + n * (8 + 4 + 8 + 4));
+    
+    data.extend_from_slice(&(n as u32).to_le_bytes());
+    
+    for &id in &peakel.spectrum_ids {
+        data.extend_from_slice(&id.to_le_bytes());
+    }
+    for &time in &peakel.elution_times {
+        data.extend_from_slice(&time.to_le_bytes());
+    }
+    for &mz in &peakel.mz_values {
+        data.extend_from_slice(&mz.to_le_bytes());
+    }
+    for &intensity in &peakel.intensity_values {
+        data.extend_from_slice(&intensity.to_le_bytes());
+    }
+    
+    Ok(data)
+}
+
+// ============================================================================
+// TSV Export
+// ============================================================================
+
+/// Write peakels to a TSV file
+pub fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<()> {
+    use std::io::Write;
+    use std::fs::File;
+    
+    let mut file = File::create(path)?;
+    
+    writeln!(file, "id\tmz\telution_time\tduration\tapex_intensity\tarea\tpeaks_count\tfirst_spectrum_id\tapex_spectrum_id\tlast_spectrum_id")?;
+    
+    for (idx, peakel) in peakels.iter().enumerate() {
+        writeln!(
+            file,
+            "{}\t{:.6}\t{:.4}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}",
+            idx + 1,
+            peakel.calc_mz(),
+            peakel.apex_elution_time().unwrap_or(0.0),
+            peakel.calc_duration(),
+            peakel.apex_intensity().unwrap_or(0.0),
+            peakel.area(),
+            peakel.peaks_count(),
+            peakel.first_spectrum_id().unwrap_or(0),
+            peakel.apex_spectrum_id().unwrap_or(0),
+            peakel.last_spectrum_id().unwrap_or(0),
+        )?;
+    }
+    
+    Ok(())
+}
+
+// ============================================================================
+// Statistics
+// ============================================================================
+
+/// Print MS1 peakel statistics to stdout
+pub fn print_ms1_statistics(peakels: &[Peakel]) {
+    if peakels.is_empty() {
+        return;
+    }
+
+    let total_area: f64 = peakels.iter().map(|p| p.area() as f64).sum();
+    let avg_duration: f32 = peakels.iter().map(|p| p.calc_duration()).sum::<f32>() 
+        / peakels.len() as f32;
+    let avg_peaks: f32 = peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() 
+        / peakels.len() as f32;
+    
+    let min_mz = peakels.iter().map(|p| p.calc_mz()).fold(f64::INFINITY, f64::min);
+    let max_mz = peakels.iter().map(|p| p.calc_mz()).fold(f64::NEG_INFINITY, f64::max);
+    let min_rt = peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::INFINITY, f32::min);
+    let max_rt = peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::NEG_INFINITY, f32::max);
+    
+    println!();
+    println!("=== MS1 Peakel Statistics ===");
+    println!("Total peakels: {}", peakels.len());
+    println!("Total area: {:.2e}", total_area);
+    println!("Average duration: {:.2}s", avg_duration);
+    println!("Average peaks per peakel: {:.1}", avg_peaks);
+    println!("m/z range: {:.2} - {:.2}", min_mz, max_mz);
+    println!("RT range: {:.2}s - {:.2}s", min_rt, max_rt);
+}

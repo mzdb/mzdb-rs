@@ -9,105 +9,65 @@
 //! mzdbcheck <mzdb_file> [options]
 //! ```
 //!
-//! # Options
+//! # Examples
 //!
-//! - `--verify`: Perform full DIA verification (read spectra, query R-tree)
-//! - `--json`: Output results as JSON
-//! - `-v, --verbose`: Enable verbose output
-//! - `-h, --help`: Show help message
+//! ```bash
+//! # Basic check
+//! mzdbcheck input.mzDB
+//!
+//! # Full DIA verification
+//! mzdbcheck input.mzDB --verify
+//! ```
 
-use std::env;
+use std::path::PathBuf;
 use std::process;
+
 use anyhow_ext::Result;
+use clap::Parser;
+
 use mzdb::MzDbReader;
 
-fn print_usage(program: &str) {
-    eprintln!("mzDB File Checker");
-    eprintln!();
-    eprintln!("Checks mzDB files to determine DDA/DIA acquisition type and verify integrity.");
-    eprintln!();
-    eprintln!("Usage: {} <mzdb_file> [options]", program);
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  --verify      Perform full DIA verification (read spectra, query R-tree)");
-    eprintln!("  --json        Output results as JSON format");
-    eprintln!("  -v, --verbose Enable verbose output");
-    eprintln!("  -h, --help    Show this help message");
+/// Verify mzDB files and determine DDA/DIA acquisition type
+#[derive(Parser, Debug)]
+#[command(name = "mzdbcheck")]
+#[command(author = "mzdb-rs")]
+#[command(version = "0.3.0")]
+#[command(about = "Check mzDB files for DDA/DIA acquisition type and verify integrity", long_about = None)]
+struct Args {
+    /// Input mzDB file path
+    #[arg(value_name = "FILE")]
+    input: PathBuf,
+
+    /// Perform full DIA verification (read spectra, query R-tree)
+    #[arg(long)]
+    verify: bool,
+
+    /// Enable verbose output
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let program = &args[0];
-
-    // Check for help flag or no arguments
-    if args.len() < 2 || args.iter().any(|a| a == "-h" || a == "--help") {
-        print_usage(program);
-        if args.len() < 2 {
-            process::exit(1);
-        }
-        process::exit(0);
-    }
-
-    // Parse arguments
-    let mut mzdb_path: Option<String> = None;
-    let mut do_verify = false;
-    let mut json_output = false;
-    let mut verbose = false;
-
-    for arg in args.iter().skip(1) {
-        match arg.as_str() {
-            "--verify" => do_verify = true,
-            "--json" => json_output = true,
-            "-v" | "--verbose" => verbose = true,
-            s if s.starts_with('-') => {
-                eprintln!("Error: Unknown option: {}", s);
-                print_usage(program);
-                process::exit(1);
-            }
-            _ => {
-                if mzdb_path.is_none() {
-                    mzdb_path = Some(arg.clone());
-                } else {
-                    eprintln!("Error: Multiple input files specified");
-                    process::exit(1);
-                }
-            }
-        }
-    }
-
-    let mzdb_path = match mzdb_path {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: No input file specified");
-            print_usage(program);
-            process::exit(1);
-        }
-    };
+    let args = Args::parse();
 
     // Initialize logging
-    if verbose {
+    if args.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     }
 
-    if do_verify {
+    let mzdb_path = args.input.to_string_lossy();
+
+    if args.verify {
         // Full DIA verification
         match verify_dia_file(&mzdb_path) {
             Ok(result) => {
-                if json_output {
-                    print_verification_json(&result, &mzdb_path);
-                } else {
-                    print_verification_result(&result, &mzdb_path);
-                }
+                print_verification_result(&result, &mzdb_path);
                 if !result.is_valid_dia {
                     process::exit(1);
                 }
             }
             Err(e) => {
-                if json_output {
-                    println!(r#"{{"error": "{}"}}"#, e);
-                } else {
-                    eprintln!("Error checking file: {}", e);
-                }
+                eprintln!("Error checking file: {}", e);
                 process::exit(1);
             }
         }
@@ -115,23 +75,19 @@ fn main() {
         // Basic check
         match check_mzdb(&mzdb_path) {
             Ok(result) => {
-                if json_output {
-                    print_check_json(&result, &mzdb_path);
-                } else {
-                    print_check_result(&result, &mzdb_path);
-                }
+                print_check_result(&result, &mzdb_path);
             }
             Err(e) => {
-                if json_output {
-                    println!(r#"{{"error": "{}"}}"#, e);
-                } else {
-                    eprintln!("Error checking file: {}", e);
-                }
+                eprintln!("Error checking file: {}", e);
                 process::exit(1);
             }
         }
     }
 }
+
+// ============================================================================
+// Output Formatting
+// ============================================================================
 
 fn print_check_result(result: &MzDbCheckResult, path: &str) {
     println!("mzDB File Check");
@@ -214,179 +170,39 @@ fn print_check_result(result: &MzDbCheckResult, path: &str) {
     }
 }
 
-fn print_check_json(result: &MzDbCheckResult, path: &str) {
-    let windows_json: Vec<String> = result
-        .dia_windows
-        .iter()
-        .map(|(min, max)| format!(r#"{{"min_mz": {:.4}, "max_mz": {:.4}}}"#, min, max))
-        .collect();
-
-    let spectra_json: Vec<String> = result
-        .sample_spectra
-        .iter()
-        .map(|s| {
-            let precursor = s
-                .precursor_mz
-                .map(|mz| format!("{:.4}", mz))
-                .unwrap_or_else(|| "null".to_string());
-            let isolation = s
-                .isolation_window
-                .map(|(min, max)| format!(r#"{{"min": {:.4}, "max": {:.4}}}"#, min, max))
-                .unwrap_or_else(|| "null".to_string());
-            format!(
-                r#"{{"id": {}, "cycle": {}, "title": "{}", "time": {:.4}, "precursor_mz": {}, "peaks_count": {}, "isolation_window": {}}}"#,
-                s.id, s.cycle, s.title.replace('"', "\\\""), s.time, precursor, s.peaks_count, isolation
-            )
-        })
-        .collect();
-
-    println!(
-        r#"{{
-  "file": "{}",
-  "version": {},
-  "total_spectra": {},
-  "max_ms_level": {},
-  "ms1_count": {},
-  "ms2_count": {},
-  "has_msn_rtree": {},
-  "is_dia": {},
-  "dia_windows": [{}],
-  "sample_spectra": [{}]
-}}"#,
-        path.replace('"', "\\\""),
-        result
-            .version
-            .as_ref()
-            .map(|v| format!(r#""{}""#, v))
-            .unwrap_or_else(|| "null".to_string()),
-        result.total_spectra,
-        result
-            .max_ms_level
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        result
-            .ms1_count
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        result
-            .ms2_count
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        result.has_msn_rtree,
-        result.is_dia,
-        windows_json.join(", "),
-        spectra_json.join(", ")
-    );
-}
-
 fn print_verification_result(result: &DiaVerificationResult, path: &str) {
-    print_check_result(&result.check_result, path);
+    let check = &result.check_result;
 
+    println!("DIA File Verification");
+    println!("=====================");
+    println!("File: {}", path);
     println!();
-    println!("=== VERIFICATION ===");
-    println!("Windows accessible: {}", result.windows_accessible);
-    println!("Spectra readable:   {}", result.spectra_readable);
-    println!("R-tree queryable:   {}", result.rtree_queryable);
+
+    if let Some(ref version) = check.version {
+        println!("mzDB version: {}", version);
+    }
+
+    println!("Total spectra: {}", check.total_spectra);
+    println!();
+
+    println!("Verification Results:");
+    println!("  Windows accessible: {}", result.windows_accessible);
+    println!("  Spectra readable: {}", result.spectra_readable);
+    println!("  R-tree queryable: {}", result.rtree_queryable);
     println!();
 
     if result.is_valid_dia {
-        println!("✓ DIA file verification PASSED");
+        println!("=== RESULT: VALID DIA FILE ===");
     } else {
-        println!("✗ DIA file verification FAILED");
+        println!("=== RESULT: INVALID OR NOT DIA ===");
         if let Some(ref msg) = result.error_message {
-            println!("  Reason: {}", msg);
+            println!("Error: {}", msg);
         }
     }
 }
 
-fn print_verification_json(result: &DiaVerificationResult, path: &str) {
-    let check = &result.check_result;
-
-    let windows_json: Vec<String> = check
-        .dia_windows
-        .iter()
-        .map(|(min, max)| format!(r#"{{"min_mz": {:.4}, "max_mz": {:.4}}}"#, min, max))
-        .collect();
-
-    let spectra_json: Vec<String> = check
-        .sample_spectra
-        .iter()
-        .map(|s| {
-            let precursor = s
-                .precursor_mz
-                .map(|mz| format!("{:.4}", mz))
-                .unwrap_or_else(|| "null".to_string());
-            let isolation = s
-                .isolation_window
-                .map(|(min, max)| format!(r#"{{"min": {:.4}, "max": {:.4}}}"#, min, max))
-                .unwrap_or_else(|| "null".to_string());
-            format!(
-                r#"{{"id": {}, "cycle": {}, "title": "{}", "time": {:.4}, "precursor_mz": {}, "peaks_count": {}, "isolation_window": {}}}"#,
-                s.id, s.cycle, s.title.replace('"', "\\\""), s.time, precursor, s.peaks_count, isolation
-            )
-        })
-        .collect();
-
-    let error_msg = result
-        .error_message
-        .as_ref()
-        .map(|m: &String| format!(r#""{}""#, m.replace('"', "\\\"")))
-        .unwrap_or_else(|| "null".to_string());
-
-    println!(
-        r#"{{
-  "file": "{}",
-  "version": {},
-  "total_spectra": {},
-  "max_ms_level": {},
-  "ms1_count": {},
-  "ms2_count": {},
-  "has_msn_rtree": {},
-  "is_dia": {},
-  "dia_windows": [{}],
-  "sample_spectra": [{}],
-  "verification": {{
-    "is_valid_dia": {},
-    "windows_accessible": {},
-    "spectra_readable": {},
-    "rtree_queryable": {},
-    "error_message": {}
-  }}
-}}"#,
-        path.replace('"', "\\\""),
-        check
-            .version
-            .as_ref()
-            .map(|v: &String| format!(r#""{}""#, v))
-            .unwrap_or_else(|| "null".to_string()),
-        check.total_spectra,
-        check
-            .max_ms_level
-            .map(|v: i64| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        check
-            .ms1_count
-            .map(|v: i64| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        check
-            .ms2_count
-            .map(|v: i64| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        check.has_msn_rtree,
-        check.is_dia,
-        windows_json.join(", "),
-        spectra_json.join(", "),
-        result.is_valid_dia,
-        result.windows_accessible,
-        result.spectra_readable,
-        result.rtree_queryable,
-        error_msg
-    );
-}
-
-
 // ============================================================================
-// MzDB Checking/Verification
+// Data Structures
 // ============================================================================
 
 /// Result of checking an mzDB file
@@ -431,6 +247,26 @@ pub struct SampleSpectrumInfo {
     pub isolation_window: Option<(f64, f64)>,
 }
 
+/// Result of DIA file verification
+#[derive(Debug, Clone)]
+pub struct DiaVerificationResult {
+    /// Whether the file is a valid DIA file
+    pub is_valid_dia: bool,
+    /// Basic check results
+    pub check_result: MzDbCheckResult,
+    /// Whether DIA windows are accessible
+    pub windows_accessible: bool,
+    /// Whether spectra can be read
+    pub spectra_readable: bool,
+    /// Whether R-tree queries work
+    pub rtree_queryable: bool,
+    /// Error message if verification failed
+    pub error_message: Option<String>,
+}
+
+// ============================================================================
+// MzDB Checking/Verification
+// ============================================================================
 
 /// Check an mzDB file and determine if it's DDA or DIA
 pub fn check_mzdb(mzdb_path: &str) -> Result<MzDbCheckResult> {
@@ -500,7 +336,6 @@ pub fn check_mzdb(mzdb_path: &str) -> Result<MzDbCheckResult> {
 /// Verify that a DIA file can be loaded and accessed correctly
 pub fn verify_dia_file(mzdb_path: &str) -> Result<DiaVerificationResult> {
     let reader = MzDbReader::open(mzdb_path)?;
-
     let check = check_mzdb(mzdb_path)?;
 
     if !check.is_dia {
@@ -562,21 +397,4 @@ pub fn verify_dia_file(mzdb_path: &str) -> Result<DiaVerificationResult> {
         rtree_queryable,
         error_message: None,
     })
-}
-
-/// Result of DIA file verification
-#[derive(Debug, Clone)]
-pub struct DiaVerificationResult {
-    /// Whether the file is a valid DIA file
-    pub is_valid_dia: bool,
-    /// Basic check results
-    pub check_result: MzDbCheckResult,
-    /// Whether DIA windows are accessible
-    pub windows_accessible: bool,
-    /// Whether spectra can be read
-    pub spectra_readable: bool,
-    /// Whether R-tree queries work
-    pub rtree_queryable: bool,
-    /// Error message if verification failed
-    pub error_message: Option<String>,
 }

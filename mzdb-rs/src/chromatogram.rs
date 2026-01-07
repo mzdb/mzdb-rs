@@ -187,83 +187,59 @@ impl ChromatogramHeader {
 }
 
 // ============================================================================
+// Row mapping helpers
+// ============================================================================
+
+/// SQL columns for chromatogram header queries
+const CHROM_HEADER_COLUMNS: &str = 
+    "id, name, activation_type, param_tree, precursor, product, \
+     shared_param_tree_id, run_id, data_processing_id, data_encoding_id";
+
+/// Map a SQLite row to ChromatogramHeader
+fn row_to_chrom_header(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChromatogramHeader> {
+    Ok(ChromatogramHeader {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        activation_type: row.get(2)?,
+        param_tree: row.get(3)?,
+        precursor: row.get(4)?,
+        product: row.get(5)?,
+        shared_param_tree_id: row.get(6)?,
+        run_id: row.get(7)?,
+        data_processing_id: row.get(8)?,
+        data_encoding_id: row.get(9)?,
+    })
+}
+
+// ============================================================================
 // Query functions
 // ============================================================================
 
 /// Get all chromatogram headers from the database
 pub fn list_chromatograms(db: &Connection) -> Result<Vec<ChromatogramHeader>> {
-    let mut stmt = db.prepare(
-        "SELECT id, name, activation_type, param_tree, precursor, product, \
-         shared_param_tree_id, run_id, data_processing_id, data_encoding_id \
-         FROM chromatogram"
-    )?;
+    let sql = format!("SELECT {} FROM chromatogram", CHROM_HEADER_COLUMNS);
+    let mut stmt = db.prepare(&sql)?;
     
-    let chroms = stmt.query_map([], |row| {
-        Ok(ChromatogramHeader {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            activation_type: row.get(2)?,
-            param_tree: row.get(3)?,
-            precursor: row.get(4)?,
-            product: row.get(5)?,
-            shared_param_tree_id: row.get(6)?,
-            run_id: row.get(7)?,
-            data_processing_id: row.get(8)?,
-            data_encoding_id: row.get(9)?,
-        })
-    })?;
-    
+    let chroms = stmt.query_map([], row_to_chrom_header)?;
     chroms.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 /// Get a specific chromatogram header by ID
 pub fn get_chromatogram_header(db: &Connection, id: i64) -> Result<Option<ChromatogramHeader>> {
+    let sql = format!("SELECT {} FROM chromatogram WHERE id = ?1", CHROM_HEADER_COLUMNS);
     let result = db
-        .prepare(
-            "SELECT id, name, activation_type, param_tree, precursor, product, \
-             shared_param_tree_id, run_id, data_processing_id, data_encoding_id \
-             FROM chromatogram WHERE id = ?1"
-        )?
-        .query_row([id], |row| {
-            Ok(ChromatogramHeader {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                activation_type: row.get(2)?,
-                param_tree: row.get(3)?,
-                precursor: row.get(4)?,
-                product: row.get(5)?,
-                shared_param_tree_id: row.get(6)?,
-                run_id: row.get(7)?,
-                data_processing_id: row.get(8)?,
-                data_encoding_id: row.get(9)?,
-            })
-        })
+        .prepare(&sql)?
+        .query_row([id], row_to_chrom_header)
         .optional()?;
     Ok(result)
 }
 
 /// Get chromatogram header by name
 pub fn get_chromatogram_by_name(db: &Connection, name: &str) -> Result<Option<ChromatogramHeader>> {
+    let sql = format!("SELECT {} FROM chromatogram WHERE name = ?1", CHROM_HEADER_COLUMNS);
     let result = db
-        .prepare(
-            "SELECT id, name, activation_type, param_tree, precursor, product, \
-             shared_param_tree_id, run_id, data_processing_id, data_encoding_id \
-             FROM chromatogram WHERE name = ?1"
-        )?
-        .query_row([name], |row| {
-            Ok(ChromatogramHeader {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                activation_type: row.get(2)?,
-                param_tree: row.get(3)?,
-                precursor: row.get(4)?,
-                product: row.get(5)?,
-                shared_param_tree_id: row.get(6)?,
-                run_id: row.get(7)?,
-                data_processing_id: row.get(8)?,
-                data_encoding_id: row.get(9)?,
-            })
-        })
+        .prepare(&sql)?
+        .query_row([name], row_to_chrom_header)
         .optional()?;
     Ok(result)
 }
@@ -276,52 +252,24 @@ pub fn get_chromatogram_count(db: &Connection) -> Result<i64> {
 /// Get the TIC chromatogram if it exists
 pub fn get_tic_chromatogram(db: &Connection) -> Result<Option<ChromatogramHeader>> {
     let result = db
-        .prepare(
-            "SELECT id, name, activation_type, param_tree, precursor, product, \
-             shared_param_tree_id, run_id, data_processing_id, data_encoding_id \
-             FROM chromatogram WHERE name LIKE '%TIC%' OR name LIKE '%total ion%' LIMIT 1"
-        )?
-        .query_row([], |row| {
-            Ok(ChromatogramHeader {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                activation_type: row.get(2)?,
-                param_tree: row.get(3)?,
-                precursor: row.get(4)?,
-                product: row.get(5)?,
-                shared_param_tree_id: row.get(6)?,
-                run_id: row.get(7)?,
-                data_processing_id: row.get(8)?,
-                data_encoding_id: row.get(9)?,
-            })
-        })
+        .prepare(&format!(
+            "SELECT {} FROM chromatogram WHERE name LIKE '%TIC%' OR name LIKE '%total ion%' LIMIT 1",
+            CHROM_HEADER_COLUMNS
+        ))?
+        .query_row([], row_to_chrom_header)
         .optional()?;
     Ok(result)
 }
 
 /// Get SRM chromatograms (those with precursor and product information)
 pub fn list_srm_chromatograms(db: &Connection) -> Result<Vec<ChromatogramHeader>> {
-    let mut stmt = db.prepare(
-        "SELECT id, name, activation_type, param_tree, precursor, product, \
-         shared_param_tree_id, run_id, data_processing_id, data_encoding_id \
-         FROM chromatogram WHERE precursor IS NOT NULL AND product IS NOT NULL"
-    )?;
+    let sql = format!(
+        "SELECT {} FROM chromatogram WHERE precursor IS NOT NULL AND product IS NOT NULL",
+        CHROM_HEADER_COLUMNS
+    );
+    let mut stmt = db.prepare(&sql)?;
     
-    let chroms = stmt.query_map([], |row| {
-        Ok(ChromatogramHeader {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            activation_type: row.get(2)?,
-            param_tree: row.get(3)?,
-            precursor: row.get(4)?,
-            product: row.get(5)?,
-            shared_param_tree_id: row.get(6)?,
-            run_id: row.get(7)?,
-            data_processing_id: row.get(8)?,
-            data_encoding_id: row.get(9)?,
-        })
-    })?;
-    
+    let chroms = stmt.query_map([], row_to_chrom_header)?;
     chroms.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 

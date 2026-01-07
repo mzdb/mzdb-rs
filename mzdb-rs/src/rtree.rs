@@ -44,6 +44,36 @@ pub const SQLITE_RTREE_UB_CORR: f64 = 1.0 + 0.00000012;
 pub const SQLITE_RTREE_LB_CORR: f64 = 1.0 - 0.00000012;
 
 // ============================================================================
+// Row mapping helpers
+// ============================================================================
+
+/// Map a SQLite row to BoundingBoxRTreeEntry
+fn row_to_bb_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoundingBoxRTreeEntry> {
+    Ok(BoundingBoxRTreeEntry {
+        id: row.get(0)?,
+        min_mz: row.get(1)?,
+        max_mz: row.get(2)?,
+        min_time: row.get(3)?,
+        max_time: row.get(4)?,
+    })
+}
+
+/// Map a SQLite row to BoundingBoxMsnRTreeEntry
+fn row_to_msn_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<BoundingBoxMsnRTreeEntry> {
+    Ok(BoundingBoxMsnRTreeEntry {
+        id: row.get(0)?,
+        min_ms_level: row.get(1)?,
+        max_ms_level: row.get(2)?,
+        min_parent_mz: row.get(3)?,
+        max_parent_mz: row.get(4)?,
+        min_mz: row.get(5)?,
+        max_mz: row.get(6)?,
+        min_time: row.get(7)?,
+        max_time: row.get(8)?,
+    })
+}
+
+// ============================================================================
 // R-tree entry structures
 // ============================================================================
 
@@ -224,16 +254,7 @@ pub fn list_rtree_entries(db: &Connection) -> Result<Vec<BoundingBoxRTreeEntry>>
         "SELECT id, min_mz, max_mz, min_time, max_time FROM bounding_box_rtree"
     )?;
     
-    let entries = stmt.query_map([], |row| {
-        Ok(BoundingBoxRTreeEntry {
-            id: row.get(0)?,
-            min_mz: row.get(1)?,
-            max_mz: row.get(2)?,
-            min_time: row.get(3)?,
-            max_time: row.get(4)?,
-        })
-    })?;
-    
+    let entries = stmt.query_map([], row_to_bb_entry)?;
     entries.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
@@ -253,16 +274,7 @@ pub fn query_bounding_boxes_in_mz_range(
          WHERE max_mz >= ?1 AND min_mz <= ?2"
     )?;
     
-    let entries = stmt.query_map([min_mz_corr, max_mz_corr], |row| {
-        Ok(BoundingBoxRTreeEntry {
-            id: row.get(0)?,
-            min_mz: row.get(1)?,
-            max_mz: row.get(2)?,
-            min_time: row.get(3)?,
-            max_time: row.get(4)?,
-        })
-    })?;
-    
+    let entries = stmt.query_map([min_mz_corr, max_mz_corr], row_to_bb_entry)?;
     entries.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
@@ -282,16 +294,7 @@ pub fn query_bounding_boxes_in_time_range(
          WHERE max_time >= ?1 AND min_time <= ?2"
     )?;
     
-    let entries = stmt.query_map([min_time_corr, max_time_corr], |row| {
-        Ok(BoundingBoxRTreeEntry {
-            id: row.get(0)?,
-            min_mz: row.get(1)?,
-            max_mz: row.get(2)?,
-            min_time: row.get(3)?,
-            max_time: row.get(4)?,
-        })
-    })?;
-    
+    let entries = stmt.query_map([min_time_corr, max_time_corr], row_to_bb_entry)?;
     entries.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
@@ -318,15 +321,7 @@ pub fn query_bounding_boxes_in_region(
     
     let entries = stmt.query_map(
         [min_mz_corr, max_mz_corr, min_time_corr, max_time_corr],
-        |row| {
-            Ok(BoundingBoxRTreeEntry {
-                id: row.get(0)?,
-                min_mz: row.get(1)?,
-                max_mz: row.get(2)?,
-                min_time: row.get(3)?,
-                max_time: row.get(4)?,
-            })
-        }
+        row_to_bb_entry,
     )?;
     
     entries.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)

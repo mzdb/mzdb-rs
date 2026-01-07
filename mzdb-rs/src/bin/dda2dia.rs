@@ -9,217 +9,93 @@
 //! dda2dia --mzdb input.mzDB --peakeldb peakels.peakeldb --output output.mzDB [options]
 //! ```
 //!
-//! # Required Arguments
+//! # Examples
 //!
-//! - `--mzdb, -m <FILE>`: Input DDA mzDB file
-//! - `--peakeldb, -p <FILE>`: Input peakeldb file with detected peakels
-//! - `--output, -o <FILE>`: Output DIA mzDB file
+//! ```bash
+//! # Basic conversion
+//! dda2dia -m input.mzDB -p peakels.peakeldb -o output.mzDB
 //!
-//! # Options
-//!
-//! - `--window-start <MZ>`: DIA window start m/z (default: 400)
-//! - `--window-end <MZ>`: DIA window end m/z (default: 1200)
-//! - `--window-width <DA>`: DIA window width in Da (default: 50)
-//! - `--mz-tolerance <DA>`: m/z tolerance for peak merging (default: 0.1)
-//! - `--precursor-tolerance <PPM>`: Precursor m/z tolerance in ppm (default: 10)
+//! # Custom window settings
+//! dda2dia -m input.mzDB -p peakels.peakeldb -o output.mzDB \
+//!     --window-start 400 --window-end 1000 --window-width 25
+//! ```
 
-use std::env;
+use std::path::PathBuf;
 use std::process;
+
+use clap::Parser;
 
 use mzdb::conversion::diafication::{Dda2DiaConverter, DiaConversionOptions};
 
-fn print_usage(program: &str) {
-    eprintln!("DDA to DIA Converter");
-    eprintln!();
-    eprintln!("Converts a DDA mzDB file to a simulated DIA file using detected peakels.");
-    eprintln!();
-    eprintln!("Usage: {} --mzdb <FILE> --peakeldb <FILE> --output <FILE> [options]", program);
-    eprintln!();
-    eprintln!("Required arguments:");
-    eprintln!("  -m, --mzdb <FILE>           Input DDA mzDB file");
-    eprintln!("  -p, --peakeldb <FILE>       Input peakeldb file");
-    eprintln!("  -o, --output <FILE>         Output DIA mzDB file");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  --window-start <MZ>         DIA window start m/z (default: 400)");
-    eprintln!("  --window-end <MZ>           DIA window end m/z (default: 1200)");
-    eprintln!("  --window-width <DA>         DIA window width in Da (default: 50)");
-    eprintln!("  --mz-tolerance <DA>         m/z tolerance for peak merging (default: 0.1)");
-    eprintln!("  --precursor-tolerance <PPM> Precursor m/z tolerance in ppm (default: 10)");
-    eprintln!("  -v, --verbose               Enable verbose output");
-    eprintln!("  -h, --help                  Show this help message");
+/// Convert DDA mzDB files to simulated DIA format
+#[derive(Parser, Debug)]
+#[command(name = "dda2dia")]
+#[command(author = "mzdb-rs")]
+#[command(version = "0.3.0")]
+#[command(about = "Convert DDA mzDB files to simulated DIA format using detected peakels", long_about = None)]
+struct Args {
+    /// Input DDA mzDB file
+    #[arg(short = 'm', long = "mzdb")]
+    mzdb: PathBuf,
+
+    /// Input peakeldb file with detected peakels
+    #[arg(short = 'p', long = "peakeldb")]
+    peakeldb: PathBuf,
+
+    /// Output DIA mzDB file
+    #[arg(short = 'o', long = "output")]
+    output: PathBuf,
+
+    /// DIA window start m/z
+    #[arg(long = "window-start", default_value = "400")]
+    window_start: f64,
+
+    /// DIA window end m/z
+    #[arg(long = "window-end", default_value = "1200")]
+    window_end: f64,
+
+    /// DIA window width in Da
+    #[arg(long = "window-width", default_value = "50")]
+    window_width: f64,
+
+    /// m/z tolerance for peak merging in Da
+    #[arg(long = "mz-tolerance", default_value = "0.1")]
+    mz_tolerance: f64,
+
+    /// Precursor m/z tolerance in ppm
+    #[arg(long = "precursor-tolerance", default_value = "10")]
+    precursor_tolerance: f64,
+
+    /// Enable verbose output
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let program = &args[0];
-
-    // Check for help flag
-    if args.len() < 2 || args.iter().any(|a| a == "-h" || a == "--help") {
-        print_usage(program);
-        if args.len() < 2 {
-            process::exit(1);
-        }
-        process::exit(0);
-    }
-
-    // Parse arguments
-    let mut mzdb_path: Option<String> = None;
-    let mut peakeldb_path: Option<String> = None;
-    let mut output_path: Option<String> = None;
-    let mut options = DiaConversionOptions::default();
-    let mut verbose = false;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-m" | "--mzdb" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --mzdb requires a value");
-                    process::exit(1);
-                }
-                mzdb_path = Some(args[i].clone());
-            }
-            "-p" | "--peakeldb" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --peakeldb requires a value");
-                    process::exit(1);
-                }
-                peakeldb_path = Some(args[i].clone());
-            }
-            "-o" | "--output" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --output requires a value");
-                    process::exit(1);
-                }
-                output_path = Some(args[i].clone());
-            }
-            "--window-start" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --window-start requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<f64>() {
-                    Ok(v) => options.window_start = v,
-                    Err(_) => {
-                        eprintln!("Error: Invalid window-start value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--window-end" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --window-end requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<f64>() {
-                    Ok(v) => options.window_end = v,
-                    Err(_) => {
-                        eprintln!("Error: Invalid window-end value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--window-width" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --window-width requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<f64>() {
-                    Ok(v) => options.window_width = v,
-                    Err(_) => {
-                        eprintln!("Error: Invalid window-width value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--mz-tolerance" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --mz-tolerance requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<f64>() {
-                    Ok(v) => options.mz_tolerance = v,
-                    Err(_) => {
-                        eprintln!("Error: Invalid mz-tolerance value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--precursor-tolerance" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --precursor-tolerance requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<f64>() {
-                    Ok(v) => options.precursor_tolerance_ppm = v,
-                    Err(_) => {
-                        eprintln!("Error: Invalid precursor-tolerance value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "-v" | "--verbose" => {
-                verbose = true;
-            }
-            arg => {
-                eprintln!("Error: Unknown option: {}", arg);
-                print_usage(program);
-                process::exit(1);
-            }
-        }
-        i += 1;
-    }
-
-    // Validate required arguments
-    let mzdb_path = match mzdb_path {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: --mzdb is required");
-            print_usage(program);
-            process::exit(1);
-        }
-    };
-
-    let peakeldb_path = match peakeldb_path {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: --peakeldb is required");
-            print_usage(program);
-            process::exit(1);
-        }
-    };
-
-    let output_path = match output_path {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: --output is required");
-            print_usage(program);
-            process::exit(1);
-        }
-    };
+    let args = Args::parse();
 
     // Initialize logging
-    if verbose {
+    if args.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     } else {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     }
 
+    // Build options
+    let options = DiaConversionOptions {
+        window_start: args.window_start,
+        window_end: args.window_end,
+        window_width: args.window_width,
+        mz_tolerance: args.mz_tolerance,
+        precursor_tolerance_ppm: args.precursor_tolerance,
+    };
+
     // Print configuration
     println!("DDA to DIA Converter");
     println!("====================");
-    println!("Input mzDB:    {}", mzdb_path);
-    println!("Input peakeldb: {}", peakeldb_path);
-    println!("Output:        {}", output_path);
+    println!("Input mzDB:     {}", args.mzdb.display());
+    println!("Input peakeldb: {}", args.peakeldb.display());
+    println!("Output:         {}", args.output.display());
     println!();
     println!("Options:");
     println!("  DIA window range: {:.0} - {:.0} m/z", options.window_start, options.window_end);
@@ -229,7 +105,10 @@ fn main() {
     println!();
 
     // Create converter and run
-    let converter = match Dda2DiaConverter::new(&mzdb_path, &peakeldb_path, options) {
+    let mzdb_str = args.mzdb.to_string_lossy();
+    let peakeldb_str = args.peakeldb.to_string_lossy();
+    
+    let converter = match Dda2DiaConverter::new(&mzdb_str, &peakeldb_str, options) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error creating converter: {}", e);
@@ -237,7 +116,8 @@ fn main() {
         }
     };
 
-    match converter.convert(&output_path) {
+    let output_str = args.output.to_string_lossy();
+    match converter.convert(&output_str) {
         Ok(stats) => {
             println!("Conversion complete!");
             println!();

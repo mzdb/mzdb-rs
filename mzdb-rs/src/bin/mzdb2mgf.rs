@@ -1,4 +1,4 @@
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                //! mzdb2mgf - Convert mzDB files to MGF format
+//! mzdb2mgf - Convert mzDB files to MGF format
 //!
 //! This command-line tool exports MS/MS spectra from mzDB files to MGF format,
 //! which is widely used for peptide identification with search engines.
@@ -9,155 +9,95 @@
 //! mzdb2mgf input.mzDB output.mgf [options]
 //! ```
 //!
-//! # Options
+//! # Examples
 //!
-//! - `--ms-level <N>`: Export only spectra of the given MS level (default: 2)
-//! - `--min-peaks <N>`: Minimum peaks required per spectrum (default: 1)
-//! - `--max-peaks <N>`: Maximum peaks to export per spectrum
-//! - `--min-intensity <F>`: Minimum peak intensity threshold (default: 0)
+//! ```bash
+//! # Export MS2 spectra (default)
+//! mzdb2mgf input.mzDB output.mgf
+//!
+//! # Export all MS levels
+//! mzdb2mgf input.mzDB output.mgf --all-ms-levels
+//!
+//! # Filter by minimum intensity
+//! mzdb2mgf input.mzDB output.mgf --min-intensity 100
+//! ```
 
-use std::env;
+use std::path::PathBuf;
 use std::process;
+
+use clap::Parser;
 
 use mzdb::MzDbReader;
 use mzdb::conversion::mgf::{MgfExportOptions, MgfWriter};
 
-fn print_usage(program: &str) {
-    eprintln!("Usage: {} <input.mzDB> <output.mgf> [options]", program);
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  --ms-level <N>      MS level to export (default: 2)");
-    eprintln!("  --all-ms-levels     Export all MS levels");
-    eprintln!("  --min-peaks <N>     Minimum peaks per spectrum (default: 1)");
-    eprintln!("  --max-peaks <N>     Maximum peaks per spectrum");
-    eprintln!("  --min-intensity <F> Minimum peak intensity (default: 0)");
-    eprintln!("  --mz-precision <N>  Decimal places for m/z values (default: 6)");
-    eprintln!("  --int-precision <N> Decimal places for intensity values (default: 2)");
-    eprintln!("  -h, --help          Show this help message");
+/// Convert mzDB files to MGF format
+#[derive(Parser, Debug)]
+#[command(name = "mzdb2mgf")]
+#[command(author = "mzdb-rs")]
+#[command(version = "0.3.0")]
+#[command(about = "Export MS/MS spectra from mzDB to MGF format", long_about = None)]
+struct Args {
+    /// Input mzDB file path
+    #[arg(value_name = "INPUT")]
+    input: PathBuf,
+
+    /// Output MGF file path
+    #[arg(value_name = "OUTPUT")]
+    output: PathBuf,
+
+    /// MS level to export (default: 2 for MS/MS)
+    #[arg(long = "ms-level", default_value = "2")]
+    ms_level: i64,
+
+    /// Export all MS levels
+    #[arg(long = "all-ms-levels", conflicts_with = "ms_level")]
+    all_ms_levels: bool,
+
+    /// Minimum peaks required per spectrum
+    #[arg(long = "min-peaks", default_value = "1")]
+    min_peaks: usize,
+
+    /// Maximum peaks to export per spectrum
+    #[arg(long = "max-peaks")]
+    max_peaks: Option<usize>,
+
+    /// Minimum peak intensity threshold
+    #[arg(long = "min-intensity", default_value = "0")]
+    min_intensity: f32,
+
+    /// Decimal places for m/z values
+    #[arg(long = "mz-precision", default_value = "6")]
+    mz_precision: usize,
+
+    /// Decimal places for intensity values
+    #[arg(long = "int-precision", default_value = "2")]
+    int_precision: usize,
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let program = &args[0];
+    let args = Args::parse();
 
-    if args.len() < 3 {
-        print_usage(program);
-        process::exit(1);
+    // Build export options
+    let mut options = MgfExportOptions::default()
+        .with_min_peaks(args.min_peaks)
+        .with_min_intensity(args.min_intensity)
+        .with_mz_precision(args.mz_precision)
+        .with_intensity_precision(args.int_precision);
+
+    if args.all_ms_levels {
+        options = options.with_all_ms_levels();
+    } else {
+        options = options.with_ms_level(args.ms_level);
     }
 
-    // Check for help flag
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        print_usage(program);
-        process::exit(0);
-    }
-
-    let input_path = &args[1];
-    let output_path = &args[2];
-
-    // Parse options
-    let mut options = MgfExportOptions::default();
-    let mut i = 3;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--ms-level" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --ms-level requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<i64>() {
-                    Ok(level) => options = options.with_ms_level(level),
-                    Err(_) => {
-                        eprintln!("Error: Invalid MS level: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--all-ms-levels" => {
-                options = options.with_all_ms_levels();
-            }
-            "--min-peaks" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --min-peaks requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<usize>() {
-                    Ok(n) => options = options.with_min_peaks(n),
-                    Err(_) => {
-                        eprintln!("Error: Invalid min-peaks value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--max-peaks" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --max-peaks requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<usize>() {
-                    Ok(n) => options = options.with_max_peaks(n),
-                    Err(_) => {
-                        eprintln!("Error: Invalid max-peaks value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--min-intensity" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --min-intensity requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<f32>() {
-                    Ok(f) => options = options.with_min_intensity(f),
-                    Err(_) => {
-                        eprintln!("Error: Invalid min-intensity value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--mz-precision" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --mz-precision requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<usize>() {
-                    Ok(n) => options = options.with_mz_precision(n),
-                    Err(_) => {
-                        eprintln!("Error: Invalid mz-precision value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            "--int-precision" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --int-precision requires a value");
-                    process::exit(1);
-                }
-                match args[i].parse::<usize>() {
-                    Ok(n) => options = options.with_intensity_precision(n),
-                    Err(_) => {
-                        eprintln!("Error: Invalid int-precision value: {}", args[i]);
-                        process::exit(1);
-                    }
-                }
-            }
-            arg => {
-                eprintln!("Error: Unknown option: {}", arg);
-                print_usage(program);
-                process::exit(1);
-            }
-        }
-        i += 1;
+    if let Some(max_peaks) = args.max_peaks {
+        options = options.with_max_peaks(max_peaks);
     }
 
     // Open mzDB file
-    println!("Opening mzDB file: {}", input_path);
-    let mzdb = match MzDbReader::open(input_path) {
+    println!("Opening mzDB file: {}", args.input.display());
+    let input_str = args.input.to_string_lossy();
+    let mzdb = match MzDbReader::open(&input_str) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("Error opening mzDB file: {}", e);
@@ -166,8 +106,8 @@ fn main() {
     };
 
     // Export to MGF
-    println!("Exporting to MGF: {}", output_path);
-    match MgfWriter::export(&mzdb, output_path, &options) {
+    println!("Exporting to MGF: {}", args.output.display());
+    match MgfWriter::export(&mzdb, &args.output, &options) {
         Ok(count) => {
             println!("Successfully exported {} spectra to MGF", count);
         }

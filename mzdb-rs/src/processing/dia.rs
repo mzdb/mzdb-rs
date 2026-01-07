@@ -27,7 +27,7 @@
 //! println!("Detected {} peakels across {} windows", peakels.len(), windows.len());
 //! ```
 
-use std::collections::{HashSet, BTreeMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow_ext::anyhow;
@@ -313,6 +313,19 @@ impl DiaMs2PeakelDetector {
         }
         
         // Build indexed spectra for fast m/z lookup
+        let indexed_spectra = self.build_indexed_spectra(&spectra);
+        
+        // Run the walking algorithm
+        let detected_peakels = self.run_walking_algorithm(indexed_spectra, window);
+        
+        log::info!("  Detected {} MS2 peakels in window {:.1}", 
+                   detected_peakels.len(), window.target_mz);
+        
+        Ok(detected_peakels)
+    }
+    
+    /// Build indexed spectra from raw spectra for fast m/z lookup
+    fn build_indexed_spectra(&self, spectra: &[crate::model::Spectrum]) -> Vec<IndexedMs2Spectrum> {
         let mut indexed_spectra: Vec<IndexedMs2Spectrum> = Vec::with_capacity(spectra.len());
         
         for (idx, spectrum) in spectra.iter().enumerate() {
@@ -330,6 +343,24 @@ impl DiaMs2PeakelDetector {
                 time: spectrum.header.time,
                 peaks,
             });
+        }
+        
+        indexed_spectra
+    }
+    
+    /// Core walking algorithm for peakel detection
+    ///
+    /// This is the main detection algorithm shared by all detection methods.
+    /// It takes pre-built indexed spectra and returns detected peakels.
+    fn run_walking_algorithm(
+        &self,
+        mut indexed_spectra: Vec<IndexedMs2Spectrum>,
+        window: &IsolationWindow,
+    ) -> Vec<DiaMs2PeakelRecord> {
+        use std::collections::HashSet;
+        
+        if indexed_spectra.is_empty() {
+            return Vec::new();
         }
         
         // Sort spectra by time for proper walking
@@ -359,7 +390,7 @@ impl DiaMs2PeakelDetector {
         let mut detected_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
         let mut peakel_id = 1i64;
         
-        // Walking algorithm - same as MS1 but applied to MS2 spectra within this window
+        // Walking algorithm - process peaks from highest to lowest intensity
         for &(apex_mz, _apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx) in &all_peaks {
             // Skip if already used
             if used_peaks[apex_spectrum_idx].contains(&apex_peak_idx) {
@@ -548,10 +579,7 @@ impl DiaMs2PeakelDetector {
             }
         }
         
-        log::info!("  Detected {} MS2 peakels in window {:.1}", 
-                   detected_peakels.len(), window.target_mz);
-        
-        Ok(detected_peakels)
+        detected_peakels
     }
 
     /// Detect all MS2 peakels across all isolation windows
@@ -755,250 +783,15 @@ impl DiaMs2PeakelDetector {
         window: &IsolationWindow,
         spectra: &[crate::model::Spectrum],
     ) -> Vec<DiaMs2PeakelRecord> {
-        use std::collections::HashSet;
-        
         if spectra.is_empty() {
             return Vec::new();
         }
         
         // Build indexed spectra for fast m/z lookup
-        let mut indexed_spectra: Vec<IndexedMs2Spectrum> = Vec::with_capacity(spectra.len());
+        let indexed_spectra = self.build_indexed_spectra(spectra);
         
-        for (idx, spectrum) in spectra.iter().enumerate() {
-            // Collect peaks that pass intensity threshold
-            let peaks: Vec<(f64, f32, usize)> = spectrum.data.mz_array.iter()
-                .zip(spectrum.data.intensity_array.iter())
-                .enumerate()
-                .filter(|(_, (_, intensity))| **intensity >= self.config.min_intensity)
-                .map(|(peak_idx, (&mz, &intensity))| (mz, intensity, peak_idx))
-                .collect();
-            
-            indexed_spectra.push(IndexedMs2Spectrum {
-                spectrum_idx: idx,
-                spectrum_id: spectrum.header.id,
-                time: spectrum.header.time,
-                peaks,
-            });
-        }
-        
-        // Sort spectra by time for proper walking
-        indexed_spectra.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // Collect all peaks: (mz, intensity, rt, spectrum_idx, peak_index)
-        let mut all_peaks: Vec<(f64, f32, f32, usize, usize)> = Vec::new();
-        
-        for (new_idx, indexed_spec) in indexed_spectra.iter().enumerate() {
-            for &(mz, intensity, peak_idx) in &indexed_spec.peaks {
-                all_peaks.push((mz, intensity, indexed_spec.time, new_idx, peak_idx));
-            }
-        }
-        
-        // Sort peaks by intensity (descending)
-        all_peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // Track used peaks
-        let mut used_peaks: Vec<HashSet<usize>> = vec![HashSet::new(); indexed_spectra.len()];
-        
-        // Create the peakel finder
-        let finder: Box<dyn crate::processing::signal::detection::PeakelFinder> = 
-            match self.config.algorithm.as_str() {
-                "smart" => Box::new(crate::processing::signal::detection::SmartPeakelFinder::new()),
-                _ => Box::new(crate::processing::signal::detection::BasicPeakelFinder::default_params()),
-            };
-        
-        let mut detected_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
-        let mut peakel_id = 1i64;
-        
-        // Walking algorithm - same as in detect_peakels_for_window
-        for &(apex_mz, _apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx) in &all_peaks {
-            // Skip if already used
-            if used_peaks[apex_spectrum_idx].contains(&apex_peak_idx) {
-                continue;
-            }
-            
-            // Calculate m/z tolerance in Daltons
-            let mz_tol_da = apex_mz * self.config.mz_tol_ppm / 1_000_000.0;
-            
-            // XIC extraction using walking approach
-            let mut xic_peaks: Vec<(f64, f32, f32, usize, usize)> = Vec::new();
-            
-            // Add the apex peak
-            xic_peaks.push((apex_mz, _apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx));
-            
-            // Walk in both directions: right (+1) first, then left (-1)
-            for direction in [1i32, -1i32] {
-                let mut consecutive_gap_count = 0usize;
-                let mut offset = 1i32;
-                
-                loop {
-                    let cur_idx = apex_spectrum_idx as i32 + (offset * direction);
-                    
-                    // Check bounds
-                    if cur_idx < 0 || cur_idx >= indexed_spectra.len() as i32 {
-                        break;
-                    }
-                    
-                    let cur_spectrum = &indexed_spectra[cur_idx as usize];
-                    
-                    // Check time window
-                    if (cur_spectrum.time - apex_rt).abs() > self.config.max_time_window / 2.0 {
-                        break;
-                    }
-                    
-                    // Try to find the nearest peak within m/z tolerance
-                    if let Some((mz, intensity, peak_idx)) = cur_spectrum.find_nearest_peak(apex_mz, mz_tol_da) {
-                        // Stop at used peak boundary
-                        if used_peaks[cur_idx as usize].contains(&peak_idx) {
-                            break;
-                        }
-                        
-                        if direction > 0 {
-                            xic_peaks.push((mz, intensity, cur_spectrum.time, cur_idx as usize, peak_idx));
-                        } else {
-                            xic_peaks.insert(0, (mz, intensity, cur_spectrum.time, cur_idx as usize, peak_idx));
-                        }
-                        consecutive_gap_count = 0;
-                    } else {
-                        consecutive_gap_count += 1;
-                    }
-                    
-                    // Stop if too many consecutive gaps
-                    if consecutive_gap_count > self.config.max_consecutive_gaps {
-                        break;
-                    }
-                    
-                    offset += 1;
-                }
-            }
-            
-            // Need at least min_peaks for peakel detection
-            if xic_peaks.len() < self.config.min_peaks {
-                continue;
-            }
-            
-            // Convert to time-intensity pairs for peakel detection
-            let xic_pairs: Vec<(f32, f64)> = xic_peaks.iter()
-                .map(|(_, int, rt, _, _)| (*rt, *int as f64))
-                .collect();
-            
-            // Detect peakels
-            let peakel_indices = finder.find_peakels_indices(&xic_pairs);
-            
-            // Process all detected peakels
-            for (start, end) in &peakel_indices {
-                if end - start + 1 < self.config.min_peaks {
-                    continue;
-                }
-                
-                let peakel_peaks = &xic_peaks[*start..=*end];
-                
-                // Check if any peak is already used
-                let any_used = peakel_peaks.iter()
-                    .any(|(_, _, _, spec_idx, peak_idx)| used_peaks[*spec_idx].contains(peak_idx));
-                
-                if any_used {
-                    continue;
-                }
-                
-                // Find the actual apex
-                let (_, apex_peak) = peakel_peaks.iter()
-                    .enumerate()
-                    .max_by(|(_, a), (_, b)| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .unwrap();
-                
-                // Calculate weighted m/z
-                let total_intensity: f64 = peakel_peaks.iter().map(|(_, i, _, _, _)| *i as f64).sum();
-                let weighted_mz = if total_intensity > 0.0 {
-                    peakel_peaks.iter()
-                        .map(|(mz, i, _, _, _)| *mz * *i as f64)
-                        .sum::<f64>() / total_intensity
-                } else {
-                    apex_peak.0
-                };
-                
-                // Calculate area using trapezoidal integration
-                let mut area: f32 = 0.0;
-                for i in 1..peakel_peaks.len() {
-                    let (_, prev_int, prev_rt, _, _) = peakel_peaks[i - 1];
-                    let (_, cur_int, cur_rt, _, _) = peakel_peaks[i];
-                    let delta_time = cur_rt - prev_rt;
-                    area += (prev_int + cur_int) * delta_time / 2.0;
-                }
-                if area == 0.0 {
-                    area = peakel_peaks.iter().map(|(_, i, _, _, _)| *i).sum();
-                }
-                
-                // Calculate duration
-                let first_rt = peakel_peaks.first().unwrap().2;
-                let last_rt = peakel_peaks.last().unwrap().2;
-                let duration = last_rt - first_rt;
-                
-                // Calculate amplitude
-                let min_int = peakel_peaks.iter()
-                    .map(|(_, i, _, _, _)| *i)
-                    .filter(|i| *i > 0.0)
-                    .fold(f32::INFINITY, f32::min);
-                let amplitude = if min_int > 0.0 && min_int < f32::INFINITY {
-                    apex_peak.1 / min_int
-                } else {
-                    1.0
-                };
-                
-                // Get spectrum IDs
-                let first_spectrum_id = indexed_spectra[peakel_peaks.first().unwrap().3].spectrum_id;
-                let apex_spectrum_id = indexed_spectra[apex_peak.3].spectrum_id;
-                let last_spectrum_id = indexed_spectra[peakel_peaks.last().unwrap().3].spectrum_id;
-                
-                // Calculate gap count
-                let first_spec_idx = peakel_peaks.first().unwrap().3;
-                let last_spec_idx = peakel_peaks.last().unwrap().3;
-                let total_in_range = last_spec_idx - first_spec_idx + 1;
-                let gap_count = total_in_range.saturating_sub(peakel_peaks.len());
-                
-                // Collect raw peaks data for messagepack serialization
-                let peaks_data = PeaksData {
-                    spectrum_ids: peakel_peaks.iter()
-                        .map(|(_, _, _, spec_idx, _)| indexed_spectra[*spec_idx].spectrum_id)
-                        .collect(),
-                    elution_times: peakel_peaks.iter()
-                        .map(|(_, _, rt, _, _)| *rt)
-                        .collect(),
-                    mz_values: peakel_peaks.iter()
-                        .map(|(mz, _, _, _, _)| *mz)
-                        .collect(),
-                    intensity_values: peakel_peaks.iter()
-                        .map(|(_, int, _, _, _)| *int)
-                        .collect(),
-                };
-                
-                // Mark all peaks as used
-                for (_, _, _, spec_idx, peak_idx) in peakel_peaks {
-                    used_peaks[*spec_idx].insert(*peak_idx);
-                }
-                
-                detected_peakels.push(DiaMs2PeakelRecord {
-                    id: peakel_id,
-                    mz: weighted_mz,
-                    elution_time: apex_peak.2,
-                    duration,
-                    apex_intensity: apex_peak.1,
-                    area,
-                    amplitude,
-                    gap_count,
-                    peaks_count: peaks_data.spectrum_ids.len(),
-                    first_spectrum_id,
-                    apex_spectrum_id,
-                    last_spectrum_id,
-                    isolation_window_id: window.id,
-                    precursor_mz: window.target_mz,
-                    peaks: peaks_data,
-                });
-                
-                peakel_id += 1;
-            }
-        }
-        
-        detected_peakels
+        // Run the shared walking algorithm
+        self.run_walking_algorithm(indexed_spectra, window)
     }
 }
 
@@ -1012,215 +805,23 @@ impl Default for DiaMs2PeakelDetector {
 ///
 /// The schema includes an additional isolation_window table and
 /// peakel table with isolation_window_id foreign key.
+///
+/// Note: This is a convenience wrapper around `Ms2PeakelDbWriter`.
+/// For more control, use `Ms2PeakelDbWriter` directly.
 pub fn write_dia_peakeldb(
     path: &PathBuf,
     windows: &[IsolationWindow],
     peakels: &[DiaMs2PeakelRecord],
 ) -> anyhow_ext::Result<()> {
-    use rusqlite::Connection;
+    use crate::processing::peakeldb::Ms2PeakelDbWriter;
     
-    // Remove existing file if present
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    
-    let conn = Connection::open(path)?;
-    
-    // SQLite optimizations
-    conn.execute_batch("
-        PRAGMA synchronous=OFF;
-        PRAGMA journal_mode=OFF;
-        PRAGMA temp_store=2;
-        PRAGMA cache_size=100000;
-    ")?;
-    
-    // Create schema with isolation window support
-    conn.execute_batch("
-        CREATE TABLE peakeldb_info (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            creation_timestamp TEXT NOT NULL,
-            peakel_count INTEGER NOT NULL,
-            ms_level INTEGER NOT NULL DEFAULT 2
-        );
-        
-        CREATE TABLE isolation_window (
-            id INTEGER PRIMARY KEY,
-            target_mz REAL NOT NULL,
-            lower_mz REAL NOT NULL,
-            upper_mz REAL NOT NULL,
-            spectrum_count INTEGER NOT NULL
-        );
-        
-        CREATE TABLE peakel (
-            id INTEGER PRIMARY KEY,
-            mz REAL NOT NULL,
-            elution_time REAL NOT NULL,
-            duration REAL NOT NULL,
-            gap_count INTEGER NOT NULL,
-            apex_intensity REAL NOT NULL,
-            area REAL NOT NULL,
-            amplitude REAL NOT NULL,
-            peaks_count INTEGER NOT NULL,
-            first_spectrum_id INTEGER NOT NULL,
-            apex_spectrum_id INTEGER NOT NULL,
-            last_spectrum_id INTEGER NOT NULL,
-            isolation_window_id INTEGER NOT NULL,
-            precursor_mz REAL NOT NULL,
-            peaks BLOB NOT NULL,
-            FOREIGN KEY (isolation_window_id) REFERENCES isolation_window(id)
-        );
-        
-        CREATE INDEX peakel_mz_idx ON peakel (mz);
-        CREATE INDEX peakel_rt_idx ON peakel (elution_time);
-        CREATE INDEX peakel_isolation_window_idx ON peakel (isolation_window_id);
-        CREATE INDEX peakel_precursor_mz_idx ON peakel (precursor_mz);
-        
-        CREATE VIRTUAL TABLE peakel_rtree USING rtree(
-            id,
-            min_mz, max_mz,
-            min_time, max_time
-        );
-    ")?;
-    
-    // Insert peakeldb_info
-    let timestamp = chrono_lite_timestamp();
-    conn.execute(
-        "INSERT INTO peakeldb_info (id, name, description, creation_timestamp, peakel_count, ms_level) 
-         VALUES (1, 'DIA MS2 peakelDB', 'Generated by mzdb-rs DIA module', ?1, ?2, 2)",
-        rusqlite::params![timestamp, peakels.len()],
-    )?;
-    
-    // Insert isolation windows
-    conn.execute("BEGIN TRANSACTION", [])?;
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO isolation_window (id, target_mz, lower_mz, upper_mz, spectrum_count) 
-             VALUES (?1, ?2, ?3, ?4, ?5)"
-        )?;
-        
-        for window in windows {
-            stmt.execute(rusqlite::params![
-                window.id,
-                window.target_mz,
-                window.lower_mz,
-                window.upper_mz,
-                window.spectrum_count,
-            ])?;
-        }
-    }
-    conn.execute("COMMIT", [])?;
-    
-    // Insert peakels
-    conn.execute("BEGIN TRANSACTION", [])?;
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO peakel (id, mz, elution_time, duration, gap_count, apex_intensity, area, 
-             amplitude, peaks_count, first_spectrum_id, apex_spectrum_id, last_spectrum_id, 
-             isolation_window_id, precursor_mz, peaks) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
-        )?;
-        
-        let mut rtree_stmt = conn.prepare(
-            "INSERT INTO peakel_rtree (id, min_mz, max_mz, min_time, max_time) 
-             VALUES (?1, ?2, ?3, ?4, ?5)"
-        )?;
-        
-        for peakel in peakels {
-            // Serialize peaks data to messagepack
-            let peaks_blob = peakel.peaks.to_msgpack()?;
-            
-            stmt.execute(rusqlite::params![
-                peakel.id,
-                peakel.mz,
-                peakel.elution_time,
-                peakel.duration,
-                peakel.gap_count,
-                peakel.apex_intensity,
-                peakel.area,
-                peakel.amplitude,
-                peakel.peaks_count,
-                peakel.first_spectrum_id,
-                peakel.apex_spectrum_id,
-                peakel.last_spectrum_id,
-                peakel.isolation_window_id,
-                peakel.precursor_mz,
-                peaks_blob,
-            ])?;
-            
-            // Insert into R-tree for spatial indexing
-            rtree_stmt.execute(rusqlite::params![
-                peakel.id,
-                peakel.mz,
-                peakel.mz,
-                peakel.elution_time,
-                peakel.elution_time,
-            ])?;
-        }
-    }
-    conn.execute("COMMIT", [])?;
+    let writer = Ms2PeakelDbWriter::create(path)?;
+    writer.write_peakels(windows, peakels)?;
     
     log::info!("DIA MS2 peakelDB created with {} isolation windows and {} peakels",
                windows.len(), peakels.len());
     
     Ok(())
-}
-
-/// Write DIA MS2 peakels to a TSV file
-pub fn write_dia_peakels_tsv(
-    path: &PathBuf,
-    peakels: &[DiaMs2PeakelRecord],
-) -> anyhow_ext::Result<()> {
-    use std::io::Write;
-    use std::fs::File;
-    
-    let mut file = File::create(path)?;
-    
-    // Write header
-    writeln!(file, "id\tmz\telution_time\tduration\tgap_count\tapex_intensity\tarea\tamplitude\tpeaks_count\tfirst_spectrum_id\tapex_spectrum_id\tlast_spectrum_id\tisolation_window_id\tprecursor_mz")?;
-    
-    // Write data
-    for peakel in peakels {
-        writeln!(
-            file,
-            "{}\t{:.6}\t{:.4}\t{:.4}\t{}\t{:.2}\t{:.2}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{:.2}",
-            peakel.id,
-            peakel.mz,
-            peakel.elution_time,
-            peakel.duration,
-            peakel.gap_count,
-            peakel.apex_intensity,
-            peakel.area,
-            peakel.amplitude,
-            peakel.peaks_count,
-            peakel.first_spectrum_id,
-            peakel.apex_spectrum_id,
-            peakel.last_spectrum_id,
-            peakel.isolation_window_id,
-            peakel.precursor_mz,
-        )?;
-    }
-    
-    log::info!("TSV file created with {} peakels", peakels.len());
-    
-    Ok(())
-}
-
-/// Simple timestamp function
-fn chrono_lite_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = duration.as_secs();
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    let hour = (secs % 86400) / 3600;
-    let min = (secs % 3600) / 60;
-    let sec = secs % 60;
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", years, months, day, hour, min, sec)
 }
 
 #[cfg(test)]

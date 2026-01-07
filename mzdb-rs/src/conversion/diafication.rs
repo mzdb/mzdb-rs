@@ -23,15 +23,20 @@
 //! converter.convert("output_dia.mzDB").unwrap();
 //! ```
 
-use anyhow_ext::{bail, Context, Result};
+use anyhow_ext::{Context, Result};
 use ordered_float::OrderedFloat;
-use rmpv::Value;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::model::DataPointProvider;
-use crate::writer::{serialize_to_bounding_box, insert_bounding_box_data, insert_msn_rtree_entry};
+use crate::processing::peakeldb::parse_peaks_blob;
+use crate::writer::{
+    DiaWriteContext, DiaSpectrumParams,
+    calculate_time_bounds, calculate_mz_bounds, find_base_peak,
+    serialize_to_bounding_box, insert_bounding_box_data, insert_msn_rtree_entry,
+    xml_builder::{generate_ms2_param_tree_xml, generate_dia_precursor_list_xml},
+};
 
 // ============================================================================
 // Configuration
@@ -252,72 +257,7 @@ impl PeakelDbReader {
     }
 }
 
-/// Parse the MessagePack-encoded peaks blob
-///
-/// The format is an array of 4 arrays:
-/// [spectrum_ids (Long), elution_times (Float), mz_values (Double), intensity_values (Float)]
-fn parse_peaks_blob(data: &[u8]) -> Result<(Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>)> {
-    let value: Value =
-        rmpv::decode::read_value(&mut &data[..]).context("Failed to decode MessagePack data")?;
-
-    if let Value::Array(arrays) = value {
-        if arrays.len() != 4 {
-            bail!("Expected 4 arrays in peaks blob, got {}", arrays.len());
-        }
-
-        let spectrum_ids = extract_i64_array(&arrays[0])?;
-        let elution_times = extract_f32_array(&arrays[1])?;
-        let mz_values = extract_f64_array(&arrays[2])?;
-        let intensities = extract_f32_array(&arrays[3])?;
-
-        Ok((spectrum_ids, elution_times, mz_values, intensities))
-    } else {
-        bail!("Expected array in peaks blob, got {:?}", value);
-    }
-}
-
-fn extract_i64_array(value: &Value) -> Result<Vec<i64>> {
-    if let Value::Array(arr) = value {
-        arr.iter()
-            .map(|v| match v {
-                Value::Integer(i) => Ok(i.as_i64().unwrap_or(0)),
-                _ => Ok(0),
-            })
-            .collect()
-    } else {
-        bail!("Expected array, got {:?}", value);
-    }
-}
-
-fn extract_f32_array(value: &Value) -> Result<Vec<f32>> {
-    if let Value::Array(arr) = value {
-        arr.iter()
-            .map(|v| match v {
-                Value::F32(f) => Ok(*f),
-                Value::F64(f) => Ok(*f as f32),
-                Value::Integer(i) => Ok(i.as_f64().unwrap_or(0.0) as f32),
-                _ => Ok(0.0),
-            })
-            .collect()
-    } else {
-        bail!("Expected array, got {:?}", value);
-    }
-}
-
-fn extract_f64_array(value: &Value) -> Result<Vec<f64>> {
-    if let Value::Array(arr) = value {
-        arr.iter()
-            .map(|v| match v {
-                Value::F64(f) => Ok(*f),
-                Value::F32(f) => Ok(*f as f64),
-                Value::Integer(i) => Ok(i.as_f64().unwrap_or(0.0)),
-                _ => Ok(0.0),
-            })
-            .collect()
-    } else {
-        bail!("Expected array, got {:?}", value);
-    }
-}
+// Note: parse_peaks_blob and extract_*_array functions are now in processing::peakeldb::common
 
 // ============================================================================
 // Spectrum Data (simplified for conversion)
@@ -728,45 +668,51 @@ pub struct DiaConversionStats {
 // Internal Helper Functions
 // ============================================================================
 
+/// SQL columns for spectrum header queries
+const SPECTRUM_HEADER_COLUMNS: &str = 
+    "id, initial_id, title, cycle, time, ms_level, activation_type,
+     tic, base_peak_mz, base_peak_intensity, main_precursor_mz,
+     main_precursor_charge, data_points_count, param_tree,
+     scan_list, precursor_list, product_list, data_encoding_id,
+     bb_first_spectrum_id";
+
+/// Map a SQLite row to SimpleSpectrumHeader
+fn row_to_spectrum_header(row: &rusqlite::Row<'_>) -> rusqlite::Result<SimpleSpectrumHeader> {
+    Ok(SimpleSpectrumHeader {
+        id: row.get(0)?,
+        initial_id: row.get(1)?,
+        title: row.get(2)?,
+        cycle: row.get(3)?,
+        time: row.get(4)?,
+        ms_level: row.get(5)?,
+        activation_type: row.get(6)?,
+        tic: row.get(7)?,
+        base_peak_mz: row.get(8)?,
+        base_peak_intensity: row.get(9)?,
+        main_precursor_mz: row.get(10)?,
+        main_precursor_charge: row.get(11)?,
+        data_points_count: row.get(12)?,
+        param_tree: row.get(13)?,
+        scan_list: row.get(14)?,
+        precursor_list: row.get(15)?,
+        product_list: row.get(16)?,
+        data_encoding_id: row.get(17)?,
+        bb_first_spectrum_id: row.get(18)?,
+    })
+}
+
 /// Get spectrum headers from mzDB connection by MS level
 fn get_spectrum_headers_by_ms_level(
     conn: &Connection,
     ms_level: i32,
 ) -> Result<Vec<SimpleSpectrumHeader>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, initial_id, title, cycle, time, ms_level, activation_type,
-                tic, base_peak_mz, base_peak_intensity, main_precursor_mz,
-                main_precursor_charge, data_points_count, param_tree,
-                scan_list, precursor_list, product_list, data_encoding_id,
-                bb_first_spectrum_id
-         FROM spectrum
-         WHERE ms_level = ?1
-         ORDER BY id",
-    )?;
+    let sql = format!(
+        "SELECT {} FROM spectrum WHERE ms_level = ?1 ORDER BY id",
+        SPECTRUM_HEADER_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
-    let headers = stmt.query_map([ms_level], |row| {
-        Ok(SimpleSpectrumHeader {
-            id: row.get(0)?,
-            initial_id: row.get(1)?,
-            title: row.get(2)?,
-            cycle: row.get(3)?,
-            time: row.get(4)?,
-            ms_level: row.get(5)?,
-            activation_type: row.get(6)?,
-            tic: row.get(7)?,
-            base_peak_mz: row.get(8)?,
-            base_peak_intensity: row.get(9)?,
-            main_precursor_mz: row.get(10)?,
-            main_precursor_charge: row.get(11)?,
-            data_points_count: row.get(12)?,
-            param_tree: row.get(13)?,
-            scan_list: row.get(14)?,
-            precursor_list: row.get(15)?,
-            product_list: row.get(16)?,
-            data_encoding_id: row.get(17)?,
-            bb_first_spectrum_id: row.get(18)?,
-        })
-    })?;
+    let headers = stmt.query_map([ms_level], row_to_spectrum_header)?;
 
     headers
         .collect::<Result<Vec<_>, _>>()
@@ -775,39 +721,13 @@ fn get_spectrum_headers_by_ms_level(
 
 /// Get all spectrum headers
 fn get_all_spectrum_headers(conn: &Connection) -> Result<Vec<SimpleSpectrumHeader>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, initial_id, title, cycle, time, ms_level, activation_type,
-                tic, base_peak_mz, base_peak_intensity, main_precursor_mz,
-                main_precursor_charge, data_points_count, param_tree,
-                scan_list, precursor_list, product_list, data_encoding_id,
-                bb_first_spectrum_id
-         FROM spectrum
-         ORDER BY id",
-    )?;
+    let sql = format!(
+        "SELECT {} FROM spectrum ORDER BY id",
+        SPECTRUM_HEADER_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
-    let headers = stmt.query_map([], |row| {
-        Ok(SimpleSpectrumHeader {
-            id: row.get(0)?,
-            initial_id: row.get(1)?,
-            title: row.get(2)?,
-            cycle: row.get(3)?,
-            time: row.get(4)?,
-            ms_level: row.get(5)?,
-            activation_type: row.get(6)?,
-            tic: row.get(7)?,
-            base_peak_mz: row.get(8)?,
-            base_peak_intensity: row.get(9)?,
-            main_precursor_mz: row.get(10)?,
-            main_precursor_charge: row.get(11)?,
-            data_points_count: row.get(12)?,
-            param_tree: row.get(13)?,
-            scan_list: row.get(14)?,
-            precursor_list: row.get(15)?,
-            product_list: row.get(16)?,
-            data_encoding_id: row.get(17)?,
-            bb_first_spectrum_id: row.get(18)?,
-        })
-    })?;
+    let headers = stmt.query_map([], row_to_spectrum_header)?;
 
     headers
         .collect::<Result<Vec<_>, _>>()
@@ -1080,30 +1000,8 @@ fn write_dia_mzdb(
     // Delete MS2 run slices
     conn.execute("DELETE FROM run_slice WHERE ms_level = 2", [])?;
 
-    // Get the next spectrum ID
-    let max_ms1_id: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(id), 0) FROM spectrum",
-        [],
-        |row| row.get(0),
-    )?;
-
-    let mut next_spectrum_id = max_ms1_id + 1;
-
-    // Get or create data encoding for MS2
-    let data_encoding_id = get_or_create_data_encoding(&conn)?;
-
-    // Get run_id
-    let run_id: i64 = conn.query_row("SELECT id FROM run LIMIT 1", [], |row| row.get(0))?;
-
-    // Get reference metadata from MS1 spectra
-    let (instr_config_id, source_file_id, data_proc_id): (i64, i64, i64) = conn
-        .query_row(
-            "SELECT instrument_configuration_id, source_file_id, data_processing_id 
-         FROM spectrum WHERE ms_level = 1 LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap_or((1, 1, 1));
+    // Initialize write context from database
+    let mut ctx = DiaWriteContext::from_connection(&conn)?;
 
     // Create DIA run slices for each window
     let mut window_to_run_slice: HashMap<OrderedFloat<f64>, i64> = HashMap::new();
@@ -1119,7 +1017,7 @@ fn write_dia_mzdb(
                     run_slice_number,
                     spectrum.window_min_mz,
                     spectrum.window_max_mz,
-                    run_id
+                    ctx.run_id
                 ],
             )?;
             let run_slice_id = conn.last_insert_rowid();
@@ -1150,13 +1048,13 @@ fn write_dia_mzdb(
             continue;
         }
 
-        let first_spectrum_id = next_spectrum_id;
-        let last_spectrum_id = next_spectrum_id + spectra.len() as i64 - 1;
+        let first_spectrum_id = ctx.next_spectrum_id;
+        let last_spectrum_id = ctx.next_spectrum_id + spectra.len() as i64 - 1;
 
         // Serialize using the generic writer utility (no data cloning needed)
         let bb_data = serialize_to_bounding_box(
             spectra.iter().enumerate().map(|(i, spectrum)| {
-                (next_spectrum_id + i as i64, &spectrum.data)
+                (ctx.next_spectrum_id + i as i64, &spectrum.data)
             })
         );
 
@@ -1165,10 +1063,10 @@ fn write_dia_mzdb(
 
         // Insert spectra
         for (i, spectrum) in spectra.iter().enumerate() {
-            let spectrum_id = next_spectrum_id + i as i64;
+            let spectrum_id = ctx.next_spectrum_id + i as i64;
 
-            let param_tree = generate_param_tree_xml(spectrum.time);
-            let precursor_list = generate_precursor_list_xml(
+            let param_tree = generate_ms2_param_tree_xml(spectrum.time);
+            let precursor_list = generate_dia_precursor_list_xml(
                 spectrum.window_center,
                 spectrum.window_max_mz - spectrum.window_center,
             );
@@ -1185,74 +1083,40 @@ fn write_dia_mzdb(
                 .map(|&i| i as f64)
                 .sum();
 
-            let (base_peak_mz, base_peak_intensity) = spectrum
-                .data
-                .mz_array
-                .iter()
-                .zip(spectrum.data.intensity_array.iter())
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(&mz, &int)| (mz, int))
-                .unwrap_or((0.0, 0.0));
+            let (base_peak_mz, base_peak_intensity) = find_base_peak(
+                &spectrum.data.mz_array,
+                &spectrum.data.intensity_array,
+            );
 
-            conn.execute(
-                "INSERT INTO spectrum (
-                    id, initial_id, title, cycle, time, ms_level, activation_type,
-                    tic, base_peak_mz, base_peak_intensity, main_precursor_mz,
-                    main_precursor_charge, data_points_count, param_tree,
-                    scan_list, precursor_list, product_list, 
-                    shared_param_tree_id, instrument_configuration_id, source_file_id,
-                    run_id, data_processing_id, data_encoding_id, bb_first_spectrum_id
-                ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, 2, 'HCD',
-                    ?6, ?7, ?8, ?9,
-                    NULL, ?10, ?11,
-                    NULL, ?12, NULL,
-                    NULL, ?13, ?14,
-                    ?15, ?16, ?17, ?18
-                )",
-                params![
-                    spectrum_id,
-                    spectrum_id,
-                    title,
-                    spectrum.cycle,
-                    spectrum.time,
-                    tic,
-                    base_peak_mz,
-                    base_peak_intensity,
-                    spectrum.window_center,
-                    spectrum.data.mz_array.len() as i32,
-                    param_tree,
-                    precursor_list,
-                    instr_config_id,
-                    source_file_id,
-                    run_id,
-                    data_proc_id,
-                    data_encoding_id,
-                    first_spectrum_id,
-                ],
-            )?;
+            let params = DiaSpectrumParams {
+                spectrum_id,
+                title,
+                cycle: spectrum.cycle,
+                time: spectrum.time,
+                tic,
+                base_peak_mz,
+                base_peak_intensity,
+                precursor_mz: spectrum.window_center,
+                data_points_count: spectrum.data.mz_array.len() as i32,
+                param_tree,
+                precursor_list,
+                instr_config_id: ctx.instr_config_id,
+                source_file_id: ctx.source_file_id,
+                run_id: ctx.run_id,
+                data_proc_id: ctx.data_proc_id,
+                data_encoding_id: ctx.data_encoding_id,
+                bb_first_spectrum_id: first_spectrum_id,
+            };
+            params.insert(&conn)?;
         }
 
-        next_spectrum_id += spectra.len() as i64;
+        ctx.advance_spectrum_id(spectra.len() as i64);
 
-        // Insert R-tree entry if MSn R-tree exists (using writer utility)
+        // Insert R-tree entry if MSn R-tree exists
         if has_msn_rtree {
-            let min_time = spectra
-                .iter()
-                .map(|s| s.time)
-                .fold(f32::INFINITY, f32::min);
-            let max_time = spectra
-                .iter()
-                .map(|s| s.time)
-                .fold(f32::NEG_INFINITY, f32::max);
-            let min_mz = spectra
-                .iter()
-                .map(|s| s.window_min_mz)
-                .fold(f64::INFINITY, f64::min);
-            let max_mz = spectra
-                .iter()
-                .map(|s| s.window_max_mz)
-                .fold(f64::NEG_INFINITY, f64::max);
+            let (min_time, max_time) = calculate_time_bounds(spectra, |s| s.time);
+            let (min_mz, _) = calculate_mz_bounds(spectra, |s| s.window_min_mz);
+            let (_, max_mz) = calculate_mz_bounds(spectra, |s| s.window_max_mz);
 
             insert_msn_rtree_entry(
                 &conn,
@@ -1273,59 +1137,3 @@ fn write_dia_mzdb(
 
     Ok(())
 }
-
-/// Get or create a data encoding entry for 64-bit m/z, 32-bit intensity
-fn get_or_create_data_encoding(conn: &Connection) -> Result<i64> {
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM data_encoding WHERE mode = 'centroid' LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(id) = existing {
-        return Ok(id);
-    }
-
-    conn.execute(
-        "INSERT INTO data_encoding (mode, compression, byte_order, mz_precision, intensity_precision)
-         VALUES ('centroid', 'none', 'little_endian', 64, 32)",
-        [],
-    )?;
-
-    Ok(conn.last_insert_rowid())
-}
-
-/// Generate param_tree XML for a spectrum
-fn generate_param_tree_xml(time: f32) -> String {
-    format!(
-        r#"<params>
-  <cvParam cvRef="MS" accession="MS:1000511" value="2" name="ms level"/>
-  <cvParam cvRef="MS" accession="MS:1000580" value="" name="MSn spectrum"/>
-  <cvParam cvRef="MS" accession="MS:1000127" value="" name="centroid spectrum"/>
-  <cvParam cvRef="MS" accession="MS:1000016" value="{:.4}" name="scan start time" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
-</params>"#,
-        time / 60.0
-    )
-}
-
-/// Generate precursor_list XML for a DIA spectrum
-fn generate_precursor_list_xml(target_mz: f64, half_width: f64) -> String {
-    format!(
-        r#"<precursorList count="1">
-  <precursor>
-    <isolationWindow>
-      <cvParam cvRef="MS" accession="MS:1000827" value="{:.4}" name="isolation window target m/z" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
-      <cvParam cvRef="MS" accession="MS:1000828" value="{:.4}" name="isolation window lower offset" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
-      <cvParam cvRef="MS" accession="MS:1000829" value="{:.4}" name="isolation window upper offset" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
-    </isolationWindow>
-    <activation>
-      <cvParam cvRef="MS" accession="MS:1000422" value="" name="beam-type collision-induced dissociation"/>
-    </activation>
-  </precursor>
-</precursorList>"#,
-        target_mz, half_width, half_width
-    )
-}
-

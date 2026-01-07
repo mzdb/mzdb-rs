@@ -7,6 +7,8 @@
 
 use nalgebra::{DMatrix, DVector};
 
+use crate::processing::math::calc_ternary_slopes;
+
 // ============================================================================
 // Smoothing Trait
 // ============================================================================
@@ -264,31 +266,6 @@ impl SignalSmoother for PartialSavitzkyGolaySmoother {
         }
 
         result
-    }
-}
-
-/// Calculate ternary slopes (returns -1, 0, or +1)
-fn calc_ternary_slopes(values: &[f64], derivative_level: usize) -> Vec<f64> {
-    if values.len() < 2 {
-        return vec![];
-    }
-
-    let signums: Vec<f64> = values
-        .windows(2)
-        .map(|w| {
-            let diff = w[1] - w[0];
-            if diff == 0.0 {
-                0.0
-            } else {
-                diff.signum()
-            }
-        })
-        .collect();
-
-    if derivative_level <= 1 {
-        signums
-    } else {
-        calc_ternary_slopes(&signums, derivative_level - 1)
     }
 }
 
@@ -590,16 +567,5 @@ mod tests {
 
         let bins = binner.calc_bins(&data);
         assert!(!bins.is_empty());
-    }
-
-    #[test]
-    fn test_ternary_slopes() {
-        let values = vec![1.0, 2.0, 3.0, 2.0, 1.0];
-        let slopes = calc_ternary_slopes(&values, 1);
-        assert_eq!(slopes.len(), 4);
-        assert_eq!(slopes[0], 1.0); // Rising
-        assert_eq!(slopes[1], 1.0); // Rising
-        assert_eq!(slopes[2], -1.0); // Falling
-        assert_eq!(slopes[3], -1.0); // Falling
     }
 }

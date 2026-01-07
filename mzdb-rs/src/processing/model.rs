@@ -25,6 +25,142 @@ pub fn generate_feature_id() -> i64 {
 }
 
 // ============================================================================
+// HasPeakelData Trait
+// ============================================================================
+
+/// Trait for types that contain peakel data arrays.
+/// 
+/// This trait provides a common interface for accessing the raw peaks data
+/// (spectrum IDs, elution times, m/z values, intensities) from various
+/// peakel representations:
+/// - `Peakel`: Core processing type
+/// - `PeakelData`: Raw data container (in peakeldb module)
+/// - `ExtendedPeakel`: Database record type (in peakeldb module)
+/// 
+/// # Example
+/// 
+/// ```ignore
+/// fn print_peakel_info<T: HasPeakelData>(peakel: &T) {
+///     println!("Points: {}, m/z range: {:.2}-{:.2}", 
+///         peakel.len(), peakel.min_mz(), peakel.max_mz());
+/// }
+/// ```
+pub trait HasPeakelData {
+    /// Get spectrum IDs slice
+    fn spectrum_ids(&self) -> &[i64];
+    /// Get elution times slice (seconds)
+    fn elution_times(&self) -> &[f32];
+    /// Get m/z values slice
+    fn mz_values(&self) -> &[f64];
+    /// Get intensity values slice
+    fn intensities(&self) -> &[f32];
+
+    /// Get the number of data points
+    #[inline]
+    fn len(&self) -> usize {
+        self.spectrum_ids().len()
+    }
+
+    /// Check if empty
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.spectrum_ids().is_empty()
+    }
+
+    /// Get the index of the apex (highest intensity) data point
+    fn apex_index(&self) -> Option<usize> {
+        self.intensities()
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+    }
+
+    /// Find the index of a specific spectrum ID
+    fn find_spectrum_index(&self, spectrum_id: i64) -> Option<usize> {
+        self.spectrum_ids().iter().position(|&id| id == spectrum_id)
+    }
+
+    /// Get min m/z value
+    fn min_mz(&self) -> f64 {
+        self.mz_values().iter().cloned().fold(f64::INFINITY, f64::min)
+    }
+
+    /// Get max m/z value
+    fn max_mz(&self) -> f64 {
+        self.mz_values().iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    /// Get min elution time
+    fn min_time(&self) -> f32 {
+        self.elution_times().iter().cloned().fold(f32::INFINITY, f32::min)
+    }
+
+    /// Get max elution time
+    fn max_time(&self) -> f32 {
+        self.elution_times().iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// Get first spectrum ID
+    fn first_spectrum_id(&self) -> Option<i64> {
+        self.spectrum_ids().first().copied()
+    }
+
+    /// Get last spectrum ID
+    fn last_spectrum_id(&self) -> Option<i64> {
+        self.spectrum_ids().last().copied()
+    }
+
+    /// Get apex intensity
+    fn apex_intensity(&self) -> Option<f32> {
+        self.apex_index().map(|i| self.intensities()[i])
+    }
+
+    /// Get apex m/z
+    fn apex_mz(&self) -> Option<f64> {
+        self.apex_index().map(|i| self.mz_values()[i])
+    }
+
+    /// Get apex elution time
+    fn apex_elution_time(&self) -> Option<f32> {
+        self.apex_index().map(|i| self.elution_times()[i])
+    }
+
+    /// Get apex spectrum ID
+    fn apex_spectrum_id(&self) -> Option<i64> {
+        self.apex_index().map(|i| self.spectrum_ids()[i])
+    }
+
+    /// Calculate duration (max_time - min_time)
+    fn calc_duration(&self) -> f32 {
+        if self.is_empty() {
+            0.0
+        } else {
+            self.max_time() - self.min_time()
+        }
+    }
+
+    /// Calculate weighted average m/z
+    fn calc_weighted_mz(&self) -> f64 {
+        let sum_intensity: f64 = self.intensities().iter().map(|&i| i as f64).sum();
+        if sum_intensity == 0.0 {
+            return self.apex_mz().unwrap_or(0.0);
+        }
+        self.mz_values()
+            .iter()
+            .zip(self.intensities().iter())
+            .map(|(&mz, &intensity)| mz * intensity as f64)
+            .sum::<f64>()
+            / sum_intensity
+    }
+
+    /// Calculate area (sum of intensities)
+    fn calc_area(&self) -> f32 {
+        self.intensities().iter().sum()
+    }
+}
+
+// ============================================================================
 // Peak
 // ============================================================================
 
@@ -181,7 +317,7 @@ impl Peakel {
     /// 
     /// The vectors are converted to SmallVec internally. Use this for
     /// convenience when working with existing Vec data.
-    pub fn from_vec(
+    pub fn from_vectors(
         spectrum_ids: Vec<i64>,
         elution_times: Vec<f32>,
         mz_values: Vec<f64>,
@@ -208,56 +344,23 @@ impl Peakel {
         }
     }
 
-    /// Get the number of peaks in this peakel
+    /// Get the number of peaks in this peakel (alias for `len()`)
+    #[inline]
     pub fn peaks_count(&self) -> usize {
-        self.intensity_values.len()
+        self.len()
     }
 
-    /// Get the apex index
-    pub fn apex_index(&self) -> usize {
-        self.apex_index
-    }
-
-    /// Get the apex m/z
-    pub fn apex_mz(&self) -> f64 {
-        self.mz_values[self.apex_index]
-    }
-
-    /// Get the apex intensity
-    pub fn apex_intensity(&self) -> f32 {
-        self.intensity_values[self.apex_index]
-    }
-
-    /// Get the apex elution time
-    pub fn apex_elution_time(&self) -> f32 {
-        self.elution_times[self.apex_index]
-    }
-
-    /// Get the apex spectrum ID
-    pub fn apex_spectrum_id(&self) -> i64 {
-        self.spectrum_ids[self.apex_index]
-    }
-
-    /// Calculate the weighted average m/z
+    /// Calculate the weighted average m/z (alias for `calc_weighted_mz()`)
+    #[inline]
     pub fn calc_mz(&self) -> f64 {
-        let sum_intensity: f64 = self.intensity_values.iter().map(|&i| i as f64).sum();
-        if sum_intensity == 0.0 {
-            return self.apex_mz();
-        }
-
-        self.mz_values
-            .iter()
-            .zip(self.intensity_values.iter())
-            .map(|(&mz, &intensity)| mz * intensity as f64)
-            .sum::<f64>()
-            / sum_intensity
+        self.calc_weighted_mz()
     }
 
     /// Calculate the weighted average elution time
     pub fn calc_weighted_average_time(&self) -> f32 {
         let sum_intensity: f64 = self.intensity_values.iter().map(|&i| i as f64).sum();
         if sum_intensity == 0.0 {
-            return self.apex_elution_time();
+            return self.apex_elution_time().unwrap_or(0.0);
         }
 
         (self
@@ -269,19 +372,10 @@ impl Peakel {
             / sum_intensity) as f32
     }
 
-    /// Calculate the peakel duration
-    pub fn calc_duration(&self) -> f32 {
-        if self.elution_times.is_empty() {
-            return 0.0;
-        }
-        let min_rt = self.elution_times.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_rt = self.elution_times.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        max_rt - min_rt
-    }
-
-    /// Calculate the peakel area (sum of intensities)
+    /// Calculate the peakel area (alias for `calc_area()`)
+    #[inline]
     pub fn area(&self) -> f32 {
-        self.intensity_values.iter().sum()
+        self.calc_area()
     }
 
     /// Get the mean left HWHM
@@ -307,6 +401,65 @@ impl Peakel {
             .zip(self.intensity_values.iter())
             .map(|(&rt, &intensity)| (rt, intensity as f64))
             .collect()
+    }
+}
+
+impl HasPeakelData for Peakel {
+    fn spectrum_ids(&self) -> &[i64] {
+        &self.spectrum_ids
+    }
+
+    fn elution_times(&self) -> &[f32] {
+        &self.elution_times
+    }
+
+    fn mz_values(&self) -> &[f64] {
+        &self.mz_values
+    }
+
+    fn intensities(&self) -> &[f32] {
+        &self.intensity_values
+    }
+
+    // Override to use cached apex_index for better performance
+    fn apex_index(&self) -> Option<usize> {
+        if self.intensity_values.is_empty() {
+            None
+        } else {
+            Some(self.apex_index)
+        }
+    }
+
+    fn apex_intensity(&self) -> Option<f32> {
+        if self.intensity_values.is_empty() {
+            None
+        } else {
+            Some(self.intensity_values[self.apex_index])
+        }
+    }
+
+    fn apex_mz(&self) -> Option<f64> {
+        if self.mz_values.is_empty() {
+            None
+        } else {
+            Some(self.mz_values[self.apex_index])
+        }
+    }
+
+    fn apex_elution_time(&self) -> Option<f32> {
+        if self.elution_times.is_empty() {
+            None
+        } else {
+            Some(self.elution_times[self.apex_index])
+        }
+    }
+
+    fn apex_spectrum_id(&self) -> Option<i64> {
+        if self.spectrum_ids.is_empty() {
+            None
+        } else {
+            Some(self.spectrum_ids[self.apex_index])
+        }
     }
 }
 
@@ -595,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_peakel_creation() {
-        let peakel = Peakel::from_vec(
+        let peakel = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![1.0, 2.0, 3.0],
             vec![500.0, 500.1, 500.2],
@@ -605,9 +758,9 @@ mod tests {
         );
 
         assert_eq!(peakel.peaks_count(), 3);
-        assert_eq!(peakel.apex_index(), 1);
-        assert_eq!(peakel.apex_intensity(), 200.0);
-        assert_eq!(peakel.apex_elution_time(), 2.0);
+        assert_eq!(peakel.apex_index(), Some(1));
+        assert_eq!(peakel.apex_intensity(), Some(200.0));
+        assert_eq!(peakel.apex_elution_time(), Some(2.0));
     }
 
     #[test]
@@ -637,12 +790,12 @@ mod tests {
 
         let peakel = builder.build();
         assert_eq!(peakel.peaks_count(), 3);
-        assert_eq!(peakel.apex_intensity(), 200.0);
+        assert_eq!(peakel.apex_intensity(), Some(200.0));
     }
 
     #[test]
     fn test_peakel_calculations() {
-        let peakel = Peakel::from_vec(
+        let peakel = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![1.0, 2.0, 3.0],
             vec![500.0, 500.0, 500.0],

@@ -132,3 +132,35 @@ mod tests {
         assert_eq!(registered3.id, 2);
     }
 }
+
+// ============================================================================
+// Utility functions for data encoding lookup/creation
+// ============================================================================
+
+/// Get or create a centroid data encoding entry (64-bit m/z, 32-bit intensity)
+/// 
+/// This is used when creating new spectra in DIA conversion/simplification workflows.
+/// It first tries to find an existing centroid encoding, and creates one if not found.
+pub fn get_or_create_centroid_data_encoding(conn: &Connection) -> Result<i64> {
+    // Try to find an existing centroid encoding
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM data_encoding WHERE mode = 'centroid' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+
+    // Create a new data encoding with standard settings
+    conn.execute(
+        "INSERT INTO data_encoding (mode, compression, byte_order, mz_precision, intensity_precision)
+         VALUES ('centroid', 'none', 'little_endian', 64, 32)",
+        [],
+    )?;
+
+    Ok(conn.last_insert_rowid())
+}

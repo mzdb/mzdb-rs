@@ -8,7 +8,7 @@
 #![cfg(feature = "processing")]
 
 use mzdb::MzDbReader;
-use mzdb::processing::model::{Peak, Peakel, PeakelBuilder, LcContext};
+use mzdb::processing::model::{Peak, Peakel, PeakelBuilder, LcContext, HasPeakelData};
 use mzdb::processing::signal::detection::{BasicPeakelFinder, SmartPeakelFinder, PeakelFinder};
 use mzdb::processing::signal::filtering::{SavitzkyGolaySmoother, SignalSmoother, BaselineRemover};
 use mzdb::processing::math;
@@ -491,8 +491,8 @@ fn test_walking_peakel_detection() {
             let peakel = builder.build();
             
             // Filter by amplitude
-            let min_int = peakel.intensity_values.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max_int = peakel.apex_intensity();
+            let min_int = peakel.intensities().iter().cloned().fold(f32::INFINITY, f32::min);
+            let max_int = peakel.apex_intensity().unwrap_or(0.0);
             let amplitude = if min_int > 0.0 { max_int / min_int } else { 2.0 };
             
             if amplitude >= 1.5 && peakel.peaks_count() >= MIN_PEAKS {
@@ -514,9 +514,9 @@ fn test_walking_peakel_detection() {
         for (i, peakel) in detected_peakels.iter().take(10).enumerate() {
             println!("  {:2}: m/z={:.4}, RT={:.2}s, intensity={:.2e}, peaks={}",
                 i + 1,
-                peakel.apex_mz(),
-                peakel.apex_elution_time(),
-                peakel.apex_intensity(),
+                peakel.apex_mz().unwrap_or(0.0),
+                peakel.apex_elution_time().unwrap_or(0.0),
+                peakel.apex_intensity().unwrap_or(0.0),
                 peakel.peaks_count()
             );
         }
@@ -534,7 +534,7 @@ fn test_walking_peakel_detection() {
     // Validate peakel properties
     for peakel in &detected_peakels {
         assert!(peakel.peaks_count() >= MIN_PEAKS, "Peakel should have at least {} peaks", MIN_PEAKS);
-        assert!(peakel.apex_intensity() > 0.0, "Apex intensity should be positive");
+        assert!(peakel.apex_intensity().unwrap_or(0.0) > 0.0, "Apex intensity should be positive");
         assert!(peakel.area() > 0.0, "Area should be positive");
     }
 }
@@ -607,7 +607,7 @@ fn test_peakel_model() {
     let mz_values = vec![500.0, 500.01, 500.02, 500.01, 500.0];
     let intensity_values = vec![100.0f32, 500.0, 1000.0, 500.0, 100.0];
     
-    let peakel = Peakel::from_vec(
+    let peakel = Peakel::from_vectors(
         spectrum_ids,
         elution_times,
         mz_values,
@@ -618,19 +618,19 @@ fn test_peakel_model() {
     
     println!("Peakel properties:");
     println!("  Peaks count: {}", peakel.peaks_count());
-    println!("  Apex index: {}", peakel.apex_index());
-    println!("  Apex m/z: {:.4}", peakel.apex_mz());
-    println!("  Apex RT: {:.2}s", peakel.apex_elution_time());
-    println!("  Apex intensity: {:.0}", peakel.apex_intensity());
+    println!("  Apex index: {:?}", peakel.apex_index());
+    println!("  Apex m/z: {:.4}", peakel.apex_mz().unwrap_or(0.0));
+    println!("  Apex RT: {:.2}s", peakel.apex_elution_time().unwrap_or(0.0));
+    println!("  Apex intensity: {:.0}", peakel.apex_intensity().unwrap_or(0.0));
     println!("  Weighted m/z: {:.4}", peakel.calc_mz());
     println!("  Weighted RT: {:.2}s", peakel.calc_weighted_average_time());
     println!("  Duration: {:.2}s", peakel.calc_duration());
     println!("  Area: {:.0}", peakel.area());
     
     assert_eq!(peakel.peaks_count(), 5);
-    assert_eq!(peakel.apex_index(), 2);  // Peak at intensity 1000
-    assert_eq!(peakel.apex_intensity(), 1000.0);
-    assert_eq!(peakel.apex_elution_time(), 12.0);
+    assert_eq!(peakel.apex_index(), Some(2));  // Peak at intensity 1000
+    assert_eq!(peakel.apex_intensity(), Some(1000.0));
+    assert_eq!(peakel.apex_elution_time(), Some(12.0));
     assert_eq!(peakel.calc_duration(), 4.0);
     assert_eq!(peakel.area(), 2200.0);
 }
@@ -650,12 +650,12 @@ fn test_peakel_builder() {
     
     println!("Built peakel:");
     println!("  Peaks count: {}", peakel.peaks_count());
-    println!("  Apex intensity: {:.0}", peakel.apex_intensity());
+    println!("  Apex intensity: {:.0}", peakel.apex_intensity().unwrap_or(0.0));
     println!("  Left HWHM mean: {:.4}", peakel.left_hwhm_mean());
     println!("  Right HWHM mean: {:.4}", peakel.right_hwhm_mean());
     
     assert_eq!(peakel.peaks_count(), 5);
-    assert_eq!(peakel.apex_intensity(), 1000.0);
+    assert_eq!(peakel.apex_intensity(), Some(1000.0));
     assert!(peakel.left_hwhm_mean() > 0.0);
     assert!(peakel.right_hwhm_mean() > 0.0);
 }

@@ -48,8 +48,9 @@ pub mod math;
 pub mod ms;
 pub mod model;
 pub mod dia;
+pub mod peakeldb;
 
-#[cfg(all(feature = "rmpv"))]
+#[cfg(feature = "shrinkdia")]
 pub mod dia_simplifier;
 
 // Re-export commonly used types
@@ -57,6 +58,7 @@ pub use model::{
     Peak, Peakel, PeakelBuilder, Feature, PutativeFeature,
     LcContext, RtIntensityPair, RtIntensityPairs,
     XicPeak, DetectedPeak,
+    HasPeakelData,
 };
 
 pub use signal::filtering::{
@@ -87,13 +89,25 @@ pub use math::{
 // Re-export DIA types
 pub use dia::{
     IsolationWindow, PeaksData, DiaMs2PeakelRecord, DiaMs2PeakelConfig,
-    DiaMs2PeakelDetector, write_dia_peakels_tsv, write_dia_peakeldb,
+    DiaMs2PeakelDetector, write_dia_peakeldb,
+};
+
+// Re-export peakeldb types
+pub use peakeldb::{
+    PeakelData, ExtendedPeakel,
+    parse_peaks_blob, parse_peaks_blob_to_peakel_data,
+    extract_i64_array, extract_f32_array, extract_f64_array,
+    chrono_lite_timestamp,
+    Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord, serialize_ms1_peakel_data,
+    Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema, SimplifierPeakel,
+    write_ms1_peakels_tsv, print_ms1_statistics,
+    print_ms2_statistics,
 };
 
 // Re-export DIA simplifier types (when feature enabled)
-#[cfg(all(feature = "rmpv"))]
+#[cfg(feature = "shrinkdia")]
 pub use dia_simplifier::{
     DiaSimplifier, DiaSimplifierConfig, SimplifiedSpectrum,
-    SimplifierPeakel, PeakelDbReader, SimplificationStats,
-    SpectrumHeader,
+    SimplificationStats, SpectrumHeader,
+    // Note: SimplifierPeakel and PeakelDbReader are now in peakeldb module
 };

@@ -48,12 +48,12 @@ itertools = { version = "0.13", optional = true }
 default = []
 writer = []
 cli = ["clap", "env_logger"]
-dda2dia = ["cli", "writer", "rmpv"]
-thermo2mzdb = ["writer", "thernio", "xmltree"]
-shrinkdia = ["cli", "processing", "rmpv"]
-processing = ["nalgebra", "rmp-serde", "itertools"]
+thermo2mzdb = ["thernio", "writer", "xmltree"]
+processing = ["itertools", "nalgebra", "rmp-serde", "rmpv"]
 processing-parallel = ["processing", "crossbeam-channel"]
-all = ["processing-parallel", "thermo2mzdb"]
+dda2dia = ["processing", "writer"]
+shrinkdia = ["processing", "writer"]
+all = ["dda2dia", "processing-parallel", "shrinkdia", "thermo2mzdb"]
 
 [[bench]]
 name = "mzdb_bench"
@@ -66,11 +66,12 @@ path = "src/main.rs"
 [[bin]]
 name = "mzdb2mgf"
 path = "src/bin/mzdb2mgf.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "mzdb2peakeldb"
 path = "src/bin/mzdb2peakeldb.rs"
-required-features = ["cli","processing"]
+required-features = ["cli","processing-parallel"]
 
 [[bin]]
 name = "dda2dia"
