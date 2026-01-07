@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use anyhow_ext::anyhow;
 
 use crate::MzDbReader;
-use crate::processing::signal::detection::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder};
+use crate::processing::signal::detection::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig};
 
 /// Isolation window definition for DIA
 #[derive(Clone, Debug)]
@@ -254,6 +254,8 @@ impl DiaMs2PeakelDetector {
 
     /// Create with custom configuration
     pub fn with_config(config: DiaMs2PeakelConfig) -> Self {
+        log::info!("DiaMs2PeakelDetector config: min_peaks={}, mz_tol={} ppm, max_gaps={}", 
+                   config.min_peaks, config.mz_tol_ppm, config.max_consecutive_gaps);
         Self { config }
     }
 
@@ -381,9 +383,13 @@ impl DiaMs2PeakelDetector {
         // Track used peaks
         let mut used_peaks: Vec<HashSet<usize>> = vec![HashSet::new(); indexed_spectra.len()];
         
-        // Create the peakel finder
+        // Create the peakel finder with the configured min_peaks
         let finder: Box<dyn PeakelFinder> = match self.config.algorithm.as_str() {
-            "smart" => Box::new(SmartPeakelFinder::new()),
+            "smart" => {
+                let mut smart_config = SmartPeakelFinderConfig::default();
+                smart_config.min_peaks_count = self.config.min_peaks;
+                Box::new(SmartPeakelFinder::with_config(smart_config))
+            },
             _ => Box::new(BasicPeakelFinder::default_params()),
         };
         

@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use anyhow_ext::{bail, Context, Result};
+use anyhow_ext::{anyhow, bail, Context, Result};
 use ordered_float::OrderedFloat;
 use rusqlite::{params, Connection};
 
@@ -469,6 +469,13 @@ struct RunSlice {
 }
 
 /// Write a simplified DIA mzDB file
+/// 
+/// This function ensures the output file has consecutive spectrum IDs starting from 1,
+/// which is required by the mzDB specification. The process:
+/// 1. Renumber MS1 spectra to be consecutive (1, 2, 3, ...)
+/// 2. Update MS1 bounding box references and blob data
+/// 3. Add new MS2 spectra with consecutive IDs after MS1
+/// 4. Create new MS2 bounding boxes with correct spectrum ID references
 fn write_simplified_dia_mzdb(
     source_mzdb_path: &str,
     simplified_spectra: &[SimplifiedSpectrum],
@@ -488,11 +495,26 @@ fn write_simplified_dia_mzdb(
     // Begin transaction for bulk operations
     conn.execute_batch("BEGIN TRANSACTION;")?;
 
-    // Delete all MS2 spectra from the original
+    // Step 1: Build mapping from old MS1 spectrum IDs to new consecutive IDs
+    let mut old_to_new_id: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id FROM spectrum WHERE ms_level = 1 ORDER BY id")?;
+        let mut rows = stmt.query([])?;
+        let mut new_id: i64 = 1;
+        while let Some(row) = rows.next()? {
+            let old_id: i64 = row.get(0)?;
+            old_to_new_id.insert(old_id, new_id);
+            new_id += 1;
+        }
+    }
+    let ms1_count = old_to_new_id.len() as i64;
+    log::info!("Found {} MS1 spectra, will renumber to 1..{}", ms1_count, ms1_count);
+
+    // Step 2: Delete all MS2 spectra
     conn.execute("DELETE FROM spectrum WHERE ms_level = 2", [])?;
     log::info!("Deleted original MS2 spectra");
 
-    // Delete MS2 bounding boxes
+    // Step 3: Delete MS2 bounding boxes
     conn.execute(
         "DELETE FROM bounding_box WHERE run_slice_id IN 
          (SELECT id FROM run_slice WHERE ms_level = 2)",
@@ -500,7 +522,7 @@ fn write_simplified_dia_mzdb(
     )?;
     log::info!("Deleted MS2 bounding boxes");
 
-    // Delete MS2 entries from R-tree if exists
+    // Step 4: Delete MS2 entries from R-tree if exists
     let has_msn_rtree: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='bounding_box_msn_rtree'",
         [],
@@ -515,8 +537,17 @@ fn write_simplified_dia_mzdb(
         log::info!("Deleted MS2 R-tree entries");
     }
 
-    // Initialize write context from database
+    // Step 5: Renumber MS1 spectra and update their bounding box references
+    if !old_to_new_id.is_empty() {
+        renumber_ms1_spectra(&conn, &old_to_new_id)?;
+        log::info!("Renumbered MS1 spectra to consecutive IDs");
+    }
+
+    // Step 6: Initialize write context - next_spectrum_id will now be ms1_count + 1
     let mut ctx = DiaWriteContext::from_connection(&conn)?;
+    // Override next_spectrum_id to ensure it starts right after MS1 spectra
+    ctx.next_spectrum_id = ms1_count + 1;
+    log::info!("New MS2 spectra will start from ID {}", ctx.next_spectrum_id);
 
     // Get run_slice mapping by m/z range
     let run_slices = get_run_slices_for_ms2(&conn)?;
@@ -732,6 +763,179 @@ fn create_bounding_box_data(
     }
 
     Ok((data, spectrum_ids, first_spectrum_id))
+}
+
+/// Renumber MS1 spectra to have consecutive IDs starting from 1
+/// 
+/// This function:
+/// 1. Updates spectrum table IDs and bb_first_spectrum_id references
+/// 2. Updates bounding_box table first_spectrum_id and last_spectrum_id
+/// 3. Updates the spectrum IDs embedded in bounding box blob data
+/// 4. Updates R-tree entries if present
+fn renumber_ms1_spectra(conn: &Connection, old_to_new: &HashMap<i64, i64>) -> Result<()> {
+    // Determine the peak size from MS1 data encoding
+    // Query the first MS1 spectrum's data encoding to get peak structure size
+    let peak_size: usize = {
+        let result: rusqlite::Result<(i64, i64, String)> = conn.query_row(
+            "SELECT de.mz_precision, de.intensity_precision, de.mode 
+             FROM data_encoding de
+             JOIN spectrum s ON s.data_encoding_id = de.id
+             WHERE s.ms_level = 1 LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        );
+        
+        match result {
+            Ok((mz_prec, int_prec, mode)) => {
+                // Calculate peak size: mz bytes + intensity bytes
+                // mz_precision is bits (32 or 64), intensity_precision is bits (32 or 64)
+                let mz_bytes = (mz_prec / 8) as usize;
+                let int_bytes = (int_prec / 8) as usize;
+                let base_size = mz_bytes + int_bytes;
+                
+                // Fitted mode adds 8 bytes (2 x f32 for left/right hwhm)
+                if mode == "FITTED" {
+                    base_size + 8
+                } else {
+                    base_size
+                }
+            }
+            Err(_) => {
+                // Default to high-res centroid: 64-bit m/z + 32-bit intensity = 12 bytes
+                log::warn!("Could not determine peak size from data encoding, defaulting to 12 bytes");
+                12
+            }
+        }
+    };
+    log::debug!("MS1 peak size: {} bytes", peak_size);
+
+    // Get all MS1 bounding boxes with their data
+    let mut bb_updates: Vec<(i64, i64, i64, Vec<u8>)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT bb.id, bb.first_spectrum_id, bb.last_spectrum_id, bb.data
+             FROM bounding_box bb
+             JOIN run_slice rs ON bb.run_slice_id = rs.id
+             WHERE rs.ms_level = 1"
+        )?;
+        
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let bb_id: i64 = row.get(0)?;
+            let old_first: i64 = row.get(1)?;
+            let old_last: i64 = row.get(2)?;
+            let blob_data: Vec<u8> = row.get(3)?;
+            
+            // Map old IDs to new IDs
+            let new_first = *old_to_new.get(&old_first)
+                .ok_or_else(|| anyhow!("Missing mapping for spectrum ID {}", old_first))?;
+            let new_last = *old_to_new.get(&old_last)
+                .ok_or_else(|| anyhow!("Missing mapping for spectrum ID {}", old_last))?;
+            
+            // Update spectrum IDs in blob data
+            let updated_blob = remap_spectrum_ids_in_blob(&blob_data, old_to_new, peak_size)?;
+            
+            bb_updates.push((bb_id, new_first, new_last, updated_blob));
+        }
+    }
+    
+    // Apply bounding box updates
+    {
+        let mut stmt = conn.prepare(
+            "UPDATE bounding_box SET first_spectrum_id = ?1, last_spectrum_id = ?2, data = ?3 WHERE id = ?4"
+        )?;
+        for (bb_id, new_first, new_last, blob_data) in &bb_updates {
+            stmt.execute(params![new_first, new_last, blob_data, bb_id])?;
+        }
+    }
+    log::info!("Updated {} MS1 bounding boxes", bb_updates.len());
+    
+    // Update spectrum table - need to do this carefully to avoid conflicts
+    // First, shift all IDs to negative (temporary) to avoid unique constraint violations
+    for (old_id, _) in old_to_new.iter() {
+        conn.execute(
+            "UPDATE spectrum SET id = -id, initial_id = -initial_id, bb_first_spectrum_id = -bb_first_spectrum_id WHERE id = ?1",
+            [old_id],
+        )?;
+    }
+    
+    // Now update to the new positive IDs (both id and initial_id)
+    for (old_id, new_id) in old_to_new.iter() {
+        let old_negative = -old_id;
+        conn.execute(
+            "UPDATE spectrum SET id = ?1, initial_id = ?1 WHERE id = ?2",
+            [new_id, &old_negative],
+        )?;
+    }
+    
+    // Update bb_first_spectrum_id references
+    for (old_id, new_id) in old_to_new.iter() {
+        let old_negative = -old_id;
+        conn.execute(
+            "UPDATE spectrum SET bb_first_spectrum_id = ?1 WHERE bb_first_spectrum_id = ?2",
+            [new_id, &old_negative],
+        )?;
+    }
+    
+    // Update MS1 R-tree entries if they exist
+    let has_ms1_rtree: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='bounding_box_rtree'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(false);
+    
+    if has_ms1_rtree {
+        // R-tree entries are keyed by bounding_box ID, not spectrum ID
+        // so they don't need updating for spectrum renumbering
+        log::debug!("MS1 R-tree exists but doesn't need spectrum ID updates");
+    }
+    
+    Ok(())
+}
+
+/// Remap spectrum IDs embedded in bounding box blob data
+/// 
+/// The blob format is: [spectrum_id (i32), peaks_count (i32), peaks...] repeated
+/// We need to update each spectrum_id to the new value.
+/// 
+/// # Arguments
+/// * `blob` - The bounding box blob data
+/// * `old_to_new` - Mapping from old spectrum IDs to new spectrum IDs
+/// * `peak_size` - Size in bytes of each peak (depends on data encoding: 8, 12, 16, or 20)
+fn remap_spectrum_ids_in_blob(blob: &[u8], old_to_new: &HashMap<i64, i64>, peak_size: usize) -> Result<Vec<u8>> {
+    let mut result = blob.to_vec();
+    let mut offset = 0;
+    
+    while offset + 8 <= result.len() {
+        // Read the spectrum_id (i32 at current position)
+        let old_id = i32::from_le_bytes([
+            result[offset],
+            result[offset + 1],
+            result[offset + 2],
+            result[offset + 3],
+        ]) as i64;
+        
+        // Read peaks_count (i32 at offset + 4)
+        let peaks_count = i32::from_le_bytes([
+            result[offset + 4],
+            result[offset + 5],
+            result[offset + 6],
+            result[offset + 7],
+        ]) as usize;
+        
+        // Map to new ID
+        if let Some(&new_id) = old_to_new.get(&old_id) {
+            let new_id_bytes = (new_id as i32).to_le_bytes();
+            result[offset..offset + 4].copy_from_slice(&new_id_bytes);
+        }
+        
+        // Move to next spectrum slice
+        // Header: 8 bytes (spectrum_id + peaks_count)
+        // Peaks: peaks_count * peak_size bytes
+        offset += 8 + peaks_count * peak_size;
+    }
+    
+    Ok(result)
 }
 
 // ============================================================================
