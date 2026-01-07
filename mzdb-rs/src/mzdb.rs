@@ -283,16 +283,40 @@ impl MzDbReader {
         &self,
         main_precursor_mz: f64,
     ) -> Result<Vec<Spectrum>> {
-        use crate::iterator::DiaSpectrumIterator;
-        
-        let iter = DiaSpectrumIterator::new(&self.connection, &self.entity_cache, main_precursor_mz)?;
-        Ok(iter.collect_vec())
+        crate::iterator::collect_dia_spectra(&self.connection, &self.entity_cache, main_precursor_mz)
+    }
+
+    /// Iterate over MS2 spectra for a DIA isolation window
+    ///
+    /// Returns a streaming iterator that efficiently loads spectra on-demand
+    /// using SQL filtering by `main_precursor_mz`. This is more memory-efficient
+    /// than `get_dia_spectra_for_window` for large isolation windows.
+    ///
+    /// # Arguments
+    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mzdb::MzDbReader;
+    /// use fallible_iterator::FallibleIterator;
+    ///
+    /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
+    /// let mut iter = reader.iter_dia_spectra(500.0).unwrap();
+    /// while let Some(spectrum) = iter.next().unwrap() {
+    ///     println!("Spectrum: {} at RT {:.2}", spectrum.header.id, spectrum.header.time);
+    /// }
+    /// ```
+    pub fn iter_dia_spectra(
+        &self,
+        main_precursor_mz: f64,
+    ) -> Result<SpectrumIterator<'_>> {
+        SpectrumIterator::new_dia(&self.connection, &self.entity_cache, main_precursor_mz)
     }
 
     /// Iterate over MS2 spectra for a DIA isolation window using a callback
     ///
-    /// This is the callback-based version of `get_dia_spectra_for_window`.
     /// Uses efficient SQL filtering by `main_precursor_mz`.
+    /// Spectra are yielded in retention time order.
     ///
     /// # Arguments
     /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
