@@ -588,16 +588,16 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     }
     
     // Add original path if available
-    if !seq_row.path.is_empty() {
-        source_params.push(("MS", "MS:1000569", "file path", &seq_row.path));
+    if !seq_row.raw_file_path.is_empty() {
+        source_params.push(("MS", "MS:1000569", "file path", &seq_row.raw_file_path));
     }
     
     let source_param_tree = build_param_tree(&source_params)?;
     
     let source_file = SourceFile {
         id: 1,
-        name: seq_row.file_name.clone(),
-        location: seq_row.path.clone(),
+        name: seq_row.raw_file_name().to_string(),
+        location: seq_row.raw_file_parent_dir.clone(),
         param_tree: source_param_tree,
         shared_param_tree_id: None,
     };

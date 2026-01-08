@@ -29,10 +29,13 @@ use mzdb::MzDbReader;
 
 /// Verify mzDB files and determine DDA/DIA acquisition type
 #[derive(Parser, Debug)]
-#[command(name = "mzdbcheck")]
-#[command(author = "mzdb-rs")]
-#[command(version = "0.3.0")]
-#[command(about = "Check mzDB files for DDA/DIA acquisition type and verify integrity", long_about = None)]
+#[command(
+    name = "mzdbcheck",
+    author,
+    version,
+    about = "Check mzDB files for DDA/DIA acquisition type and verify integrity",
+    long_about = None
+)]
 struct Args {
     /// Input mzDB file path
     #[arg(value_name = "FILE")]

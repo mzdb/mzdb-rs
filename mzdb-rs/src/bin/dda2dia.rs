@@ -29,10 +29,13 @@ use mzdb::conversion::diafication::{Dda2DiaConverter, DiaConversionOptions};
 
 /// Convert DDA mzDB files to simulated DIA format
 #[derive(Parser, Debug)]
-#[command(name = "dda2dia")]
-#[command(author = "mzdb-rs")]
-#[command(version = "0.3.0")]
-#[command(about = "Convert DDA mzDB files to simulated DIA format using detected peakels", long_about = None)]
+#[command(
+    name = "dda2dia",
+    author,
+    version,
+    about = "Convert DDA mzDB files to simulated DIA format using detected peakels",
+    long_about = None
+)]
 struct Args {
     /// Input DDA mzDB file
     #[arg(short = 'm', long = "mzdb")]

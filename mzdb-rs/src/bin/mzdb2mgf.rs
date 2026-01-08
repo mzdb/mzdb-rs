@@ -32,10 +32,13 @@ use mzdb::conversion::mgf::{MgfExportOptions, MgfWriter};
 
 /// Convert mzDB files to MGF format
 #[derive(Parser, Debug)]
-#[command(name = "mzdb2mgf")]
-#[command(author = "mzdb-rs")]
-#[command(version = "0.3.0")]
-#[command(about = "Export MS/MS spectra from mzDB to MGF format", long_about = None)]
+#[command(
+    name = "mzdb2mgf",
+    author,
+    version,
+    about = "Export MS/MS spectra from mzDB to MGF format",
+    long_about = None
+)]
 struct Args {
     /// Input mzDB file path
     #[arg(value_name = "INPUT")]

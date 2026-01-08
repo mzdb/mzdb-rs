@@ -44,10 +44,13 @@ use mzdb::processing::{
 
 /// Detect peakels from mzDB files and export to peakelDB
 #[derive(Parser, Debug)]
-#[command(name = "mzdb2peakeldb")]
-#[command(author = "mzdb-rs")]
-#[command(version = "0.3.0")]
-#[command(about = "Detect MS1 or MS2 peakels from mzDB files", long_about = None)]
+#[command(
+    name = "mzdb2peakeldb",
+    author,
+    version,
+    about = "Detect MS1 or MS2 peakels from mzDB files",
+    long_about = None
+)]
 struct Args {
     /// Path to the mzDB file
     #[arg(short = 'i', long = "input")]

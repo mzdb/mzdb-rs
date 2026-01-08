@@ -3,6 +3,7 @@ name = "mzdb-rs"
 version = "0.3.0"
 edition = "2024"
 description = "A Rust library for reading mzDB mass spectrometry files"
+authors = ["David Bouyssie", "Caroline Sancho"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mzdb/mzdb-rs"
 keywords = ["mass-spectrometry", "mzdb", "proteomics", "bioinformatics"]
@@ -82,6 +83,16 @@ required-features = ["cli","dda2dia"]
 name = "mzdbcheck"
 path = "src/bin/mzdbcheck.rs"
 required-features = ["cli"]
+
+#[command(name = "mzdb2mgf")]
+#[command(author = "David Bouyssie")]
+#[command(version = "0.3.0")]
+#[command(about = "Export MS/MS spectra from mzDB to MGF format", long_about = None)]
+
+[[bin]]
+name = "thermo2mzdb"
+path = "src/bin/thermo2mzdb.rs"
+required-features = ["cli", "thermo2mzdb"]
 
 [[bin]]
 name = "shrinkdia"

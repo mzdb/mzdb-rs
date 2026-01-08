@@ -49,7 +49,7 @@ enum MultiMatchStrategy {
 #[derive(Parser, Debug)]
 #[command(
     name = "shrinkdia",
-    author = "mzdb-rs",
+    author,
     version,
     about = "Shrink/Simplify DIA mzDB files using detected MS2 peakels",
     long_about = "This tool simplifies DIA (Data-Independent Acquisition) mzDB files by \
