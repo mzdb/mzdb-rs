@@ -6,6 +6,7 @@
 //! # Features
 //!
 //! - Direct RAW file reading without intermediate conversions
+//! - Automatic DIA/DDA acquisition mode detection
 //! - XML metadata generation from RAW file properties
 //! - Efficient spectrum data conversion
 //! - Support for MS1 and MSn data
@@ -23,11 +24,11 @@
 //!     bb_rt_width_msn: 60.0,
 //! };
 //!
+//! // Acquisition mode (DIA vs DDA) is auto-detected from the RAW file
 //! convert_raw_to_mzdb(
 //!     "input.raw",
 //!     "output.mzDB",
 //!     bb_sizes,
-//!     false, // is_dia
 //! ).unwrap();
 //! ```
 

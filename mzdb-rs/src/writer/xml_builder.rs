@@ -12,12 +12,14 @@ use xmltree::{Element, XMLNode, EmitterConfig};
 // XML Element Utilities (requires xmltree feature)
 // ============================================================================
 
-/// Write an XML element to a string without XML declaration
+/// Write an XML element to a string without XML declaration, with pretty printing
 #[cfg(feature = "xmltree")]
 pub fn element_to_string(element: &Element) -> Result<String> {
     let mut output = Vec::new();
     let config = EmitterConfig::new()
-        .write_document_declaration(false);
+        .write_document_declaration(false)
+        .perform_indent(true)
+        .indent_string("  ");
     element.write_with_config(&mut output, config)?;
     Ok(String::from_utf8(output)?)
 }

@@ -71,15 +71,39 @@ pub(crate) fn insert_spectrum(
     } else {
         // Get first m/z value and round to BB boundary
         let first_mz = sd.get_mz_at(0)?;
-        let mut cur_min_mz = ((first_mz / writer.bb_sizes.bb_mz_height_ms1).floor() as i64 as f64)
-            * writer.bb_sizes.bb_mz_height_ms1;
-        let mut cur_max_mz = cur_min_mz + mz_inc;
         
-        // For MS2 non-DIA, use full m/z range
-        if ms_level == 2 && !writer.is_dia {
-            cur_min_mz = 0.0;
-            cur_max_mz = writer.bb_sizes.bb_mz_height_msn;
-        }
+        // Calculate initial m/z bounds based on MS level and acquisition mode
+        // 
+        // The run slice partitioning strategy:
+        // - MS1: Always partition into multiple run slices based on bb_mz_height_ms1
+        // - MS2 DDA: Single run slice (fragments accessed via precursor, not fragment m/z)
+        // - MS2 DIA: Partition only if bb_mz_height_msn < MS2 detection range
+        //            (otherwise single slice is sufficient and more efficient)
+        let (mut cur_min_mz, mut cur_max_mz) = if ms_level == 1 {
+            // MS1: partition by bb_mz_height_ms1
+            let min_mz = ((first_mz / writer.bb_sizes.bb_mz_height_ms1).floor() as i64 as f64)
+                * writer.bb_sizes.bb_mz_height_ms1;
+            (min_mz, min_mz + mz_inc)
+        } else if ms_level == 2 && writer.is_dia {
+            // DIA MS2: check if partitioning is beneficial based on acquisition range
+            let ms2_range_width = writer.ms2_mz_range
+                .map(|(low, high)| high - low)
+                .unwrap_or(0.0);
+            
+            if mz_inc < ms2_range_width {
+                // Partitioning beneficial: bb_mz_height_msn < MS2 detection range
+                // Use bb_mz_height_ms1 for alignment (like mzdb4s), bb_mz_height_msn for step
+                let min_mz = ((first_mz / writer.bb_sizes.bb_mz_height_ms1).floor() as i64 as f64)
+                    * writer.bb_sizes.bb_mz_height_ms1;
+                (min_mz, min_mz + mz_inc)
+            } else {
+                // Single slice sufficient: bb_mz_height_msn >= MS2 detection range
+                (0.0, writer.bb_sizes.bb_mz_height_msn)
+            }
+        } else {
+            // DDA MS2+: use a single run_slice covering 0 to 10000
+            (0.0, 10000.0)
+        };
         
         // Check if we need to flush the current BB row
         let is_time_for_new_bb_row = writer.bb_cache.is_time_for_new_bb_row(

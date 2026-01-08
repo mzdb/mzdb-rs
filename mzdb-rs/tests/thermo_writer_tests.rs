@@ -265,7 +265,7 @@ fn test_convert_raw_to_mzdb() -> Result<()> {
     };
     
     // Convert
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     // Verify the output file exists and can be opened
     assert!(output_path.exists());
@@ -293,7 +293,7 @@ fn test_mzdb_param_tree_structure() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -327,7 +327,7 @@ fn test_run_param_tree_structure() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -366,7 +366,7 @@ fn test_spectrum_param_tree_structure() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -400,7 +400,7 @@ fn test_component_list_structure() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -435,7 +435,7 @@ fn test_spectrum_scan_list_structure() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -469,7 +469,7 @@ fn test_spectrum_precursor_list_structure() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -503,7 +503,7 @@ fn test_spectrum_count() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -548,7 +548,7 @@ fn test_bounding_box_creation() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -584,7 +584,7 @@ fn test_data_encoding_registry() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -621,7 +621,7 @@ fn test_sample_metadata() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     
@@ -663,7 +663,7 @@ fn test_xml_well_formedness() -> Result<()> {
         bb_rt_width_msn: 60.0,
     };
     
-    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes, false)?;
+    convert_raw_to_mzdb(TEST_RAW_FILE, output_path, bb_sizes)?;
     
     let conn = Connection::open(output_path)?;
     

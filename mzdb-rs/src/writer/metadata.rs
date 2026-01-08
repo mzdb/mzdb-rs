@@ -87,6 +87,9 @@ pub(crate) fn insert_metadata(
     is_dia: bool,
     mzdb_param_tree: &str,
 ) -> Result<()> {
+    // Insert controlled vocabularies (CV table)
+    insert_controlled_vocabularies(conn)?;
+    
     // Insert data processings
     insert_data_processings(conn, metadata)?;
     
@@ -110,6 +113,31 @@ pub(crate) fn insert_metadata(
     
     // Insert runs
     insert_runs(conn, metadata, is_dia)?;
+    
+    Ok(())
+}
+
+/// Insert standard controlled vocabularies into the cv table
+fn insert_controlled_vocabularies(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO cv (id, full_name, version, uri) VALUES (?, ?, ?, ?)"
+    )?;
+    
+    // PSI-MS controlled vocabulary
+    stmt.execute(rusqlite::params![
+        "MS",
+        "PSI Mass Spectrometry Ontology",
+        "4.1.131",
+        "http://purl.obolibrary.org/obo/ms/psi-ms.obo",
+    ])?;
+    
+    // Unit Ontology (UO)
+    stmt.execute(rusqlite::params![
+        "UO",
+        "Unit Ontology",
+        "2023-05-25",
+        "http://purl.obolibrary.org/obo/uo.owl",
+    ])?;
     
     Ok(())
 }
@@ -269,13 +297,15 @@ fn insert_mzdb_header(
     let mut stmt = conn.prepare("INSERT INTO mzdb VALUES (?, ?, ?, ?, ?)")?;
     
     // Create param_tree XML with BB sizes wrapped in <userParams>
+    // Using pretty-printed format with proper indentation
     let mut param_tree = format!(
-        r#"<paramTree><userParams>
-<userParam name="ms1_bb_mz_width" value="{}" type="xsd:float"/>
-<userParam name="ms1_bb_time_width" value="{}" type="xsd:float"/>
-<userParam name="msn_bb_mz_width" value="{}" type="xsd:float"/>
-<userParam name="msn_bb_time_width" value="{}" type="xsd:float"/>
-</userParams>"#,
+        r#"<paramTree>
+  <userParams>
+    <userParam name="ms1_bb_mz_width" value="{}" type="xsd:float"/>
+    <userParam name="ms1_bb_time_width" value="{}" type="xsd:float"/>
+    <userParam name="msn_bb_mz_width" value="{}" type="xsd:float"/>
+    <userParam name="msn_bb_time_width" value="{}" type="xsd:float"/>
+  </userParams>"#,
         bb_sizes.bb_mz_height_ms1,
         bb_sizes.bb_rt_width_ms1,
         bb_sizes.bb_mz_height_msn,
@@ -284,10 +314,11 @@ fn insert_mzdb_header(
     
     // Add method texts if provided (legacy instrumentMethods for backward compatibility)
     if !mzdb_param_tree.is_empty() {
+        param_tree.push('\n');
         param_tree.push_str(mzdb_param_tree);
     }
     
-    param_tree.push_str("</paramTree>");
+    param_tree.push_str("\n</paramTree>");
     
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -314,7 +345,9 @@ fn insert_runs(conn: &Connection, metadata: &WriterMetadata, is_dia: bool) -> Re
         // Insert default run
         let acquisition_mode = if is_dia { "SWATH" } else { "DDA" };
         let param_tree = format!(
-            r#"<paramTree><cvParam accession="MS:1000000" name="acquisition parameter" value="{}"/></paramTree>"#,
+            r#"<paramTree>
+  <cvParam accession="MS:1000000" name="acquisition parameter" value="{}"/>
+</paramTree>"#,
             acquisition_mode
         );
         

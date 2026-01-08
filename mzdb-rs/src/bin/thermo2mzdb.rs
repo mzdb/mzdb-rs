@@ -3,6 +3,8 @@
 //! This command-line tool converts Thermo RAW mass spectrometry files
 //! into the mzDB format, using configurable bounding box sizes.
 //!
+//! The acquisition mode (DIA vs DDA) is automatically detected from the RAW file.
+//!
 //! # Usage
 //!
 //! ```bash
@@ -63,10 +65,6 @@ struct Args {
     /// Bounding box retention time width for MSn spectra
     #[arg(long = "bb-rt-width-msn", default_value = "60.0")]
     bb_rt_width_msn: f32,
-
-    /// Disable lossless compression
-    #[arg(long = "is-dia")]
-    is_dia: bool,
 }
 
 fn main() {
@@ -82,12 +80,11 @@ fn main() {
     println!("Opening RAW file: {}", args.input.display());
     println!("Writing mzDB file: {}", args.output.display());
 
-    // TODO: create a utility to infer th raw file acquisition type (DDA vs DIA)
+    // Acquisition mode (DIA vs DDA) is auto-detected from the RAW file
     if let Err(e) = convert_raw_to_mzdb(
         &args.input,
         &args.output,
         bb_sizes,
-        args.is_dia,
     ) {
         eprintln!("Error converting RAW to mzDB: {}", e);
         process::exit(1);

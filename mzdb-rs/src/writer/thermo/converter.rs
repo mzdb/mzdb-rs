@@ -72,12 +72,15 @@ impl ConversionStats {
 
 /// Convert a Thermo RAW file to mzDB format
 ///
+/// The acquisition mode (DIA vs DDA) is automatically detected from the RAW file
+/// by examining the MS2 scan dependency flags. DIA files have MS2 scans with 
+/// dependent=false, while DDA files have MS2 scans with dependent=true.
+///
 /// # Arguments
 ///
 /// * `raw_path` - Path to the input .raw file
 /// * `mzdb_path` - Path to the output .mzDB file  
 /// * `bb_sizes` - Bounding box dimensions for spatial partitioning
-/// * `is_dia` - Whether this is DIA/SWATH data
 ///
 /// # Example
 ///
@@ -96,14 +99,12 @@ impl ConversionStats {
 ///     "input.raw",
 ///     "output.mzDB",
 ///     bb_sizes,
-///     false,
 /// ).unwrap();
 /// ```
 pub fn convert_raw_to_mzdb(
     raw_path: impl AsRef<Path>,
     mzdb_path: impl AsRef<Path>,
     bb_sizes: BBSizes,
-    is_dia: bool,
 ) -> Result<()> {
     let raw_path = raw_path.as_ref();
     let mzdb_path = mzdb_path.as_ref();
@@ -112,10 +113,20 @@ pub fn convert_raw_to_mzdb(
     let mut raw = RawFile::open(raw_path)
         .with_context(|| format!("Failed to open RAW file: {}", raw_path.display()))?;
     
+    // Auto-detect acquisition mode from the RAW file
+    let is_dia = raw.is_dia();
+    
+    // Get MS2 fragment detection range for run slice partitioning decision
+    let ms2_mz_range = raw.ms2_mz_range();
+    
     println!("Opened RAW file: {}", raw_path.display());
     println!("  Version: {}", raw.version());
     println!("  Model: {}", raw.model());
     println!("  Scans: {}", raw.num_scans());
+    println!("  Acquisition mode: {}", if is_dia { "DIA" } else { "DDA" });
+    if let Some((low, high)) = ms2_mz_range {
+        println!("  MS2 detection range: {:.2} - {:.2} m/z", low, high);
+    }
     
     // Display embedded method info if available
     if let Some(method) = raw.embedded_method() {
@@ -197,6 +208,7 @@ pub fn convert_raw_to_mzdb(
         .metadata(metadata)
         .bb_sizes(bb_sizes)
         .is_dia(is_dia)
+        .ms2_mz_range(ms2_mz_range)
         .mzdb_param_tree(mzdb_param_tree)
         .build()?;
     
@@ -371,9 +383,11 @@ fn build_run_user_texts(ms_method: Option<&str>, lc_method: Option<&str>) -> Res
     }
     
     let mut output = Vec::new();
-    // Use write_with_config to avoid XML declaration
+    // Use write_with_config to avoid XML declaration, with pretty printing
     let config = xmltree::EmitterConfig::new()
-        .write_document_declaration(false);
+        .write_document_declaration(false)
+        .perform_indent(true)
+        .indent_string("  ");
     user_texts.write_with_config(&mut output, config)?;
     Ok(String::from_utf8(output)?)
 }
@@ -397,9 +411,11 @@ fn build_mzdb_user_texts(ms_method: Option<&str>) -> Result<String> {
     }
     
     let mut output = Vec::new();
-    // Use write_inner to avoid XML declaration
+    // Use write_inner to avoid XML declaration, with pretty printing
     let config = xmltree::EmitterConfig::new()
-        .write_document_declaration(false);
+        .write_document_declaration(false)
+        .perform_indent(true)
+        .indent_string("  ");
     user_texts.write_with_config(&mut output, config)?;
     Ok(String::from_utf8(output)?)
 }

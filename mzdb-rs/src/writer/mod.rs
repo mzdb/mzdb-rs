@@ -123,6 +123,10 @@ pub struct MzDbWriter {
     /// Whether this is DIA/SWATH data
     is_dia: bool,
     
+    /// MS2 fragment detection m/z range (from acquisition parameters)
+    /// Used to determine if MS2 run slices should be partitioned
+    ms2_mz_range: Option<(f64, f64)>,
+    
     /// mzDB table param_tree (for method texts)
     mzdb_param_tree: String,
     
@@ -162,12 +166,15 @@ impl MzDbWriter {
     /// * `metadata` - Metadata for the file
     /// * `bb_sizes` - Bounding box dimensions
     /// * `is_dia` - Whether this is DIA/SWATH data
+    /// * `mzdb_param_tree` - XML param tree for mzDB metadata
+    /// * `ms2_mz_range` - Optional MS2 fragment detection range for run slice partitioning
     pub fn new(
         db_path: impl AsRef<Path>,
         metadata: WriterMetadata,
         bb_sizes: BBSizes,
         is_dia: bool,
         mzdb_param_tree: String,
+        ms2_mz_range: Option<(f64, f64)>,
     ) -> Result<Self> {
         Ok(Self {
             connection: None,
@@ -175,6 +182,7 @@ impl MzDbWriter {
             metadata,
             bb_sizes,
             is_dia,
+            ms2_mz_range,
             mzdb_param_tree,
             model_version: 0.7,
             inserted_spectra_count: 0,
@@ -266,6 +274,7 @@ impl MzDbWriter {
     /// 4. Inserts run slices
     /// 5. Creates all indexes
     /// 6. Commits the transaction
+    /// 7. Runs PRAGMA optimize for query performance
     pub fn close(mut self) -> Result<()> {
         // Flush remaining bounding boxes (needs the connection still in self)
         self.flush_all_bb_rows()?;
@@ -294,15 +303,19 @@ impl MzDbWriter {
         // Drop the connection to release the file
         drop(conn);
 
-        // Update sqlite_sequence using a fresh connection
+        // Update sqlite_sequence and run PRAGMA optimize using a fresh connection
         // Note: This must be done after commit and with a new connection.
         let seq_conn = Connection::open(&self.db_path)
-            .context("Failed to open connection for sqlite_sequence update")?;
+            .context("Failed to open connection for finalization")?;
 
         seq_conn.execute(
             "INSERT OR REPLACE INTO sqlite_sequence VALUES ('spectrum', ?1);",
             [self.inserted_spectra_count]
         ).context("Failed to update sqlite_sequence for spectrum")?;
+        
+        // Run PRAGMA optimize to analyze tables and optimize query performance
+        seq_conn.execute_batch("PRAGMA optimize;")
+            .context("Failed to run PRAGMA optimize")?;
 
         Ok(())
     }
@@ -363,6 +376,7 @@ pub struct MzDbWriterBuilder {
     metadata: Option<WriterMetadata>,
     bb_sizes: Option<BBSizes>,
     is_dia: bool,
+    ms2_mz_range: Option<(f64, f64)>,
     mzdb_param_tree: String,
 }
 
@@ -374,6 +388,7 @@ impl MzDbWriterBuilder {
             metadata: None,
             bb_sizes: None,
             is_dia: false,
+            ms2_mz_range: None,
             mzdb_param_tree: String::new(),
         }
     }
@@ -396,6 +411,15 @@ impl MzDbWriterBuilder {
         self
     }
 
+    /// Set MS2 fragment detection m/z range (for run slice partitioning)
+    /// 
+    /// If provided and bb_mz_height_msn < (high - low), DIA MS2 run slices
+    /// will be partitioned for more efficient spatial queries.
+    pub fn ms2_mz_range(mut self, range: Option<(f64, f64)>) -> Self {
+        self.ms2_mz_range = range;
+        self
+    }
+
     /// Set mzDB param_tree (for method texts, etc.)
     pub fn mzdb_param_tree(mut self, param_tree: String) -> Self {
         self.mzdb_param_tree = param_tree;
@@ -414,7 +438,7 @@ impl MzDbWriterBuilder {
                 bb_rt_width_msn: 60.0,
             });
 
-        MzDbWriter::new(self.db_path, metadata, bb_sizes, self.is_dia, self.mzdb_param_tree)
+        MzDbWriter::new(self.db_path, metadata, bb_sizes, self.is_dia, self.mzdb_param_tree, self.ms2_mz_range)
     }
 }
 
