@@ -287,19 +287,26 @@ impl MzDbWriter {
         // Create indexes
         self.create_indexes(&conn)?;
         
-        // Update sqlite_sequence before committing
-        conn.execute(
-            "INSERT OR REPLACE INTO sqlite_sequence VALUES ('spectrum', ?1);",
-            [self.inserted_spectra_count]
-        )?;
-        
-        // Commit transaction
+        // Commit transaction first
         conn.execute_batch("COMMIT TRANSACTION;")
             .context("Failed to commit transaction")?;
-        
+
+        // Drop the connection to release the file
+        drop(conn);
+
+        // Update sqlite_sequence using a fresh connection
+        // Note: This must be done after commit and with a new connection.
+        let seq_conn = Connection::open(&self.db_path)
+            .context("Failed to open connection for sqlite_sequence update")?;
+
+        seq_conn.execute(
+            "INSERT OR REPLACE INTO sqlite_sequence VALUES ('spectrum', ?1);",
+            [self.inserted_spectra_count]
+        ).context("Failed to update sqlite_sequence for spectrum")?;
+
         Ok(())
     }
-    
+
     /// Flush all cached bounding box rows
     fn flush_all_bb_rows(&mut self) -> Result<()> {
         let bb_row_keys = self.bb_cache.get_bb_row_keys();
@@ -308,7 +315,7 @@ impl MzDbWriter {
         }
         Ok(())
     }
-    
+
     /// Flush a specific bounding box row
     fn flush_bb_row(
         &mut self,
@@ -321,7 +328,7 @@ impl MzDbWriter {
             isolation_window,
         )
     }
-    
+
     /// Create all database indexes
     fn create_indexes(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
@@ -345,7 +352,7 @@ impl MzDbWriter {
              CREATE UNIQUE INDEX cv_unit_name_idx ON cv_unit (name ASC);
              CREATE INDEX spectrum_bb_first_spectrum_id_idx ON spectrum (bb_first_spectrum_id ASC);"
         ).context("Failed to create indexes")?;
-        
+
         Ok(())
     }
 }
@@ -370,31 +377,31 @@ impl MzDbWriterBuilder {
             mzdb_param_tree: String::new(),
         }
     }
-    
+
     /// Set metadata
     pub fn metadata(mut self, metadata: WriterMetadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
-    
+
     /// Set bounding box sizes
     pub fn bb_sizes(mut self, bb_sizes: BBSizes) -> Self {
         self.bb_sizes = Some(bb_sizes);
         self
     }
-    
+
     /// Set whether this is DIA data
     pub fn is_dia(mut self, is_dia: bool) -> Self {
         self.is_dia = is_dia;
         self
     }
-    
+
     /// Set mzDB param_tree (for method texts, etc.)
     pub fn mzdb_param_tree(mut self, param_tree: String) -> Self {
         self.mzdb_param_tree = param_tree;
         self
     }
-    
+
     /// Build the writer
     pub fn build(self) -> Result<MzDbWriter> {
         let metadata = self.metadata
@@ -406,7 +413,7 @@ impl MzDbWriterBuilder {
                 bb_rt_width_ms1: 5.0,
                 bb_rt_width_msn: 60.0,
             });
-        
+
         MzDbWriter::new(self.db_path, metadata, bb_sizes, self.is_dia, self.mzdb_param_tree)
     }
 }
@@ -414,14 +421,14 @@ impl MzDbWriterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_writer_builder() {
         let metadata = WriterMetadata::with_defaults();
         let builder = MzDbWriterBuilder::new("/tmp/test.mzDB")
             .metadata(metadata)
             .is_dia(false);
-        
+
         assert!(builder.build().is_ok());
     }
 }

@@ -99,6 +99,11 @@ name = "shrinkdia"
 path = "src/bin/shrinkdia.rs"
 required-features = ["cli", "shrinkdia"]
 
+[[bin]]
+name = "slicemzdb"
+path = "src/bin/slicemzdb.rs"
+required-features = ["cli"]
+
 [lib]
 name = "mzdb"
 path = "src/lib.rs"
