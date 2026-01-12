@@ -35,7 +35,7 @@ use crate::writer::{
     DiaWriteContext, DiaSpectrumParams,
     calculate_time_bounds, calculate_mz_bounds, find_base_peak,
     serialize_to_bounding_box, insert_bounding_box_data, insert_msn_rtree_entry,
-    xml_builder::{generate_ms2_param_tree_xml, generate_dia_precursor_list_xml},
+    xml_builder::{generate_ms2_param_tree_xml, generate_dia_precursor_list_xml, build_scan_list},
 };
 
 // ============================================================================
@@ -1066,6 +1066,14 @@ fn write_dia_mzdb(
             let spectrum_id = ctx.next_spectrum_id + i as i64;
 
             let param_tree = generate_ms2_param_tree_xml(spectrum.time);
+            let scan_list = build_scan_list(
+                spectrum.time as f64 / 60.0,  // Convert seconds to minutes
+                None,  // filter_string
+                None,  // ion_injection_time
+                Some("IC2"),  // instrument_config_ref for MS2
+                None,  // scan_window_lower
+                None,  // scan_window_upper
+            ).unwrap_or_default();
             let precursor_list = generate_dia_precursor_list_xml(
                 spectrum.window_center,
                 spectrum.window_max_mz - spectrum.window_center,
@@ -1099,6 +1107,7 @@ fn write_dia_mzdb(
                 precursor_mz: spectrum.window_center,
                 data_points_count: spectrum.data.mz_array.len() as i32,
                 param_tree,
+                scan_list,
                 precursor_list,
                 instr_config_id: ctx.instr_config_id,
                 source_file_id: ctx.source_file_id,

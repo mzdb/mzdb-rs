@@ -31,9 +31,49 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow_ext::anyhow;
+use roxmltree::Document;
 
 use crate::MzDbReader;
 use crate::processing::signal::detection::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig};
+
+/// Parse isolation window lower and upper offsets from precursor_list XML
+/// 
+/// Looks for cvParam elements with accessions:
+/// - MS:1000828 = "isolation window lower offset"
+/// - MS:1000829 = "isolation window upper offset"
+fn parse_isolation_window_offsets_from_xml(xml: &str) -> (Option<f64>, Option<f64>) {
+    let mut lower_offset = None;
+    let mut upper_offset = None;
+    
+    // Parse XML using roxmltree
+    let doc = match Document::parse(xml) {
+        Ok(doc) => doc,
+        Err(_) => return (None, None),
+    };
+    
+    // Find all cvParam elements and look for our target accessions
+    for node in doc.descendants() {
+        if node.tag_name().name() == "cvParam" {
+            if let Some(accession) = node.attribute("accession") {
+                if let Some(value_str) = node.attribute("value") {
+                    match accession {
+                        "MS:1000828" => {
+                            // isolation window lower offset
+                            lower_offset = value_str.parse().ok();
+                        }
+                        "MS:1000829" => {
+                            // isolation window upper offset
+                            upper_offset = value_str.parse().ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    
+    (lower_offset, upper_offset)
+}
 
 /// Isolation window definition for DIA
 #[derive(Clone, Debug)]
@@ -260,35 +300,62 @@ impl DiaMs2PeakelDetector {
     }
 
     /// Discover all isolation windows in the mzDB file
+    /// 
+    /// This method parses the actual isolation window bounds from the precursor_list XML
+    /// rather than assuming a fixed window width.
     pub fn discover_isolation_windows(&self, reader: &MzDbReader) -> Vec<IsolationWindow> {
         let headers = reader.get_spectrum_headers();
         
-        // Group MS2 spectra by precursor m/z
-        let mut window_counts: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
+        // Group MS2 spectra by precursor m/z and track actual window bounds
+        // Key: window_key (target_mz rounded to 0.1)
+        // Value: (target_mz, lower_offset, upper_offset, count)
+        let mut window_data: BTreeMap<i64, (f64, Option<f64>, Option<f64>, usize)> = BTreeMap::new();
         
         for header in headers {
             if header.ms_level == 2 {
                 if let Some(precursor_mz) = header.precursor_mz {
                     // Round to 0.1 m/z for grouping
                     let window_key = (precursor_mz * 10.0).round() as i64;
-                    let entry = window_counts.entry(window_key).or_insert((precursor_mz, 0));
-                    entry.1 += 1;
+                    
+                    // Try to parse window offsets from precursor_list XML
+                    let (lower_offset, upper_offset) = header.precursor_list_str
+                        .as_ref()
+                        .map(|xml| parse_isolation_window_offsets_from_xml(xml))
+                        .unwrap_or((None, None));
+                    
+                    let entry = window_data.entry(window_key).or_insert((precursor_mz, None, None, 0));
+                    entry.3 += 1;
+                    
+                    // Update offsets if we found them and don't have them yet
+                    if entry.1.is_none() && lower_offset.is_some() {
+                        entry.1 = lower_offset;
+                    }
+                    if entry.2.is_none() && upper_offset.is_some() {
+                        entry.2 = upper_offset;
+                    }
                 }
             }
         }
         
         // Convert to IsolationWindow structs
-        window_counts.into_iter()
+        window_data.into_iter()
             .enumerate()
-            .map(|(idx, (_key, (target_mz, count)))| {
-                // Assume standard 25 Da half-width for DIA windows
-                // This could be parsed from precursor_list XML for more accuracy
-                let half_width = 25.0;
+            .map(|(idx, (_key, (target_mz, lower_offset, upper_offset, count)))| {
+                // Use parsed offsets, or fall back to a conservative default
+                let half_width_lower = lower_offset.unwrap_or_else(|| {
+                    log::warn!("No isolation window offset found for m/z {:.1}, using default 4.0 Da", target_mz);
+                    4.0
+                });
+                let half_width_upper = upper_offset.unwrap_or_else(|| {
+                    log::warn!("No isolation window offset found for m/z {:.1}, using default 4.0 Da", target_mz);
+                    4.0
+                });
+                
                 IsolationWindow {
                     id: (idx + 1) as i64,
                     target_mz,
-                    lower_mz: target_mz - half_width,
-                    upper_mz: target_mz + half_width,
+                    lower_mz: target_mz - half_width_lower,
+                    upper_mz: target_mz + half_width_upper,
                     spectrum_count: count,
                 }
             })

@@ -299,7 +299,7 @@ fn insert_mzdb_header(
     // Create param_tree XML with BB sizes wrapped in <userParams>
     // Using pretty-printed format with proper indentation
     let mut param_tree = format!(
-        r#"<paramTree>
+        r#"<params>
   <userParams>
     <userParam name="ms1_bb_mz_width" value="{}" type="xsd:float"/>
     <userParam name="ms1_bb_time_width" value="{}" type="xsd:float"/>
@@ -318,7 +318,7 @@ fn insert_mzdb_header(
         param_tree.push_str(mzdb_param_tree);
     }
     
-    param_tree.push_str("\n</paramTree>");
+    param_tree.push_str("\n</params>");
     
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -345,9 +345,9 @@ fn insert_runs(conn: &Connection, metadata: &WriterMetadata, is_dia: bool) -> Re
         // Insert default run
         let acquisition_mode = if is_dia { "SWATH" } else { "DDA" };
         let param_tree = format!(
-            r#"<paramTree>
+            r#"<params>
   <cvParam accession="MS:1000000" name="acquisition parameter" value="{}"/>
-</paramTree>"#,
+</params>"#,
             acquisition_mode
         );
         

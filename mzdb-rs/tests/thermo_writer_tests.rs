@@ -60,10 +60,12 @@ fn validate_param_tree_structure(param_tree: &str) -> Result<()> {
     let doc = roxmltree::Document::parse(param_tree)?;
     let root = doc.root_element();
     
-    // Root should be <paramTree>
-    assert_eq!(root.tag_name().name(), "paramTree", "Root element must be <paramTree>");
+    // Root should be <params>
+    assert_eq!(root.tag_name().name(), "params", "Root element must be <params>");
     
-    // Check for valid child elements
+    // According to the official mzDB schema, <params> must only contain wrapper elements:
+    // <cvParams>, <userParams>, and/or <userTexts>
+    // Individual params must be inside these wrappers, never direct children of <params>
     for child in root.children() {
         if !child.is_element() {
             continue;
@@ -71,27 +73,27 @@ fn validate_param_tree_structure(param_tree: &str) -> Result<()> {
         
         match child.tag_name().name() {
             "cvParams" => {
-                // Validate cvParams children
+                // cvParams wrapper - validate its children
                 for cv_param in child.children().filter(|n| n.is_element()) {
-                    assert_eq!(cv_param.tag_name().name(), "cvParam");
+                    assert_eq!(cv_param.tag_name().name(), "cvParam", "cvParams child must be cvParam");
                     assert!(cv_param.attribute("accession").is_some(), "cvParam must have accession");
                 }
             }
             "userParams" => {
-                // Validate userParams children
+                // userParams wrapper - validate its children
                 for user_param in child.children().filter(|n| n.is_element()) {
-                    assert_eq!(user_param.tag_name().name(), "userParam");
+                    assert_eq!(user_param.tag_name().name(), "userParam", "userParams child must be userParam");
                     assert!(user_param.attribute("name").is_some(), "userParam must have name");
                 }
             }
             "userTexts" => {
-                // Validate userTexts children
+                // userTexts wrapper - validate its children
                 for user_text in child.children().filter(|n| n.is_element()) {
-                    assert_eq!(user_text.tag_name().name(), "userText");
+                    assert_eq!(user_text.tag_name().name(), "userText", "userTexts child must be userText");
                     assert!(user_text.attribute("name").is_some(), "userText must have name");
                 }
             }
-            _ => panic!("Unexpected child element: {}", child.tag_name().name()),
+            _ => panic!("Invalid child element in <params>: '{}'. Only <cvParams>, <userParams>, and <userTexts> wrapper elements are allowed per mzDB schema.", child.tag_name().name()),
         }
     }
     
@@ -161,9 +163,14 @@ fn validate_scan_list_structure(scan_list: &str) -> Result<()> {
             }
             "scan" => {
                 has_scan = true;
-                // Scan should have cvParam children
+                // Scan can have cvParam and scanWindowList children
                 for scan_child in child.children().filter(|n| n.is_element()) {
-                    assert_eq!(scan_child.tag_name().name(), "cvParam");
+                    let child_name = scan_child.tag_name().name();
+                    assert!(
+                        child_name == "cvParam" || child_name == "scanWindowList",
+                        "scan child must be cvParam or scanWindowList, found: {}",
+                        child_name
+                    );
                 }
             }
             _ => {}

@@ -386,17 +386,19 @@ fn activation_type_to_cv(activation_type: &str) -> (&'static str, &'static str) 
 /// Generate param_tree XML for a DIA/simplified spectrum
 /// 
 /// Creates a minimal param_tree with MS level 2, MSn spectrum type,
-/// centroid mode, and scan start time.
+/// centroid mode, and scan start time, following the official mzDB schema.
 ///
 /// # Arguments
 /// * `time_seconds` - Retention time in seconds (will be converted to minutes)
 pub fn generate_ms2_param_tree_xml(time_seconds: f32) -> String {
     format!(
         r#"<params>
-  <cvParam cvRef="MS" accession="MS:1000511" value="2" name="ms level"/>
-  <cvParam cvRef="MS" accession="MS:1000580" value="" name="MSn spectrum"/>
-  <cvParam cvRef="MS" accession="MS:1000127" value="" name="centroid spectrum"/>
-  <cvParam cvRef="MS" accession="MS:1000016" value="{:.4}" name="scan start time" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+  <cvParams>
+    <cvParam cvRef="MS" accession="MS:1000511" value="2" name="ms level"/>
+    <cvParam cvRef="MS" accession="MS:1000580" value="" name="MSn spectrum"/>
+    <cvParam cvRef="MS" accession="MS:1000127" value="" name="centroid spectrum"/>
+    <cvParam cvRef="MS" accession="MS:1000016" value="{:.4}" name="scan start time" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+  </cvParams>
 </params>"#,
         time_seconds / 60.0
     )

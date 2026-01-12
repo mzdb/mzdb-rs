@@ -99,9 +99,11 @@ struct PeakelDataPoint {
     isolation_upper: f64,
 }
 
-/// A reconstructed simplified spectrum
+/// A reconstructed simplified spectrum (1-to-1 with original spectrum)
 #[derive(Debug, Clone)]
 pub struct SimplifiedSpectrum {
+    /// Original spectrum ID (for metadata lookup)
+    pub original_spectrum_id: i64,
     /// Cycle number
     pub cycle: i32,
     /// Retention time
@@ -118,12 +120,14 @@ pub struct SimplifiedSpectrum {
     pub intensity_array: Vec<f32>,
 }
 
-/// Spectrum header information (minimal)
+/// Spectrum header information with metadata
 #[derive(Debug, Clone)]
 pub struct SpectrumHeader {
     pub id: i64,
     pub cycle: i32,
     pub time: f32,
+    pub param_tree: Option<String>,
+    pub scan_list: Option<String>,
 }
 
 // Note: PeakelDbReader is now available as Ms2PeakelDbReader from peakeldb module
@@ -180,42 +184,68 @@ impl DiaSimplifier {
         log::info!("Checking for staggered DIA acquisition...");
         let stagger_info = detect_staggered_from_mzdb(&mzdb_conn)?;
         
-        let (staggered_detected, staggered_offset, unstaggered_window_count) = if stagger_info.is_staggered {
-            log::info!("╔══════════════════════════════════════════════════════════════╗");
-            log::info!("║              STAGGERED DIA DETECTED                          ║");
-            log::info!("╠══════════════════════════════════════════════════════════════╣");
-            log::info!("║  Window offset: {:.2} Da                                      ", stagger_info.window_offset);
-            log::info!("║  Window width:  {:.2} Da                                      ", stagger_info.window_width);
-            log::info!("║  Cycle A windows (odd):  {}                                   ", stagger_info.cycle_a_windows.len());
-            log::info!("║  Cycle B windows (even): {}                                   ", stagger_info.cycle_b_windows.len());
-            log::info!("║  Unstaggered windows:    {}                                   ", stagger_info.unstaggered_windows.len());
-            log::info!("╚══════════════════════════════════════════════════════════════╝");
-            
-            // Log sample windows
-            if !stagger_info.cycle_a_windows.is_empty() {
-                let sample_a: Vec<_> = stagger_info.cycle_a_windows.iter().take(5).map(|w| format!("{:.1}", w.target_mz)).collect();
-                log::info!("  Cycle A sample: {} ...", sample_a.join(", "));
-            }
-            if !stagger_info.cycle_b_windows.is_empty() {
-                let sample_b: Vec<_> = stagger_info.cycle_b_windows.iter().take(5).map(|w| format!("{:.1}", w.target_mz)).collect();
-                log::info!("  Cycle B sample: {} ...", sample_b.join(", "));
-            }
-            if !stagger_info.unstaggered_windows.is_empty() {
-                let sample_u: Vec<_> = stagger_info.unstaggered_windows.iter().take(5).map(|w| format!("{:.1}-{:.1}", w.lower_mz, w.upper_mz)).collect();
-                log::info!("  Unstaggered sample: {} ...", sample_u.join(", "));
-            }
-            
-            (true, stagger_info.window_offset, stagger_info.unstaggered_windows.len())
-        } else {
-            log::info!("Standard (non-staggered) DIA mode");
-            (false, 0.0, 0)
-        };
-
-        // Build isolation window lookup
-        let window_lookup: HashMap<i64, IsolationWindow> = isolation_windows
-            .into_iter()
-            .map(|w| (w.id, w))
-            .collect();
+        // Build isolation window lookup - use unstaggered windows if staggered DIA detected
+        let (window_lookup, staggered_detected, staggered_offset, unstaggered_window_count) = 
+            if stagger_info.is_staggered {
+                log::info!("╔══════════════════════════════════════════════════════════════╗");
+                log::info!("║              STAGGERED DIA DETECTED                          ║");
+                log::info!("╠══════════════════════════════════════════════════════════════╣");
+                log::info!("║  Window offset: {:.2} Da                                      ", stagger_info.window_offset);
+                log::info!("║  Window width:  {:.2} Da                                      ", stagger_info.window_width);
+                log::info!("║  Cycle A windows (odd):  {}                                   ", stagger_info.cycle_a_windows.len());
+                log::info!("║  Cycle B windows (even): {}                                   ", stagger_info.cycle_b_windows.len());
+                log::info!("║  Unstaggered windows:    {}                                   ", stagger_info.unstaggered_windows.len());
+                log::info!("╚══════════════════════════════════════════════════════════════╝");
+                
+                // Log sample windows
+                if !stagger_info.cycle_a_windows.is_empty() {
+                    let sample_a: Vec<_> = stagger_info.cycle_a_windows.iter().take(5).map(|w| format!("{:.1}", w.target_mz)).collect();
+                    log::info!("  Cycle A sample: {} ...", sample_a.join(", "));
+                }
+                if !stagger_info.cycle_b_windows.is_empty() {
+                    let sample_b: Vec<_> = stagger_info.cycle_b_windows.iter().take(5).map(|w| format!("{:.1}", w.target_mz)).collect();
+                    log::info!("  Cycle B sample: {} ...", sample_b.join(", "));
+                }
+                if !stagger_info.unstaggered_windows.is_empty() {
+                    let sample_u: Vec<_> = stagger_info.unstaggered_windows.iter().take(5).map(|w| format!("{:.1}-{:.1}", w.lower_mz, w.upper_mz)).collect();
+                    log::info!("  Unstaggered sample: {} ...", sample_u.join(", "));
+                }
+                
+                // Build a lookup from original window ID to the unstaggered window that best matches it
+                // We match by checking which unstaggered window contains the original window's target m/z
+                let window_lookup: HashMap<i64, IsolationWindow> = isolation_windows
+                    .iter()
+                    .filter_map(|orig_win| {
+                        // Find the unstaggered window that contains this original window's target m/z
+                        for unstag_win in &stagger_info.unstaggered_windows {
+                            // Use slightly relaxed bounds for matching (0.1 Da tolerance)
+                            if orig_win.target_mz >= unstag_win.lower_mz - 0.1 
+                               && orig_win.target_mz <= unstag_win.upper_mz + 0.1 {
+                                return Some((orig_win.id, IsolationWindow {
+                                    id: orig_win.id, // Keep original ID for peakel lookup
+                                    target_mz: unstag_win.center_mz,
+                                    lower_mz: unstag_win.lower_mz,
+                                    upper_mz: unstag_win.upper_mz,
+                                    spectrum_count: orig_win.spectrum_count,
+                                }));
+                            }
+                        }
+                        // Fallback: use original window if no unstaggered mapping found
+                        log::warn!("No unstaggered window found for original window {} (m/z {:.2})", 
+                                   orig_win.id, orig_win.target_mz);
+                        Some((orig_win.id, orig_win.clone()))
+                    })
+                    .collect();
+                
+                (window_lookup, true, stagger_info.window_offset, stagger_info.unstaggered_windows.len())
+            } else {
+                log::info!("Standard (non-staggered) DIA mode");
+                let window_lookup: HashMap<i64, IsolationWindow> = isolation_windows
+                    .into_iter()
+                    .map(|w| (w.id, w))
+                    .collect();
+                (window_lookup, false, 0.0, 0)
+            };
 
         // Read peakels
         log::info!("Reading peakels...");
@@ -229,10 +259,10 @@ impl DiaSimplifier {
         let original_ms2_count = ms2_headers.len();
         log::info!("Found {} MS2 spectra", original_ms2_count);
 
-        // Build spectrum_id -> (cycle, time) lookup
-        let spectrum_info: HashMap<i64, (i32, f32)> = ms2_headers
+        // Build spectrum_id -> header lookup
+        let spectrum_info: HashMap<i64, &SpectrumHeader> = ms2_headers
             .iter()
-            .map(|h| (h.id, (h.cycle, h.time)))
+            .map(|h| (h.id, h))
             .collect();
 
         // Extract data points from peakels
@@ -259,6 +289,7 @@ impl DiaSimplifier {
             mzdb_path,
             &simplified_spectra,
             output_path,
+            &ms2_headers,
         )?;
 
         let stats = SimplificationStats {
@@ -311,10 +342,10 @@ pub struct SimplificationStats {
 // Core Processing Functions
 // ============================================================================
 
-/// Get MS2 spectrum headers (id, cycle, time)
+/// Get MS2 spectrum headers with metadata
 fn get_ms2_spectrum_headers(conn: &Connection) -> Result<Vec<SpectrumHeader>> {
     let mut stmt = conn.prepare(
-        "SELECT id, cycle, time
+        "SELECT id, cycle, time, param_tree, scan_list
          FROM spectrum
          WHERE ms_level = 2
          ORDER BY id",
@@ -325,6 +356,8 @@ fn get_ms2_spectrum_headers(conn: &Connection) -> Result<Vec<SpectrumHeader>> {
             id: row.get(0)?,
             cycle: row.get(1)?,
             time: row.get(2)?,
+            param_tree: row.get(3)?,
+            scan_list: row.get(4)?,
         })
     })?;
 
@@ -392,7 +425,7 @@ fn extract_peakel_data_points(
 /// Group data points into simplified spectra
 fn group_into_spectra(
     data_points: Vec<PeakelDataPoint>,
-    spectrum_info: &HashMap<i64, (i32, f32)>,
+    spectrum_info: &HashMap<i64, &SpectrumHeader>,
     mz_merge_tolerance: f64,
 ) -> Vec<SimplifiedSpectrum> {
     // Group by (spectrum_id, precursor_mz)
@@ -427,17 +460,18 @@ fn group_into_spectra(
             }
         }
 
-        // Get cycle and time from spectrum info
-        let (cycle, time) = match spectrum_info.get(&spectrum_id) {
-            Some(&info) => info,
+        // Get header info including metadata
+        let header = match spectrum_info.get(&spectrum_id) {
+            Some(&h) => h,
             None => continue,
         };
 
         let first_point = &points[0];
 
         spectra.push(SimplifiedSpectrum {
-            cycle,
-            time,
+            original_spectrum_id: spectrum_id,
+            cycle: header.cycle,
+            time: header.time,
             precursor_mz: first_point.precursor_mz,
             isolation_lower: first_point.isolation_lower,
             isolation_upper: first_point.isolation_upper,
@@ -480,6 +514,7 @@ fn write_simplified_dia_mzdb(
     source_mzdb_path: &str,
     simplified_spectra: &[SimplifiedSpectrum],
     output_path: &Path,
+    original_headers: &[SpectrumHeader],
 ) -> Result<()> {
     // Copy the original database as a starting point
     std::fs::copy(source_mzdb_path, output_path)
@@ -552,6 +587,14 @@ fn write_simplified_dia_mzdb(
     // Get run_slice mapping by m/z range
     let run_slices = get_run_slices_for_ms2(&conn)?;
     log::info!("Found {} MS2 run slices", run_slices.len());
+    
+    // Build lookup from original spectrum_id to its metadata
+    // Each simplified spectrum corresponds 1-to-1 with an original spectrum
+    let mut spectrum_metadata: HashMap<i64, &SpectrumHeader> = HashMap::new();
+    for header in original_headers {
+        spectrum_metadata.insert(header.id, header);
+    }
+    log::info!("Built metadata lookup for {} spectra", spectrum_metadata.len());
 
     // Group simplified spectra by run_slice (isolation window)
     let mut spectra_by_run_slice: HashMap<i64, Vec<&SimplifiedSpectrum>> =
@@ -592,11 +635,57 @@ fn write_simplified_dia_mzdb(
         for (i, spectrum) in spectra.iter().enumerate() {
             let spectrum_id = spectrum_ids[i];
 
-            // Generate XML metadata
-            let param_tree = generate_ms2_param_tree_xml(spectrum.time);
-            // scan_list expects time in minutes, spectrum.time is in seconds
-            let scan_list = build_scan_list(spectrum.time as f64 / 60.0)
-                .unwrap_or_default();
+            // Look up original metadata using the 1-to-1 mapping
+            let original_header = spectrum_metadata.get(&spectrum.original_spectrum_id);
+            
+            // Preserve original param_tree and scan_list if available
+            let (param_tree, scan_list) = if let Some(header) = original_header {
+                // We have the original header - use its metadata
+                
+                // param_tree: Use original if present, else generate
+                let param_tree = header.param_tree.clone()
+                    .unwrap_or_else(|| {
+                        // Fallback only if original had NULL param_tree
+                        generate_ms2_param_tree_xml(spectrum.time)
+                    });
+                
+                // scan_list: Use original if present, else generate
+                let scan_list = header.scan_list.clone()
+                    .unwrap_or_else(|| {
+                        // Fallback only if original had NULL scan_list
+                        build_scan_list(
+                            spectrum.time as f64 / 60.0,
+                            None,  // filter_string
+                            None,  // ion_injection_time  
+                            Some("IC2"),  // instrument_config_ref for MS2
+                            None,  // scan_window_lower
+                            None,  // scan_window_upper
+                        ).unwrap_or_default()
+                    });
+                
+                (param_tree, scan_list)
+            } else {
+                // No original header found (should rarely happen - data integrity issue)
+                log::warn!("No original metadata found for spectrum ID {}", spectrum.original_spectrum_id);
+                
+                // Generate fresh metadata as last resort
+                let param_tree = generate_ms2_param_tree_xml(spectrum.time);
+                let scan_list = build_scan_list(
+                    spectrum.time as f64 / 60.0,
+                    None,
+                    None,
+                    Some("IC2"),
+                    None,
+                    None,
+                ).unwrap_or_default();
+                
+                (param_tree, scan_list)
+            };
+            
+            // Generate precursor_list
+            // The unstaggered windows from StaggeredDiaDetector are already half-width
+            // (created by sweep line algorithm that finds non-overlapping segments),
+            // so we can use them directly without further adjustment
             let precursor_list = generate_dia_precursor_list_xml_asymmetric(
                 spectrum.precursor_mz,
                 spectrum.isolation_lower,
@@ -968,6 +1057,7 @@ mod tests {
     #[test]
     fn test_simplified_spectrum() {
         let spectrum = SimplifiedSpectrum {
+            original_spectrum_id: 42,
             cycle: 1,
             time: 100.0,
             precursor_mz: 500.0,
@@ -977,6 +1067,7 @@ mod tests {
             intensity_array: vec![1000.0, 2000.0, 1500.0],
         };
 
+        assert_eq!(spectrum.original_spectrum_id, 42);
         assert_eq!(spectrum.cycle, 1);
         assert_eq!(spectrum.mz_array.len(), 3);
         assert_eq!(spectrum.intensity_array.len(), 3);
