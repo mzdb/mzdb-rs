@@ -7,8 +7,7 @@
 //! # Features
 //!
 //! - Preserves all metadata (run_slice table, instrument configuration, etc.)
-//! - Renumbers spectrum IDs sequentially starting from 1
-//! - Preserves initial_id to track original spectrum IDs
+//! - Keeps original spectrum IDs (no renumbering for simplicity and correctness)
 //! - Filters bounding boxes: removes those completely outside the range,
 //!   updates those partially inside to only contain relevant slices
 //! - Updates R-tree entries accordingly
@@ -18,10 +17,9 @@
 //! The tool uses an efficient copy-then-modify approach:
 //! 1. Copy the entire mzDB file (fast sequential I/O)
 //! 2. Delete spectra outside the range
-//! 3. Renumber remaining spectrum IDs
-//! 4. Update bounding box blobs to remove out-of-range slices
-//! 5. Delete empty bounding boxes and their R-tree entries
-//! 6. VACUUM to reclaim space
+//! 3. Update bounding box blobs to remove out-of-range slices
+//! 4. Delete empty bounding boxes and their R-tree entries
+//! 5. VACUUM to reclaim space
 //!
 //! # Usage
 //!
@@ -33,7 +31,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process;
 
-use anyhow_ext::{anyhow, Context, Result};
+use anyhow_ext::{Context, Result};
 use clap::Parser;
 use rusqlite::{params, Connection};
 
@@ -139,9 +137,10 @@ struct SliceStats {
 ///
 /// Uses an efficient copy-then-modify approach:
 /// 1. Copy the file
-/// 2. Delete out-of-range data
-/// 3. Renumber IDs
-/// 4. VACUUM
+/// 2. Delete out-of-range spectra and bounding boxes
+/// 3. Update bounding box blobs with new spectrum IDs
+/// 4. Renumber spectrum IDs to start from 1
+/// 5. VACUUM
 fn slice_mzdb(
     input_path: &str,
     output_path: &str,
@@ -202,7 +201,7 @@ fn slice_mzdb(
     if stats.sliced_spectrum_count == 0 {
         // Clean up the copied file
         std::fs::remove_file(output_path).ok();
-        return Err(anyhow!("No spectra found in the specified ID range"));
+        return Err(anyhow_ext::anyhow!("No spectra found in the specified ID range"));
     }
 
     log::info!("Spectra to keep: {}", stats.sliced_spectrum_count);
@@ -210,78 +209,44 @@ fn slice_mzdb(
     // Begin transaction for all modifications
     conn.execute("BEGIN TRANSACTION", [])?;
 
-    // Step 2: Build ID mapping (old_id -> new_id)
-    log::info!("Building spectrum ID mapping...");
-    let id_mapping = build_spectrum_id_mapping(&conn, min_id, max_id)?;
-
-    // Step 3: Build data encoding cache for bounding box processing
+    // Step 2: Build data encoding cache for bounding box processing
     log::info!("Building data encoding cache...");
     let data_encoding_cache = build_data_encoding_cache(&conn)?;
 
-    // Step 4: Process bounding boxes - update blobs and track which to delete
+    // Step 3: Process bounding boxes - filter blobs and delete out-of-range
     log::info!("Processing bounding boxes...");
-    let bb_stats = process_bounding_boxes_inplace(&conn, min_id, max_id, &id_mapping, &data_encoding_cache)?;
+    let bb_stats = process_bounding_boxes(&conn, min_id, max_id, &data_encoding_cache)?;
     stats.sliced_bb_count = bb_stats.kept;
     stats.removed_bb_count = bb_stats.removed;
     stats.updated_bb_count = bb_stats.updated;
 
-    // Step 5: Delete out-of-range spectra
+    // Step 4: Delete out-of-range spectra
     log::info!("Deleting out-of-range spectra...");
     conn.execute(
         "DELETE FROM spectrum WHERE id < ?1 OR id > ?2",
         params![min_id, max_id],
     )?;
 
-    // Step 6: Renumber spectrum IDs and update references
-    log::info!("Renumbering spectrum IDs...");
-    renumber_spectra(&conn, &id_mapping)?;
-
-    // Step 7: Update sqlite_sequence
+    // Step 5: Fix bb_first_spectrum_id references that point to deleted spectra
+    log::info!("Fixing orphaned bb_first_spectrum_id references...");
     conn.execute(
-        "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'spectrum'",
-        [stats.sliced_spectrum_count],
-    )?;
-    conn.execute(
-        "UPDATE sqlite_sequence SET seq = ?1 WHERE name = 'bounding_box'",
-        [stats.sliced_bb_count],
+        "UPDATE spectrum SET bb_first_spectrum_id = id 
+         WHERE bb_first_spectrum_id NOT IN (SELECT id FROM spectrum)",
+        [],
     )?;
 
     // Commit transaction
     conn.execute("COMMIT", [])?;
 
-    // Step 8: VACUUM to reclaim space and defragment
+    // Step 6: VACUUM to reclaim space and defragment
     log::info!("Vacuuming database...");
     conn.execute("VACUUM", [])?;
 
-    // Step 9: Optimize
+    // Step 7: Optimize
     log::info!("Optimizing database...");
     conn.execute("PRAGMA optimize", [])?;
 
     Ok(stats)
-}
-
-/// Build a mapping from old spectrum IDs to new (renumbered) IDs
-fn build_spectrum_id_mapping(
-    conn: &Connection,
-    min_id: i64,
-    max_id: i64,
-) -> Result<HashMap<i64, i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM spectrum WHERE id >= ?1 AND id <= ?2 ORDER BY id"
-    )?;
-
-    let old_ids: Vec<i64> = stmt
-        .query_map(params![min_id, max_id], |row| row.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    let mapping: HashMap<i64, i64> = old_ids
-        .into_iter()
-        .enumerate()
-        .map(|(new_idx, old_id)| (old_id, (new_idx as i64) + 1))
-        .collect();
-
-    Ok(mapping)
 }
 
 /// Build a cache of data encoding info (spectrum_id -> peak_size)
@@ -335,23 +300,14 @@ struct BoundingBoxStats {
     updated: i64,
 }
 
-/// Process bounding boxes in-place: update blobs, delete empty ones, update R-trees
-fn process_bounding_boxes_inplace(
+/// Process bounding boxes: update partially-overlapping blobs, delete out-of-range ones
+fn process_bounding_boxes(
     conn: &Connection,
     min_id: i64,
     max_id: i64,
-    id_mapping: &HashMap<i64, i64>,
     data_encoding_cache: &HashMap<i64, usize>,
 ) -> Result<BoundingBoxStats> {
     let mut stats = BoundingBoxStats::default();
-
-    // First, count bounding boxes completely outside the range (these will be deleted)
-    let outside_range_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM bounding_box WHERE last_spectrum_id < ?1 OR first_spectrum_id > ?2",
-        params![min_id, max_id],
-        |row| row.get(0),
-    )?;
-    stats.removed = outside_range_count;
 
     // Get all bounding boxes that overlap with our spectrum range
     let mut bb_stmt = conn.prepare(
@@ -374,53 +330,93 @@ fn process_bounding_boxes_inplace(
         "UPDATE bounding_box SET data = ?1, first_spectrum_id = ?2, last_spectrum_id = ?3 WHERE id = ?4"
     )?;
 
-    // Track which bounding boxes to keep (with their new IDs)
-    let mut bb_id_mapping: HashMap<i64, i64> = HashMap::new();
-    let mut new_bb_id: i64 = 0;
+    // Track which bounding boxes to keep
+    let mut kept_bb_ids: Vec<i64> = Vec::new();
 
-    for (old_bb_id, blob_data, _first_spec, _last_spec) in &bounding_boxes {
-        // Filter the bounding box blob
-        let result = filter_bounding_box_slices(
-            blob_data,
-            min_id,
-            max_id,
-            id_mapping,
-            data_encoding_cache,
-        )?;
+    for (bb_id, blob_data, first_spec, last_spec) in &bounding_boxes {
+        // Check if this BB needs filtering (partially overlaps) or can be kept as-is
+        let fully_contained = *first_spec >= min_id && *last_spec <= max_id;
+        
+        if fully_contained {
+            // BB is fully within range, keep as-is
+            kept_bb_ids.push(*bb_id);
+            stats.kept += 1;
+        } else {
+            // BB partially overlaps, need to filter the blob
+            let result = filter_bounding_box_slices(
+                blob_data,
+                min_id,
+                max_id,
+                data_encoding_cache,
+            )?;
 
-        if result.filtered_blob.is_empty() {
-            stats.removed += 1;
-            continue;
-        }
+            if result.filtered_blob.is_empty() {
+                // All slices were outside range
+                stats.removed += 1;
+                continue;
+            }
 
-        new_bb_id += 1;
-        bb_id_mapping.insert(*old_bb_id, new_bb_id);
-
-        if result.was_updated {
+            kept_bb_ids.push(*bb_id);
+            stats.kept += 1;
             stats.updated += 1;
-        }
-        stats.kept += 1;
 
-        // Update the bounding box in place
-        update_stmt.execute(params![
-            result.filtered_blob,
-            result.new_first_spectrum_id,
-            result.new_last_spectrum_id,
-            old_bb_id,
-        ])?;
+            // Update the bounding box with filtered data
+            update_stmt.execute(params![
+                result.filtered_blob,
+                result.new_first_spectrum_id,
+                result.new_last_spectrum_id,
+                bb_id,
+            ])?;
+        }
     }
 
     drop(update_stmt);
     drop(bb_stmt);
 
-    // Delete bounding boxes that are completely outside the range
+    // Delete bounding boxes that don't overlap with range at all
     log::info!("Deleting out-of-range bounding boxes...");
     conn.execute(
         "DELETE FROM bounding_box WHERE last_spectrum_id < ?1 OR first_spectrum_id > ?2",
         params![min_id, max_id],
     )?;
+    
+    // Also delete BBs that were processed but ended up empty
+    if !kept_bb_ids.is_empty() {
+        conn.execute(
+            "CREATE TEMP TABLE kept_bb_ids (id INTEGER PRIMARY KEY)",
+            [],
+        )?;
+        
+        {
+            let mut insert_stmt = conn.prepare(
+                "INSERT INTO kept_bb_ids (id) VALUES (?1)"
+            )?;
+            for bb_id in &kept_bb_ids {
+                insert_stmt.execute(params![bb_id])?;
+            }
+        }
+        
+        // Delete overlapping BBs that we didn't keep (their blobs became empty)
+        let additional_removed: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM bounding_box 
+             WHERE last_spectrum_id >= ?1 AND first_spectrum_id <= ?2
+             AND id NOT IN (SELECT id FROM kept_bb_ids)",
+            params![min_id, max_id],
+            |row| row.get(0),
+        )?;
+        stats.removed += additional_removed;
+        
+        conn.execute(
+            "DELETE FROM bounding_box 
+             WHERE last_spectrum_id >= ?1 AND first_spectrum_id <= ?2
+             AND id NOT IN (SELECT id FROM kept_bb_ids)",
+            params![min_id, max_id],
+        )?;
+        
+        conn.execute("DROP TABLE kept_bb_ids", [])?;
+    }
 
-    // Delete orphaned R-tree entries
+    // Clean up R-tree entries
     log::info!("Cleaning up R-tree entries...");
     conn.execute(
         "DELETE FROM bounding_box_rtree WHERE id NOT IN (SELECT id FROM bounding_box)",
@@ -441,10 +437,6 @@ fn process_bounding_boxes_inplace(
         )?;
     }
 
-    // Now renumber bounding box IDs
-    log::info!("Renumbering bounding box IDs...");
-    renumber_bounding_boxes(conn, &bb_id_mapping)?;
-
     Ok(stats)
 }
 
@@ -453,7 +445,6 @@ struct FilteredBoundingBox {
     filtered_blob: Vec<u8>,
     new_first_spectrum_id: i64,
     new_last_spectrum_id: i64,
-    was_updated: bool,
 }
 
 /// Filter bounding box slices to only include those in the spectrum ID range
@@ -461,14 +452,11 @@ fn filter_bounding_box_slices(
     blob_data: &[u8],
     min_id: i64,
     max_id: i64,
-    id_mapping: &HashMap<i64, i64>,
     peak_size_cache: &HashMap<i64, usize>,
 ) -> Result<FilteredBoundingBox> {
     let mut filtered_blob = Vec::new();
     let mut new_first_id: Option<i64> = None;
     let mut new_last_id: Option<i64> = None;
-    let mut total_slices = 0;
-    let mut kept_slices = 0;
 
     let mut pos = 0;
     let n_bytes = blob_data.len();
@@ -494,8 +482,6 @@ fn filter_bounding_box_slices(
             blob_data[pos + 7],
         ]) as usize;
 
-        total_slices += 1;
-
         // Get peak size for this spectrum
         let peak_size = peak_size_cache
             .get(&spectrum_id)
@@ -507,24 +493,15 @@ fn filter_bounding_box_slices(
 
         // Check if this spectrum is in our range
         if spectrum_id >= min_id && spectrum_id <= max_id {
-            // Get the new spectrum ID from mapping
-            if let Some(&new_spec_id) = id_mapping.get(&spectrum_id) {
-                // Update first/last IDs
-                if new_first_id.is_none() {
-                    new_first_id = Some(new_spec_id);
-                }
-                new_last_id = Some(new_spec_id);
+            // Update first/last IDs
+            if new_first_id.is_none() {
+                new_first_id = Some(spectrum_id);
+            }
+            new_last_id = Some(spectrum_id);
 
-                kept_slices += 1;
-
-                // Write the slice with new spectrum ID
-                filtered_blob.extend_from_slice(&(new_spec_id as i32).to_le_bytes());
-                filtered_blob.extend_from_slice(&(peak_count as i32).to_le_bytes());
-
-                // Copy peak data as-is
-                if slice_end <= n_bytes {
-                    filtered_blob.extend_from_slice(&blob_data[pos + 8..slice_end]);
-                }
+            // Copy the entire slice as-is (no ID remapping)
+            if slice_end <= n_bytes {
+                filtered_blob.extend_from_slice(&blob_data[pos..slice_end]);
             }
         }
 
@@ -535,117 +512,5 @@ fn filter_bounding_box_slices(
         filtered_blob,
         new_first_spectrum_id: new_first_id.unwrap_or(0),
         new_last_spectrum_id: new_last_id.unwrap_or(0),
-        was_updated: kept_slices != total_slices,
     })
-}
-
-/// Renumber spectrum IDs in place
-fn renumber_spectra(conn: &Connection, id_mapping: &HashMap<i64, i64>) -> Result<()> {
-    // Create a temporary table with the mapping
-    conn.execute(
-        "CREATE TEMP TABLE id_map (old_id INTEGER PRIMARY KEY, new_id INTEGER)",
-        [],
-    )?;
-
-    {
-        let mut insert_stmt = conn.prepare(
-            "INSERT INTO id_map (old_id, new_id) VALUES (?1, ?2)"
-        )?;
-
-        for (old_id, new_id) in id_mapping {
-            insert_stmt.execute(params![old_id, new_id])?;
-        }
-    }
-
-    // Update spectrum IDs using the mapping
-    // First, use negative IDs to avoid conflicts
-    conn.execute(
-        "UPDATE spectrum SET id = -(SELECT new_id FROM id_map WHERE old_id = spectrum.id)",
-        [],
-    )?;
-
-    // Then make them positive
-    conn.execute("UPDATE spectrum SET id = -id", [])?;
-
-    // Update bb_first_spectrum_id references
-    conn.execute(
-        "UPDATE spectrum SET bb_first_spectrum_id = (
-            SELECT new_id FROM id_map WHERE old_id = spectrum.bb_first_spectrum_id
-        ) WHERE bb_first_spectrum_id IN (SELECT old_id FROM id_map)",
-        [],
-    )?;
-
-    // Drop the temporary table
-    conn.execute("DROP TABLE id_map", [])?;
-
-    Ok(())
-}
-
-/// Renumber bounding box IDs in place
-fn renumber_bounding_boxes(conn: &Connection, bb_id_mapping: &HashMap<i64, i64>) -> Result<()> {
-    if bb_id_mapping.is_empty() {
-        return Ok(());
-    }
-
-    // Create a temporary table with the mapping
-    conn.execute(
-        "CREATE TEMP TABLE bb_id_map (old_id INTEGER PRIMARY KEY, new_id INTEGER)",
-        [],
-    )?;
-
-    {
-        let mut insert_stmt = conn.prepare(
-            "INSERT INTO bb_id_map (old_id, new_id) VALUES (?1, ?2)"
-        )?;
-
-        for (old_id, new_id) in bb_id_mapping {
-            insert_stmt.execute(params![old_id, new_id])?;
-        }
-    }
-
-    // Update bounding_box IDs using negative values to avoid conflicts
-    conn.execute(
-        "UPDATE bounding_box SET id = -(SELECT new_id FROM bb_id_map WHERE old_id = bounding_box.id)
-         WHERE id IN (SELECT old_id FROM bb_id_map)",
-        [],
-    )?;
-    conn.execute(
-        "UPDATE bounding_box SET id = -id WHERE id < 0",
-        [],
-    )?;
-
-    // Update R-tree IDs
-    conn.execute(
-        "UPDATE bounding_box_rtree SET id = -(SELECT new_id FROM bb_id_map WHERE old_id = bounding_box_rtree.id)
-         WHERE id IN (SELECT old_id FROM bb_id_map)",
-        [],
-    )?;
-    conn.execute(
-        "UPDATE bounding_box_rtree SET id = -id WHERE id < 0",
-        [],
-    )?;
-
-    // Check if MSn R-tree exists and update it too
-    let has_msn_rtree: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='bounding_box_msn_rtree'",
-        [],
-        |row| Ok(row.get::<_, i64>(0)? > 0),
-    )?;
-
-    if has_msn_rtree {
-        conn.execute(
-            "UPDATE bounding_box_msn_rtree SET id = -(SELECT new_id FROM bb_id_map WHERE old_id = bounding_box_msn_rtree.id)
-             WHERE id IN (SELECT old_id FROM bb_id_map)",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE bounding_box_msn_rtree SET id = -id WHERE id < 0",
-            [],
-        )?;
-    }
-
-    // Drop the temporary table
-    conn.execute("DROP TABLE bb_id_map", [])?;
-
-    Ok(())
 }

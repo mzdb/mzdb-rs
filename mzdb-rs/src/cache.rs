@@ -160,10 +160,20 @@ pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
 
     let de_cache = DataEncodingsCache::new(data_encoding_by_id, spectra_data_encoding_ids);
 
+    let spectrum_headers = get_spectrum_headers(db).dot()?;
+    
+    // Build ID-to-index map for non-consecutive ID support
+    let spectrum_id_to_index: HashMap<i64, usize> = spectrum_headers
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| (h.id, idx))
+        .collect();
+
     Ok(EntityCache {
         bb_sizes,
         data_encodings_cache: de_cache,
-        spectrum_headers: get_spectrum_headers(db).dot()?,
+        spectrum_headers,
+        spectrum_id_to_index,
     })
 }
 

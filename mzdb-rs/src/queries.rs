@@ -688,8 +688,7 @@ pub fn get_spectrum(
     entity_cache: &EntityCache,
 ) -> Result<Spectrum> {
     let spectrum_header = entity_cache
-        .spectrum_headers
-        .get((spectrum_id - 1) as usize)
+        .get_spectrum_header(spectrum_id)
         .context(format!("can't retrieve spectrum with ID={}", spectrum_id))
         .dot()?;
 

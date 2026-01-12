@@ -556,4 +556,15 @@ pub struct EntityCache {
     pub bb_sizes: BBSizes,
     pub data_encodings_cache: DataEncodingsCache,
     pub spectrum_headers: Vec<SpectrumHeader>,
+    /// Map from spectrum ID to index in spectrum_headers vec
+    pub spectrum_id_to_index: HashMap<i64, usize>,
+}
+
+impl EntityCache {
+    /// Get spectrum header by ID (handles non-consecutive IDs)
+    pub fn get_spectrum_header(&self, spectrum_id: i64) -> Option<&SpectrumHeader> {
+        self.spectrum_id_to_index
+            .get(&spectrum_id)
+            .and_then(|&idx| self.spectrum_headers.get(idx))
+    }
 }

@@ -97,12 +97,9 @@ where
     let mut prev_first_spectrum_id: Option<i64> = None;
 
     for_each_bb(db, ms_level, |bb: BoundingBox| {
-        let spec_idx = (bb.first_spectrum_id - 1) as usize;
-
         let bb_first_spectrum_header = entity_cache
-            .spectrum_headers
-            .get(spec_idx)
-            .ok_or_else(|| anyhow!("spectrum header not found at index {}", spec_idx))?;
+            .get_spectrum_header(bb.first_spectrum_id)
+            .ok_or_else(|| anyhow!("spectrum header not found for ID {}", bb.first_spectrum_id))?;
 
         let spec_ms_level = bb_first_spectrum_header.ms_level;
 
@@ -195,8 +192,7 @@ fn bb_row_buffer_to_spectrum_buffer(
         let mut spectrum_slices = Vec::with_capacity(bb_count);
 
         let spectrum_header = entity_cache
-            .spectrum_headers
-            .get((spectrum_id - 1) as usize)
+            .get_spectrum_header(spectrum_id)
             .ok_or_else(|| anyhow!("spectrum header not found for ID {}", spectrum_id))?;
 
         let data_encoding = de_cache
@@ -433,12 +429,10 @@ impl<'a> SpectrumIterator<'a> {
 
         // Process bounding boxes until we have spectra to return
         while let Some(bb) = self.read_next_bb()? {
-            let spec_idx = (bb.first_spectrum_id - 1) as usize;
             let bb_first_spectrum_header = self
                 .entity_cache
-                .spectrum_headers
-                .get(spec_idx)
-                .ok_or_else(|| anyhow!("spectrum header not found at index {}", spec_idx))?;
+                .get_spectrum_header(bb.first_spectrum_id)
+                .ok_or_else(|| anyhow!("spectrum header not found for ID {}", bb.first_spectrum_id))?;
 
             let spec_ms_level = bb_first_spectrum_header.ms_level;
 
