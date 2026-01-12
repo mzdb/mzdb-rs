@@ -217,9 +217,9 @@ pub const DIA_SPECTRUM_INSERT_SQL: &str =
         ?1, ?2, ?3, ?4, ?5, 2, 'HCD',
         ?6, ?7, ?8, ?9,
         NULL, ?10, ?11,
-        NULL, ?12, NULL,
-        NULL, ?13, ?14,
-        ?15, ?16, ?17, ?18
+        ?12, ?13, NULL,
+        NULL, ?14, ?15,
+        ?16, ?17, ?18, ?19
     )";
 
 /// Parameters for DIA spectrum insertion
@@ -238,6 +238,7 @@ pub struct DiaSpectrumParams {
     pub precursor_mz: f64,
     pub data_points_count: i32,
     pub param_tree: String,
+    pub scan_list: String,
     pub precursor_list: String,
     pub instr_config_id: i64,
     pub source_file_id: i64,
@@ -264,6 +265,7 @@ impl DiaSpectrumParams {
                 self.precursor_mz,
                 self.data_points_count,
                 self.param_tree,
+                self.scan_list,
                 self.precursor_list,
                 self.instr_config_id,
                 self.source_file_id,

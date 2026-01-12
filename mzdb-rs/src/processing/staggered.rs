@@ -31,11 +31,89 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow_ext::Result;
+use roxmltree::Document;
 use rusqlite::Connection;
 
 use crate::processing::dia::IsolationWindow;
 use crate::processing::peakeldb::{ExtendedPeakel, PeakelData};
 use crate::processing::model::{HasPeakelData, generate_peakel_id};
+
+// ============================================================================
+// Helper Functions for Isolation Window Parsing
+// ============================================================================
+
+/// Parse isolation window lower and upper offsets from precursor_list XML
+/// 
+/// Looks for cvParam elements with accessions:
+/// - MS:1000828 = "isolation window lower offset"
+/// - MS:1000829 = "isolation window upper offset"
+fn parse_isolation_window_offsets(xml: &str) -> (Option<f64>, Option<f64>) {
+    let mut lower_offset = None;
+    let mut upper_offset = None;
+    
+    // Parse XML using roxmltree
+    let doc = match Document::parse(xml) {
+        Ok(doc) => doc,
+        Err(_) => return (None, None),
+    };
+    
+    // Find all cvParam elements and look for our target accessions
+    for node in doc.descendants() {
+        if node.tag_name().name() == "cvParam" {
+            if let Some(accession) = node.attribute("accession") {
+                if let Some(value_str) = node.attribute("value") {
+                    match accession {
+                        "MS:1000828" => {
+                            // isolation window lower offset
+                            lower_offset = value_str.parse().ok();
+                        }
+                        "MS:1000829" => {
+                            // isolation window upper offset
+                            upper_offset = value_str.parse().ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    
+    (lower_offset, upper_offset)
+}
+
+/// Calculate fallback half-width from window spacing
+/// 
+/// In staggered DIA, consecutive windows (across both cycle sets) are spaced 
+/// by half the window width. In non-staggered DIA, consecutive windows are 
+/// spaced by the full window width.
+/// 
+/// This function uses the median spacing as a reasonable estimate when
+/// actual bounds are not available from the precursor_list XML.
+fn calculate_fallback_half_width(target_mzs: &[f64]) -> f64 {
+    if target_mzs.len() < 2 {
+        log::warn!("Fewer than 2 isolation windows found, using default half-width of 4.0 Da");
+        return 4.0; // Conservative default for modern DIA methods
+    }
+    
+    let mut spacings: Vec<f64> = target_mzs.windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|&s| s > 0.0 && s < 100.0) // Filter reasonable spacings
+        .collect();
+    
+    if spacings.is_empty() {
+        log::warn!("Could not calculate window spacing, using default half-width of 4.0 Da");
+        return 4.0;
+    }
+    
+    spacings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median_spacing = spacings[spacings.len() / 2];
+    
+    // In staggered DIA, spacing between consecutive windows equals half-width
+    // In non-staggered DIA, spacing equals full width, so half-width = spacing/2
+    // We use the spacing directly here since stagger detection will validate
+    // whether the offset matches expected values
+    median_spacing
+}
 
 // ============================================================================
 // Configuration Types
@@ -304,72 +382,87 @@ impl StaggeredDiaDetector {
         &self,
         conn: &Connection,
     ) -> Result<Vec<(IsolationWindow, Vec<i32>)>> {
-        // Query to get distinct precursor windows and their cycles
-        // We don't parse precursor_list (which may be XML or JSON), instead we use
-        // a default window width that will be validated against actual data
+        // Query to get precursor windows with their actual bounds from precursor_list XML
         let mut stmt = conn.prepare(
             "SELECT DISTINCT 
                 main_precursor_mz,
-                cycle
+                cycle,
+                precursor_list
              FROM spectrum 
              WHERE ms_level = 2 AND main_precursor_mz IS NOT NULL
              ORDER BY main_precursor_mz, cycle",
         )?;
 
-        // Collect windows grouped by target m/z
-        let mut window_map: BTreeMap<i64, (f64, Vec<i32>)> = BTreeMap::new();
+        // Collect windows grouped by target m/z, with actual bounds
+        // Key: integer key for grouping (0.01 Da precision)
+        // Value: (target_mz, lower_offset, upper_offset, cycles)
+        let mut window_map: BTreeMap<i64, (f64, Option<f64>, Option<f64>, Vec<i32>)> = BTreeMap::new();
 
         let rows = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, f64>(0)?, // main_precursor_mz
-                row.get::<_, i32>(1)?, // cycle
+                row.get::<_, f64>(0)?,           // main_precursor_mz
+                row.get::<_, i32>(1)?,           // cycle
+                row.get::<_, Option<String>>(2)?, // precursor_list (XML)
             ))
         })?;
 
         for row in rows {
-            let (target_mz, cycle) = row?;
-            let key = (target_mz * 100.0).round() as i64; // Use integer key for grouping (0.01 Da precision)
+            let (target_mz, cycle, precursor_list) = row?;
+            let key = (target_mz * 100.0).round() as i64;
+
+            // Parse isolation window bounds from XML if available
+            let (lower_offset, upper_offset) = precursor_list
+                .as_ref()
+                .map(|xml| parse_isolation_window_offsets(xml))
+                .unwrap_or((None, None));
 
             window_map
                 .entry(key)
-                .and_modify(|(_, cycles)| {
+                .and_modify(|(_, existing_lower, existing_upper, cycles)| {
                     if !cycles.contains(&cycle) {
                         cycles.push(cycle);
                     }
+                    // Update offsets if we found them and don't have them yet
+                    if existing_lower.is_none() && lower_offset.is_some() {
+                        *existing_lower = lower_offset;
+                    }
+                    if existing_upper.is_none() && upper_offset.is_some() {
+                        *existing_upper = upper_offset;
+                    }
                 })
                 .or_insert_with(|| {
-                    (target_mz, vec![cycle])
+                    (target_mz, lower_offset, upper_offset, vec![cycle])
                 });
         }
 
-        // Calculate window width from spacing between consecutive windows
-        let target_mzs: Vec<f64> = window_map.values().map(|(mz, _)| *mz).collect();
-        let default_half_width = if target_mzs.len() >= 2 {
-            let mut spacings: Vec<f64> = target_mzs.windows(2)
-                .map(|w| w[1] - w[0])
-                .filter(|&s| s > 0.0 && s < 100.0) // Filter reasonable spacings
-                .collect();
-            spacings.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            if !spacings.is_empty() {
-                // Use median spacing as window width, half for offset
-                spacings[spacings.len() / 2] / 2.0
-            } else {
-                12.5 // Default
-            }
+        // Calculate fallback half-width from spacing (for cases where XML parsing fails)
+        let target_mzs: Vec<f64> = window_map.values().map(|(mz, _, _, _)| *mz).collect();
+        let fallback_half_width = calculate_fallback_half_width(&target_mzs);
+
+        // Check if we have actual bounds from XML
+        let has_xml_bounds = window_map.values()
+            .any(|(_, lower, upper, _)| lower.is_some() && upper.is_some());
+        
+        if has_xml_bounds {
+            log::debug!("Using isolation window bounds from precursor_list XML");
         } else {
-            12.5 // Default
-        };
+            log::debug!("No XML bounds found, using calculated half-width: {:.2} Da", fallback_half_width);
+        }
 
         // Build IsolationWindow objects
         let mut next_id = 1i64;
         let result: Vec<(IsolationWindow, Vec<i32>)> = window_map
             .into_values()
-            .map(|(target_mz, cycles)| {
+            .map(|(target_mz, lower_offset, upper_offset, cycles)| {
+                // Use actual bounds from XML, or fall back to calculated spacing
+                let half_width_lower = lower_offset.unwrap_or(fallback_half_width);
+                let half_width_upper = upper_offset.unwrap_or(fallback_half_width);
+                
                 let window = IsolationWindow {
                     id: next_id,
                     target_mz,
-                    lower_mz: target_mz - default_half_width,
-                    upper_mz: target_mz + default_half_width,
+                    lower_mz: target_mz - half_width_lower,
+                    upper_mz: target_mz + half_width_upper,
                     spectrum_count: cycles.len(),
                 };
                 next_id += 1;
@@ -561,9 +654,14 @@ impl StaggeredDiaDetector {
         let mut last_mz = events.first().map(|(mz, _)| *mz).unwrap_or(0.0);
         let mut next_id = 1i64;
 
+        // Minimum window width to avoid creating tiny segments from floating-point issues
+        // Use boundary_tolerance as the minimum meaningful segment width
+        let min_window_width = self.boundary_tolerance.max(0.1); // At least 0.1 Da
+
         for (mz, event) in &events {
             // Create window for the segment before this event (if we have coverage)
-            if *mz > last_mz + self.boundary_tolerance {
+            let segment_width = *mz - last_mz;
+            if segment_width > min_window_width {
                 if current_cycle_a.is_some() || current_cycle_b.is_some() {
                     let window_type = match (&current_cycle_a, &current_cycle_b) {
                         (Some(_), Some(_)) => UnstaggeredWindowType::Overlap,

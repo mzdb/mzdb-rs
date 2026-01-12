@@ -47,9 +47,9 @@ itertools = { version = "0.13", optional = true }
 
 [features]
 default = []
-writer = []
+writer = ["xmltree"]
 cli = ["clap", "env_logger"]
-thermo2mzdb = ["thernio", "writer", "xmltree"]
+thermo2mzdb = ["thernio", "writer"]
 processing = ["itertools", "nalgebra", "rmp-serde", "rmpv"]
 processing-parallel = ["processing", "crossbeam-channel"]
 dda2dia = ["processing", "writer"]

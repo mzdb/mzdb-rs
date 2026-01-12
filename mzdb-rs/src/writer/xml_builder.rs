@@ -2,13 +2,9 @@
 //!
 //! This module provides generic XML building utilities for mzDB metadata.
 //! These functions generate PSI-MS compliant XML fragments for spectrum metadata.
-//!
-//! Note: xmltree is configured with the "attribute-sorted" feature which uses
-//! BTreeMap for attributes, ensuring consistent alphabetical ordering in output.
 
 use anyhow_ext::Result;
 
-#[cfg(feature = "xmltree")]
 use xmltree::{Element, XMLNode, EmitterConfig};
 
 // ============================================================================
@@ -16,10 +12,6 @@ use xmltree::{Element, XMLNode, EmitterConfig};
 // ============================================================================
 
 /// Write an XML element to a string without XML declaration, with pretty printing
-///
-/// Attributes are automatically sorted alphabetically due to the "attribute-sorted"
-/// feature enabled on xmltree (uses BTreeMap internally).
-#[cfg(feature = "xmltree")]
 pub fn element_to_string(element: &Element) -> Result<String> {
     let mut output = Vec::new();
     let config = EmitterConfig::new()
@@ -31,11 +23,10 @@ pub fn element_to_string(element: &Element) -> Result<String> {
 }
 
 /// Build scan list XML for a spectrum
-#[cfg(feature = "xmltree")]
 pub fn build_scan_list(retention_time: f64) -> Result<String> {
     let mut root = Element::new("scanList");
     root.attributes.insert("count".to_string(), "1".to_string());
-
+    
     // Add "no combination" CV param
     let mut cv_no_comb = Element::new("cvParam");
     cv_no_comb.attributes.insert("cvRef".to_string(), "MS".to_string());
@@ -43,10 +34,10 @@ pub fn build_scan_list(retention_time: f64) -> Result<String> {
     cv_no_comb.attributes.insert("name".to_string(), "no combination".to_string());
     cv_no_comb.attributes.insert("value".to_string(), "".to_string());
     root.children.push(XMLNode::Element(cv_no_comb));
-
+    
     // Scan element
     let mut scan = Element::new("scan");
-
+    
     // Scan start time
     let mut cv_time = Element::new("cvParam");
     cv_time.attributes.insert("cvRef".to_string(), "MS".to_string());
@@ -57,9 +48,9 @@ pub fn build_scan_list(retention_time: f64) -> Result<String> {
     cv_time.attributes.insert("unitAccession".to_string(), "UO:0000031".to_string());
     cv_time.attributes.insert("unitName".to_string(), "minute".to_string());
     scan.children.push(XMLNode::Element(cv_time));
-
+    
     root.children.push(XMLNode::Element(scan));
-
+    
     element_to_string(&root)
 }
 
@@ -72,7 +63,6 @@ pub fn build_scan_list(retention_time: f64) -> Result<String> {
 /// * `activation_type` - Activation type string (e.g., "CID", "HCD", "ETD")
 /// * `isolation_width` - Optional isolation window width in Da
 /// * `isolation_offset` - Optional isolation window offset in Da
-#[cfg(feature = "xmltree")]
 pub fn build_precursor_list(
     precursor_mzs: &[f64],
     precursor_charge: Option<i32>,
@@ -83,12 +73,12 @@ pub fn build_precursor_list(
 ) -> Result<String> {
     let mut root = Element::new("precursorList");
     root.attributes.insert("count".to_string(), "1".to_string());
-
+    
     let mut precursor = Element::new("precursor");
-
+    
     // Isolation window
     let mut iso_window = Element::new("isolationWindow");
-
+    
     if let Some(&target_mz) = precursor_mzs.first() {
         // Target m/z
         let mut cv_target = Element::new("cvParam");
@@ -100,12 +90,12 @@ pub fn build_precursor_list(
         cv_target.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
         cv_target.attributes.insert("unitName".to_string(), "m/z".to_string());
         iso_window.children.push(XMLNode::Element(cv_target));
-
+        
         // Add isolation window lower/upper offset if width is available
         if let Some(width) = isolation_width {
             let offset = isolation_offset.unwrap_or(0.0);
             let half_width = width / 2.0;
-
+            
             // Lower offset (MS:1000828)
             let mut cv_lower = Element::new("cvParam");
             cv_lower.attributes.insert("cvRef".to_string(), "MS".to_string());
@@ -116,7 +106,7 @@ pub fn build_precursor_list(
             cv_lower.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
             cv_lower.attributes.insert("unitName".to_string(), "m/z".to_string());
             iso_window.children.push(XMLNode::Element(cv_lower));
-
+            
             // Upper offset (MS:1000829)
             let mut cv_upper = Element::new("cvParam");
             cv_upper.attributes.insert("cvRef".to_string(), "MS".to_string());
@@ -129,16 +119,16 @@ pub fn build_precursor_list(
             iso_window.children.push(XMLNode::Element(cv_upper));
         }
     }
-
+    
     precursor.children.push(XMLNode::Element(iso_window));
-
+    
     // Selected ion list
     if let Some(&selected_mz) = precursor_mzs.first() {
         let mut selected_ion_list = Element::new("selectedIonList");
         selected_ion_list.attributes.insert("count".to_string(), "1".to_string());
-
+        
         let mut selected_ion = Element::new("selectedIon");
-
+        
         // Selected ion m/z
         let mut cv_sel_mz = Element::new("cvParam");
         cv_sel_mz.attributes.insert("cvRef".to_string(), "MS".to_string());
@@ -149,7 +139,7 @@ pub fn build_precursor_list(
         cv_sel_mz.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
         cv_sel_mz.attributes.insert("unitName".to_string(), "m/z".to_string());
         selected_ion.children.push(XMLNode::Element(cv_sel_mz));
-
+        
         // Charge state if available
         if let Some(charge) = precursor_charge {
             let mut cv_charge = Element::new("cvParam");
@@ -159,25 +149,25 @@ pub fn build_precursor_list(
             cv_charge.attributes.insert("value".to_string(), charge.to_string());
             selected_ion.children.push(XMLNode::Element(cv_charge));
         }
-
+        
         selected_ion_list.children.push(XMLNode::Element(selected_ion));
         precursor.children.push(XMLNode::Element(selected_ion_list));
     }
-
+    
     // Activation - only add if we have activation info
     if !activation_type.is_empty() {
         let mut activation = Element::new("activation");
-
+        
         // Activation method
         let (act_accession, act_name) = activation_type_to_cv(activation_type);
-
+        
         let mut cv_act = Element::new("cvParam");
         cv_act.attributes.insert("cvRef".to_string(), "MS".to_string());
         cv_act.attributes.insert("accession".to_string(), act_accession.to_string());
         cv_act.attributes.insert("name".to_string(), act_name.to_string());
         cv_act.attributes.insert("value".to_string(), "".to_string());
         activation.children.push(XMLNode::Element(cv_act));
-
+        
         // Collision energy if available
         if let Some(ce) = collision_energy {
             if ce > 0.0 {
@@ -192,23 +182,22 @@ pub fn build_precursor_list(
                 activation.children.push(XMLNode::Element(cv_ce));
             }
         }
-
+        
         precursor.children.push(XMLNode::Element(activation));
     }
-
+    
     root.children.push(XMLNode::Element(precursor));
-
+    
     element_to_string(&root)
 }
 
 /// Build param tree XML with CV parameters
-#[cfg(feature = "xmltree")]
 pub fn build_param_tree(params: &[(&str, &str, &str, &str)]) -> Result<String> {
     let mut root = Element::new("paramTree");
-
+    
     // Create cvParams wrapper
     let mut cv_params = Element::new("cvParams");
-
+    
     for (cv_ref, accession, name, value) in params {
         let mut cv_param = Element::new("cvParam");
         cv_param.attributes.insert("cvRef".to_string(), cv_ref.to_string());
@@ -219,9 +208,9 @@ pub fn build_param_tree(params: &[(&str, &str, &str, &str)]) -> Result<String> {
         }
         cv_params.children.push(XMLNode::Element(cv_param));
     }
-
+    
     root.children.push(XMLNode::Element(cv_params));
-
+    
     element_to_string(&root)
 }
 
@@ -243,7 +232,7 @@ fn activation_type_to_cv(activation_type: &str) -> (&'static str, &'static str) 
 // ============================================================================
 
 /// Generate param_tree XML for a DIA/simplified spectrum
-///
+/// 
 /// Creates a minimal param_tree with MS level 2, MSn spectrum type,
 /// centroid mode, and scan start time.
 ///
@@ -312,6 +301,22 @@ pub fn generate_dia_precursor_list_xml_asymmetric(
   </precursor>
 </precursorList>"#,
         target_mz, lower_offset, upper_offset
+    )
+}
+
+/// Generate scan_list XML for a spectrum
+///
+/// # Arguments
+/// * `time_minutes` - Scan start time in minutes
+pub fn generate_scan_list_xml(time_minutes: f64) -> String {
+    format!(
+        r#"<scanList count="1">
+  <cvParam cvRef="MS" accession="MS:1000795" value="" name="no combination"/>
+  <scan>
+    <cvParam cvRef="MS" accession="MS:1000016" value="{:.6}" name="scan start time" unitCvRef="UO" unitAccession="UO:0000031" unitName="minute"/>
+  </scan>
+</scanList>"#,
+        time_minutes
     )
 }
 

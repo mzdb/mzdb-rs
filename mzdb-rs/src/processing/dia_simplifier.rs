@@ -40,7 +40,7 @@ use crate::writer::{
     DiaWriteContext, DiaSpectrumParams,
     calculate_time_bounds, calculate_mz_bounds, calculate_mz_bounds_from_arrays, find_base_peak,
     insert_msn_rtree_entry,
-    xml_builder::{generate_ms2_param_tree_xml, generate_dia_precursor_list_xml_asymmetric},
+    xml_builder::{generate_ms2_param_tree_xml, generate_dia_precursor_list_xml_asymmetric, build_scan_list},
 };
 
 // ============================================================================
@@ -594,6 +594,9 @@ fn write_simplified_dia_mzdb(
 
             // Generate XML metadata
             let param_tree = generate_ms2_param_tree_xml(spectrum.time);
+            // scan_list expects time in minutes, spectrum.time is in seconds
+            let scan_list = build_scan_list(spectrum.time as f64 / 60.0)
+                .unwrap_or_default();
             let precursor_list = generate_dia_precursor_list_xml_asymmetric(
                 spectrum.precursor_mz,
                 spectrum.isolation_lower,
@@ -628,6 +631,7 @@ fn write_simplified_dia_mzdb(
                 precursor_mz: spectrum.precursor_mz,
                 data_points_count: spectrum.mz_array.len() as i32,
                 param_tree,
+                scan_list,
                 precursor_list,
                 instr_config_id: ctx.instr_config_id,
                 source_file_id: ctx.source_file_id,
