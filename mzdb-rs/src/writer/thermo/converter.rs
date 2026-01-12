@@ -504,7 +504,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
         name: "any2mzdb".to_string(),
         version: "0.9.10".to_string(), // Matching pwiz-mzdb version for compatibility
         param_tree: if !software_params.is_empty() {
-            build_param_tree(&software_params)?
+            build_param_tree_simple(&software_params)?
         } else {
             "".to_string()
         },
@@ -526,7 +526,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
         inst_params.push(("MS", "MS:1000004", "instrument method", &seq_row.instrument_method));
     }
 
-    let inst_param_tree = build_param_tree(&inst_params)?;
+    let inst_param_tree = build_param_tree_simple(&inst_params)?;
 
     let inst_config = InstrumentConfiguration {
         id: 1,
@@ -586,7 +586,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
         sample_params.push(("MS", "MS:1000011", "autosampler tray", &autosampler.tray_name));
     }
 
-    let sample_param_tree = build_param_tree(&sample_params)?;
+    let sample_param_tree = build_param_tree_simple(&sample_params)?;
 
     let sample = Sample {
         id: 1,
@@ -610,7 +610,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
         source_params.push(("MS", "MS:1000569", "file path", &seq_row.raw_file_path));
     }
 
-    let source_param_tree = build_param_tree(&source_params)?;
+    let source_param_tree = build_param_tree_simple(&source_params)?;
 
     let source_file = SourceFile {
         id: 1,
@@ -639,7 +639,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     let processing_method = ProcessingMethod {
         id: 1,
         number: 1,
-        param_tree: build_param_tree(&proc_params)?,
+        param_tree: build_param_tree_simple(&proc_params)?,
         shared_param_tree_id: None,
         data_processing_id: 1,
         software_id: 1,
@@ -674,7 +674,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     }
 
     // Build basic param tree
-    let mut run_param_tree = build_param_tree(&run_params)?;
+    let mut run_param_tree = build_param_tree_simple(&run_params)?;
 
     // Extract method texts for both run param_tree and mzdb param_tree
     let (ms_method_text, lc_method_text) = if let Some(method) = raw.embedded_method() {
@@ -738,8 +738,28 @@ fn convert_scan_to_spectrum(
     cycle: i64,
     raw: &thernio::raw::RawFile,
 ) -> Result<Spectrum> {
-    // Build scan list XML
-    let scan_list_str = build_scan_list(scan.retention_time)?;
+    // Get filter string from trailer extra
+    let filter_string = raw.filter_string(scan_num - 1);
+    
+    // Get ion injection time from trailer extra
+    let ion_injection_time = raw.ion_injection_time(scan_num - 1);
+    
+    // Determine instrument configuration reference based on MS level
+    let instrument_config_ref = if scan.ms_level == 1 {
+        Some("IC1")
+    } else {
+        Some("IC2")
+    };
+    
+    // Build scan list XML with additional metadata
+    let scan_list_str = build_scan_list(
+        scan.retention_time,
+        filter_string.as_deref(),
+        ion_injection_time,
+        instrument_config_ref,
+        Some(scan.low_mz),
+        Some(scan.high_mz),
+    )?;
 
     // Get charge state from trailer extra (0-based index for trailer_extra)
     let charge_state = raw.charge_state(scan_num - 1)
@@ -789,55 +809,81 @@ fn convert_scan_to_spectrum(
     };
 
     // Build spectrum param tree with appropriate CV terms
+    use crate::writer::xml_builder::CvParam;
     let mut spec_params = Vec::new();
 
     // MS level
+    let ms_level_str = scan.ms_level.to_string();
+    spec_params.push(CvParam::new("MS", "MS:1000511", "ms level", &ms_level_str));
+    
+    // Spectrum type based on MS level
     match scan.ms_level {
-        1 => spec_params.push(("MS", "MS:1000579", "MS1 spectrum", "")),
-        2 => spec_params.push(("MS", "MS:1000580", "MSn spectrum", "")),
-        _ => spec_params.push(("MS", "MS:1000580", "MSn spectrum", "")),
+        1 => spec_params.push(CvParam::new("MS", "MS:1000579", "MS1 spectrum", "")),
+        _ => spec_params.push(CvParam::new("MS", "MS:1000580", "MSn spectrum", "")),
     }
 
-    // Scan mode (centroid/profile) from scan event
+    // Polarity from scan event
     if let Some(event) = scan_event {
-        match event.scan_mode {
-            thernio::raw::ScanMode::Centroid => {
-                spec_params.push(("MS", "MS:1000127", "centroid spectrum", ""));
-            }
-            thernio::raw::ScanMode::Profile => {
-                spec_params.push(("MS", "MS:1000128", "profile spectrum", ""));
-            }
-        }
-
-        // Polarity from scan event
         match event.polarity {
             thernio::raw::Polarity::Positive => {
-                spec_params.push(("MS", "MS:1000130", "positive scan", ""));
+                spec_params.push(CvParam::new("MS", "MS:1000130", "positive scan", ""));
             }
             thernio::raw::Polarity::Negative => {
-                spec_params.push(("MS", "MS:1000129", "negative scan", ""));
+                spec_params.push(CvParam::new("MS", "MS:1000129", "negative scan", ""));
             }
             _ => {} // Don't add polarity if unknown
         }
     }
 
+    // Total ion current
+    let tic_str = format!("{:.0}", scan.total_ion_current);
+    spec_params.push(CvParam::with_unit(
+        "MS", "MS:1000285", "total ion current", &tic_str,
+        "MS", "MS:1000131", "number of detector counts"
+    ));
+
+    // Scan mode (centroid/profile) from scan event
+    if let Some(event) = scan_event {
+        match event.scan_mode {
+            thernio::raw::ScanMode::Centroid => {
+                spec_params.push(CvParam::new("MS", "MS:1000127", "centroid spectrum", ""));
+            }
+            thernio::raw::ScanMode::Profile => {
+                spec_params.push(CvParam::new("MS", "MS:1000128", "profile spectrum", ""));
+            }
+        }
+    }
+
     // Base peak m/z and intensity
     let bp_mz_str = format!("{:.6}", scan.base_peak_mz);
-    spec_params.push(("MS", "MS:1000504", "base peak m/z", &bp_mz_str));
+    spec_params.push(CvParam::with_unit(
+        "MS", "MS:1000504", "base peak m/z", &bp_mz_str,
+        "MS", "MS:1000040", "m/z"
+    ));
 
     let bp_int_str = format!("{:.2}", scan.base_peak_intensity);
-    spec_params.push(("MS", "MS:1000505", "base peak intensity", &bp_int_str));
+    spec_params.push(CvParam::with_unit(
+        "MS", "MS:1000505", "base peak intensity", &bp_int_str,
+        "MS", "MS:1000131", "number of detector counts"
+    ));
 
-    // Total ion current
-    let tic_str = format!("{:.2}", scan.total_ion_current);
-    spec_params.push(("MS", "MS:1000285", "total ion current", &tic_str));
-
-    // Scan window (m/z range)
-    let low_mz_str = format!("{:.4}", scan.low_mz);
-    spec_params.push(("MS", "MS:1000501", "scan window lower limit", &low_mz_str));
-
-    let high_mz_str = format!("{:.4}", scan.high_mz);
-    spec_params.push(("MS", "MS:1000500", "scan window upper limit", &high_mz_str));
+    // Observed m/z range (lowest and highest observed m/z)
+    if !scan.spectrum.peaks.is_empty() {
+        let lowest_mz = scan.spectrum.peaks.first().map(|p| p.mz).unwrap_or(scan.low_mz);
+        let highest_mz = scan.spectrum.peaks.last().map(|p| p.mz).unwrap_or(scan.high_mz);
+        
+        let lowest_mz_str = format!("{:.6}", lowest_mz);
+        spec_params.push(CvParam::with_unit(
+            "MS", "MS:1000528", "lowest observed m/z", &lowest_mz_str,
+            "MS", "MS:1000040", "m/z"
+        ));
+        
+        let highest_mz_str = format!("{:.6}", highest_mz);
+        spec_params.push(CvParam::with_unit(
+            "MS", "MS:1000527", "highest observed m/z", &highest_mz_str,
+            "MS", "MS:1000040", "m/z"
+        ));
+    }
 
     let param_tree_str = build_param_tree(&spec_params)?;
 

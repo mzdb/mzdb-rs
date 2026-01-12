@@ -9,7 +9,7 @@ use xmltree::{Element, XMLNode};
 
 // Re-export generic functions for convenience within the thermo module
 pub(crate) use crate::writer::xml_builder::{
-    element_to_string, build_scan_list, build_precursor_list, build_param_tree
+    element_to_string, build_scan_list, build_precursor_list, build_param_tree, build_param_tree_simple, CvParam
 };
 
 /// Build component list XML for instrument configuration

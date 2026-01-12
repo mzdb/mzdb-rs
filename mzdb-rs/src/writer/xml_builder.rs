@@ -22,8 +22,23 @@ pub fn element_to_string(element: &Element) -> Result<String> {
     Ok(String::from_utf8(output)?)
 }
 
-/// Build scan list XML for a spectrum
-pub fn build_scan_list(retention_time: f64) -> Result<String> {
+/// Build scan list XML for a spectrum with optional additional metadata
+///
+/// # Arguments
+/// * `retention_time` - Scan start time in minutes
+/// * `filter_string` - Optional instrument filter string
+/// * `ion_injection_time` - Optional ion injection time in milliseconds
+/// * `instrument_config_ref` - Optional instrument configuration reference (e.g., "IC1", "IC2")
+/// * `scan_window_lower` - Optional lower m/z limit of scan window
+/// * `scan_window_upper` - Optional upper m/z limit of scan window
+pub fn build_scan_list(
+    retention_time: f64,
+    filter_string: Option<&str>,
+    ion_injection_time: Option<f64>,
+    instrument_config_ref: Option<&str>,
+    scan_window_lower: Option<f64>,
+    scan_window_upper: Option<f64>,
+) -> Result<String> {
     let mut root = Element::new("scanList");
     root.attributes.insert("count".to_string(), "1".to_string());
     
@@ -38,6 +53,11 @@ pub fn build_scan_list(retention_time: f64) -> Result<String> {
     // Scan element
     let mut scan = Element::new("scan");
     
+    // Add instrumentConfigurationRef if provided
+    if let Some(inst_ref) = instrument_config_ref {
+        scan.attributes.insert("instrumentConfigurationRef".to_string(), inst_ref.to_string());
+    }
+    
     // Scan start time
     let mut cv_time = Element::new("cvParam");
     cv_time.attributes.insert("cvRef".to_string(), "MS".to_string());
@@ -48,6 +68,64 @@ pub fn build_scan_list(retention_time: f64) -> Result<String> {
     cv_time.attributes.insert("unitAccession".to_string(), "UO:0000031".to_string());
     cv_time.attributes.insert("unitName".to_string(), "minute".to_string());
     scan.children.push(XMLNode::Element(cv_time));
+    
+    // Filter string if provided
+    if let Some(filter) = filter_string {
+        let mut cv_filter = Element::new("cvParam");
+        cv_filter.attributes.insert("cvRef".to_string(), "MS".to_string());
+        cv_filter.attributes.insert("accession".to_string(), "MS:1000512".to_string());
+        cv_filter.attributes.insert("name".to_string(), "filter string".to_string());
+        cv_filter.attributes.insert("value".to_string(), filter.to_string());
+        scan.children.push(XMLNode::Element(cv_filter));
+    }
+    
+    // Ion injection time if provided
+    if let Some(iit) = ion_injection_time {
+        let mut cv_iit = Element::new("cvParam");
+        cv_iit.attributes.insert("cvRef".to_string(), "MS".to_string());
+        cv_iit.attributes.insert("accession".to_string(), "MS:1000927".to_string());
+        cv_iit.attributes.insert("name".to_string(), "ion injection time".to_string());
+        cv_iit.attributes.insert("value".to_string(), format!("{:.3}", iit));
+        cv_iit.attributes.insert("unitCvRef".to_string(), "UO".to_string());
+        cv_iit.attributes.insert("unitAccession".to_string(), "UO:0000028".to_string());
+        cv_iit.attributes.insert("unitName".to_string(), "millisecond".to_string());
+        scan.children.push(XMLNode::Element(cv_iit));
+    }
+    
+    // Scan window list if bounds provided
+    if scan_window_lower.is_some() || scan_window_upper.is_some() {
+        let mut scan_window_list = Element::new("scanWindowList");
+        scan_window_list.attributes.insert("count".to_string(), "1".to_string());
+        
+        let mut scan_window = Element::new("scanWindow");
+        
+        if let Some(lower) = scan_window_lower {
+            let mut cv_lower = Element::new("cvParam");
+            cv_lower.attributes.insert("cvRef".to_string(), "MS".to_string());
+            cv_lower.attributes.insert("accession".to_string(), "MS:1000501".to_string());
+            cv_lower.attributes.insert("name".to_string(), "scan window lower limit".to_string());
+            cv_lower.attributes.insert("value".to_string(), format!("{:.0}", lower));
+            cv_lower.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+            cv_lower.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+            cv_lower.attributes.insert("unitName".to_string(), "m/z".to_string());
+            scan_window.children.push(XMLNode::Element(cv_lower));
+        }
+        
+        if let Some(upper) = scan_window_upper {
+            let mut cv_upper = Element::new("cvParam");
+            cv_upper.attributes.insert("cvRef".to_string(), "MS".to_string());
+            cv_upper.attributes.insert("accession".to_string(), "MS:1000500".to_string());
+            cv_upper.attributes.insert("name".to_string(), "scan window upper limit".to_string());
+            cv_upper.attributes.insert("value".to_string(), format!("{:.0}", upper));
+            cv_upper.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+            cv_upper.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+            cv_upper.attributes.insert("unitName".to_string(), "m/z".to_string());
+            scan_window.children.push(XMLNode::Element(cv_upper));
+        }
+        
+        scan_window_list.children.push(XMLNode::Element(scan_window));
+        scan.children.push(XMLNode::Element(scan_window_list));
+    }
     
     root.children.push(XMLNode::Element(scan));
     
@@ -192,26 +270,100 @@ pub fn build_precursor_list(
 }
 
 /// Build param tree XML with CV parameters
-pub fn build_param_tree(params: &[(&str, &str, &str, &str)]) -> Result<String> {
-    let mut root = Element::new("paramTree");
+///
+/// Each parameter is a tuple of (cvRef, accession, name, value) or
+/// (cvRef, accession, name, value, unitCvRef, unitAccession, unitName) for parameters with units
+pub fn build_param_tree(params: &[CvParam]) -> Result<String> {
+    let mut root = Element::new("params");
     
     // Create cvParams wrapper
     let mut cv_params = Element::new("cvParams");
     
-    for (cv_ref, accession, name, value) in params {
+    for param in params {
         let mut cv_param = Element::new("cvParam");
-        cv_param.attributes.insert("cvRef".to_string(), cv_ref.to_string());
-        cv_param.attributes.insert("accession".to_string(), accession.to_string());
-        cv_param.attributes.insert("name".to_string(), name.to_string());
-        if !value.is_empty() {
-            cv_param.attributes.insert("value".to_string(), value.to_string());
+        cv_param.attributes.insert("cvRef".to_string(), param.cv_ref.to_string());
+        cv_param.attributes.insert("accession".to_string(), param.accession.to_string());
+        cv_param.attributes.insert("name".to_string(), param.name.to_string());
+        
+        if !param.value.is_empty() {
+            cv_param.attributes.insert("value".to_string(), param.value.to_string());
         }
+        
+        // Add unit attributes if present
+        if let Some(ref unit) = param.unit {
+            cv_param.attributes.insert("unitCvRef".to_string(), unit.cv_ref.to_string());
+            cv_param.attributes.insert("unitAccession".to_string(), unit.accession.to_string());
+            cv_param.attributes.insert("unitName".to_string(), unit.name.to_string());
+        }
+        
         cv_params.children.push(XMLNode::Element(cv_param));
     }
     
     root.children.push(XMLNode::Element(cv_params));
     
     element_to_string(&root)
+}
+
+/// Helper to build param tree from simple tuples (for backward compatibility)
+pub fn build_param_tree_simple(params: &[(&str, &str, &str, &str)]) -> Result<String> {
+    let cv_params: Vec<CvParam> = params.iter()
+        .map(|(cv_ref, accession, name, value)| CvParam::new(cv_ref, accession, name, value))
+        .collect();
+    build_param_tree(&cv_params)
+}
+
+/// CV Parameter structure for building param trees
+#[derive(Debug, Clone)]
+pub struct CvParam {
+    pub cv_ref: String,
+    pub accession: String,
+    pub name: String,
+    pub value: String,
+    pub unit: Option<CvUnit>,
+}
+
+impl CvParam {
+    /// Create a CV parameter without units
+    pub fn new(cv_ref: &str, accession: &str, name: &str, value: &str) -> Self {
+        Self {
+            cv_ref: cv_ref.to_string(),
+            accession: accession.to_string(),
+            name: name.to_string(),
+            value: value.to_string(),
+            unit: None,
+        }
+    }
+    
+    /// Create a CV parameter with units
+    pub fn with_unit(
+        cv_ref: &str,
+        accession: &str,
+        name: &str,
+        value: &str,
+        unit_cv_ref: &str,
+        unit_accession: &str,
+        unit_name: &str,
+    ) -> Self {
+        Self {
+            cv_ref: cv_ref.to_string(),
+            accession: accession.to_string(),
+            name: name.to_string(),
+            value: value.to_string(),
+            unit: Some(CvUnit {
+                cv_ref: unit_cv_ref.to_string(),
+                accession: unit_accession.to_string(),
+                name: unit_name.to_string(),
+            }),
+        }
+    }
+}
+
+/// CV Unit structure
+#[derive(Debug, Clone)]
+pub struct CvUnit {
+    pub cv_ref: String,
+    pub accession: String,
+    pub name: String,
 }
 
 /// Convert activation type string to CV accession and name
