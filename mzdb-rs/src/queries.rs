@@ -626,10 +626,14 @@ pub fn merge_spectrum_slices(
     sd_slices: &mut Vec<SpectrumData>,
     peaks_count: usize,
 ) -> Result<SpectrumData> {
+    if sd_slices.is_empty() {
+        bail!("Cannot merge empty sd_slices");
+    }
+    
     let data_encoding = sd_slices
         .first()
         .map(|sd| sd.data_encoding.clone())
-        .context("sd_slices is empty")
+        .context("sd_slices is empty (should not happen)")
         .dot()?;
 
     let data_mode = data_encoding.mode;
@@ -738,9 +742,11 @@ pub fn get_spectrum(
 
         let slice_idx = target_slice_idx.ok_or_else(|| {
             anyhow!(
-                "can't find slice index for spectrum with ID={} in bounding box with ID={}",
+                "can't find slice index for spectrum with ID={} in bounding box with ID={} (BB range: {}-{})",
                 spectrum_id,
-                cur_bb.id
+                cur_bb.id,
+                cur_bb.first_spectrum_id,
+                cur_bb.last_spectrum_id
             )
         })?;
 
@@ -752,13 +758,16 @@ pub fn get_spectrum(
             None,
             None,
         )
-        .dot()?;
+        .context(format!("Failed to read slice {} from BB {} (range: {}-{}, spectrum_id: {})", 
+                        slice_idx, cur_bb.id, cur_bb.first_spectrum_id, cur_bb.last_spectrum_id, spectrum_id))?;
 
         sd_slices.push(spectrum_slice_data);
     }
 
     let peaks_count = sd_slices.iter().map(|slice| slice.peaks_count).sum();
-    let spectrum_data = merge_spectrum_slices(&mut sd_slices, peaks_count).dot()?;
+    let spectrum_data = merge_spectrum_slices(&mut sd_slices, peaks_count)
+        .context(format!("Failed to merge {} spectrum slices with {} total peaks for spectrum {}", 
+                        sd_slices.len(), peaks_count, spectrum_id))?;
 
     Ok(Spectrum {
         header: spectrum_header.clone(),

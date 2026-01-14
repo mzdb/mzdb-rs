@@ -15,12 +15,33 @@ pub(crate) fn insert_spectrum(
     spectrum: &Spectrum,
     data_encoding: &DataEncoding,
 ) -> Result<()> {
+    insert_spectrum_impl(writer, spectrum, data_encoding, false)
+}
+
+/// Insert a spectrum into the mzDB file, allowing empty spectra
+/// 
+/// Empty spectra (peaks_count = 0) are inserted into the spectrum table
+/// but do NOT get bounding box entries.
+pub(crate) fn insert_spectrum_allow_empty(
+    writer: &mut MzDbWriter,
+    spectrum: &Spectrum,
+    data_encoding: &DataEncoding,
+) -> Result<()> {
+    insert_spectrum_impl(writer, spectrum, data_encoding, true)
+}
+
+fn insert_spectrum_impl(
+    writer: &mut MzDbWriter,
+    spectrum: &Spectrum,
+    data_encoding: &DataEncoding,
+    allow_empty: bool,
+) -> Result<()> {
     let sh = &spectrum.header;
     let sd = &spectrum.data;
     let peaks_count = sd.peaks_count;
     
-    // Skip empty spectra
-    if peaks_count == 0 {
+    // Skip empty spectra unless explicitly allowed
+    if peaks_count == 0 && !allow_empty {
         return Ok(());
     }
     
@@ -54,20 +75,8 @@ pub(crate) fn insert_spectrum(
     let mut bb_first_spectrum_id = 0i64;
     
     if peaks_count == 0 {
-        // Handle empty spectrum (though we already returned above)
-        let bb = get_bb_with_next_spectrum_slice(
-            writer,
-            spectrum,
-            spectrum_id,
-            spectrum_time,
-            ms_level,
-            &data_enc,
-            isolation_window_opt,
-            0,
-            0.0,
-            mz_inc,
-        )?;
-        bb_first_spectrum_id = bb.spectrum_ids.first().copied().unwrap_or(0);
+        // Empty spectrum: insert into spectrum table but NO bounding box entry
+        bb_first_spectrum_id = 0;
     } else {
         // Get first m/z value and round to BB boundary
         let first_mz = sd.get_mz_at(0)?;
@@ -180,7 +189,7 @@ pub(crate) fn insert_spectrum(
             
             i += 1;
         }
-    }
+    }  // End of else block for peaks_count > 0
     
     // Insert spectrum header into tmp_spectrum table
     insert_spectrum_header(

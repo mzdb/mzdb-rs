@@ -250,6 +250,9 @@ impl MzDbWriter {
     /// - Run slice creation
     /// - Data encoding registration
     ///
+    /// Note: Empty spectra (peaks_count = 0) are skipped by default.
+    /// Use `insert_spectrum_allow_empty()` to include them.
+    ///
     /// # Arguments
     /// * `spectrum` - The spectrum to insert
     /// * `data_encoding` - Data encoding specification
@@ -259,6 +262,27 @@ impl MzDbWriter {
         data_encoding: &DataEncoding,
     ) -> Result<()> {
         spectrum_writer::insert_spectrum(
+            self,
+            spectrum,
+            data_encoding,
+        )
+    }
+    
+    /// Insert a spectrum into the mzDB file, including empty spectra
+    ///
+    /// Same as `insert_spectrum()` but allows empty spectra (peaks_count = 0).
+    /// Empty spectra are inserted into the spectrum table but do NOT get
+    /// bounding box entries.
+    ///
+    /// # Arguments
+    /// * `spectrum` - The spectrum to insert
+    /// * `data_encoding` - Data encoding specification
+    pub fn insert_spectrum_allow_empty(
+        &mut self,
+        spectrum: &Spectrum,
+        data_encoding: &DataEncoding,
+    ) -> Result<()> {
+        spectrum_writer::insert_spectrum_allow_empty(
             self,
             spectrum,
             data_encoding,
