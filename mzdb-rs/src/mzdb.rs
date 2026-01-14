@@ -452,8 +452,8 @@ impl MzDbReader {
     /// spectrum queries.
     ///
     /// # Arguments
-    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
-    ///   (as stored in the spectrum table's `main_precursor_mz` column)
+    /// * `main_precursor_mz` - The target precursor m/z value for the isolation window
+    /// * `precursor_mz_tol` - Optional m/z tolerance in Daltons (default: 0.1)
     ///
     /// # Returns
     /// A vector of spectra sorted by retention time
@@ -463,25 +463,27 @@ impl MzDbReader {
     /// use mzdb::MzDbReader;
     ///
     /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
-    /// // Use exact precursor m/z from the file (e.g., 500.0)
-    /// let spectra = reader.get_dia_spectra_for_window(500.0).unwrap();
+    /// // Use default 0.1 Da tolerance
+    /// let spectra = reader.get_dia_spectra_for_window(500.0, None).unwrap();
     /// println!("Found {} MS2 spectra in window 500.0 m/z", spectra.len());
     /// ```
     pub fn get_dia_spectra_for_window(
         &self,
         main_precursor_mz: f64,
+        precursor_mz_tol: Option<f64>,
     ) -> Result<Vec<Spectrum>> {
-        crate::iterator::collect_dia_spectra(&self.connection, &self.entity_cache, main_precursor_mz)
+        crate::iterator::collect_dia_spectra(&self.connection, &self.entity_cache, main_precursor_mz, precursor_mz_tol)
     }
 
     /// Iterate over MS2 spectra for a DIA isolation window
     ///
     /// Returns a streaming iterator that efficiently loads spectra on-demand
-    /// using SQL filtering by `main_precursor_mz`. This is more memory-efficient
+    /// using tolerance-based filtering by `main_precursor_mz`. This is more memory-efficient
     /// than `get_dia_spectra_for_window` for large isolation windows.
     ///
     /// # Arguments
-    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
+    /// * `main_precursor_mz` - The target precursor m/z value for the isolation window
+    /// * `precursor_mz_tol` - Optional m/z tolerance in Daltons (default: 0.1)
     ///
     /// # Example
     /// ```no_run
@@ -489,7 +491,8 @@ impl MzDbReader {
     /// use fallible_iterator::FallibleIterator;
     ///
     /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
-    /// let mut iter = reader.iter_dia_spectra(500.0).unwrap();
+    /// // Use default 0.1 Da tolerance
+    /// let mut iter = reader.iter_dia_spectra(500.0, None).unwrap();
     /// while let Some(spectrum) = iter.next().unwrap() {
     ///     println!("Spectrum: {} at RT {:.2}", spectrum.header.id, spectrum.header.time);
     /// }
@@ -497,21 +500,24 @@ impl MzDbReader {
     pub fn iter_dia_spectra(
         &self,
         main_precursor_mz: f64,
+        precursor_mz_tol: Option<f64>,
     ) -> Result<SpectrumIterator<'_>> {
-        SpectrumIterator::new_dia(&self.connection, &self.entity_cache, main_precursor_mz)
+        SpectrumIterator::new_dia(&self.connection, &self.entity_cache, main_precursor_mz, precursor_mz_tol)
     }
 
     /// Iterate over MS2 spectra for a DIA isolation window using a callback
     ///
-    /// Uses efficient SQL filtering by `main_precursor_mz`.
+    /// Uses efficient tolerance-based filtering by `main_precursor_mz`.
     /// Spectra are yielded in retention time order.
     ///
     /// # Arguments
-    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
+    /// * `main_precursor_mz` - The target precursor m/z value for the isolation window
+    /// * `precursor_mz_tol` - Optional m/z tolerance in Daltons (default: 0.1)
     /// * `on_each_spectrum` - Callback function called for each spectrum
     pub fn for_each_dia_spectrum<F>(
         &self,
         main_precursor_mz: f64,
+        precursor_mz_tol: Option<f64>,
         on_each_spectrum: F,
     ) -> Result<()>
     where
@@ -521,6 +527,7 @@ impl MzDbReader {
             &self.connection,
             &self.entity_cache,
             main_precursor_mz,
+            precursor_mz_tol,
             on_each_spectrum,
         )
     }
@@ -544,6 +551,65 @@ impl MzDbReader {
         }
         
         windows.into_iter().map(|k| k as f64 / 10.0).collect()
+    }
+
+    /// Get all unique isolation windows with their actual bounds from XML metadata
+    ///
+    /// Returns a vector of (target_mz, lower_bound, upper_bound) tuples.
+    /// This parses the isolation window offsets from the precursor_list XML metadata
+    /// to get the exact window bounds rather than approximations.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use mzdb::MzDbReader;
+    ///
+    /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
+    /// for (target_mz, lower, upper) in reader.get_isolation_windows_with_bounds() {
+    ///     println!("Window: {:.4} Da, range [{:.4}, {:.4}]", target_mz, lower, upper);
+    /// }
+    /// ```
+    pub fn get_isolation_windows_with_bounds(&self) -> Vec<(f64, f64, f64)> {
+        use std::collections::HashMap;
+        use crate::metadata::parse_isolation_window_offsets_from_xml;
+        
+        let mut windows: HashMap<i64, (f64, f64, f64)> = HashMap::new();
+        
+        for header in self.get_spectrum_headers() {
+            if header.ms_level == 2 {
+                if let Some(prec_mz) = header.precursor_mz {
+                    let window_key = (prec_mz * 10.0).round() as i64;
+                    
+                    // Skip if we already have this window
+                    if windows.contains_key(&window_key) {
+                        continue;
+                    }
+                    
+                    // Try to parse isolation window offsets from XML
+                    let (lower_offset, upper_offset) = if let Some(ref xml) = header.precursor_list_str {
+                        parse_isolation_window_offsets_from_xml(xml)
+                    } else {
+                        (None, None)
+                    };
+                    
+                    let (lower_bound, upper_bound) = match (lower_offset, upper_offset) {
+                        (Some(lo), Some(uo)) => {
+                            // Use actual offsets from XML
+                            (prec_mz - lo, prec_mz + uo)
+                        }
+                        _ => {
+                            // Fallback: assume ±2 Da (common for 4 Da windows)
+                            (prec_mz - 2.0, prec_mz + 2.0)
+                        }
+                    };
+                    
+                    windows.insert(window_key, (prec_mz, lower_bound, upper_bound));
+                }
+            }
+        }
+        
+        let mut result: Vec<_> = windows.into_values().collect();
+        result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        result
     }
 
     // ========================================================================

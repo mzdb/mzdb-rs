@@ -1019,6 +1019,114 @@ pub fn get_schema_for_table(db: &Connection, table_name: &str) -> Result<Option<
     )
 }
 
+// ============================================================================
+// DIA Isolation Window Parsing
+// ============================================================================
+
+/// Parse isolation window lower and upper offsets from precursor_list XML
+/// 
+/// Looks for cvParam elements with accessions:
+/// - MS:1000828 = "isolation window lower offset"
+/// - MS:1000829 = "isolation window upper offset"
+/// 
+/// Returns (lower_offset, upper_offset) in Daltons.
+/// 
+/// # Example
+/// ```
+/// use mzdb::metadata::parse_isolation_window_offsets_from_xml;
+/// 
+/// let xml = r#"<precursorList>
+///   <precursor>
+///     <isolationWindow>
+///       <cvParam accession="MS:1000828" value="2.0"/>
+///       <cvParam accession="MS:1000829" value="2.0"/>
+///     </isolationWindow>
+///   </precursor>
+/// </precursorList>"#;
+/// 
+/// let (lower, upper) = parse_isolation_window_offsets_from_xml(xml);
+/// assert_eq!(lower, Some(2.0));
+/// assert_eq!(upper, Some(2.0));
+/// ```
+pub fn parse_isolation_window_offsets_from_xml(xml: &str) -> (Option<f64>, Option<f64>) {
+    use roxmltree::Document;
+    
+    let mut lower_offset = None;
+    let mut upper_offset = None;
+    
+    // Parse XML using roxmltree
+    let doc = match Document::parse(xml) {
+        Ok(doc) => doc,
+        Err(_) => return (None, None),
+    };
+    
+    // Find all cvParam elements and look for our target accessions
+    for node in doc.descendants() {
+        if node.tag_name().name() == "cvParam" {
+            if let Some(accession) = node.attribute("accession") {
+                if let Some(value_str) = node.attribute("value") {
+                    match accession {
+                        "MS:1000828" => {
+                            // isolation window lower offset
+                            lower_offset = value_str.parse().ok();
+                        }
+                        "MS:1000829" => {
+                            // isolation window upper offset
+                            upper_offset = value_str.parse().ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    
+    (lower_offset, upper_offset)
+}
+
+/// Parse msn_bb_time_width from mzDB param_tree
+/// 
+/// Returns the MSn bounding box time width in seconds.
+/// If msn_bb_time_width = 0, each bounding box contains only one spectrum.
+/// If msn_bb_time_width > 0, multiple spectra may be grouped in one bounding box.
+/// 
+/// # Example
+/// ```
+/// use mzdb::metadata::parse_msn_bb_time_width;
+/// 
+/// let param_tree = r#"<paramTree>
+///   <userParams>
+///     <userParam name="msn_bb_time_width" value="60" type="xsd:float"/>
+///   </userParams>
+/// </paramTree>"#;
+/// 
+/// let time_width = parse_msn_bb_time_width(param_tree);
+/// assert_eq!(time_width, Some(60.0));
+/// ```
+pub fn parse_msn_bb_time_width(param_tree: &str) -> Option<f64> {
+    use roxmltree::Document;
+    
+    let doc = match Document::parse(param_tree) {
+        Ok(doc) => doc,
+        Err(_) => return None,
+    };
+    
+    // Find userParam with name="msn_bb_time_width"
+    for node in doc.descendants() {
+        if node.tag_name().name() == "userParam" {
+            if let Some(name) = node.attribute("name") {
+                if name == "msn_bb_time_width" {
+                    if let Some(value_str) = node.attribute("value") {
+                        return value_str.parse().ok();
+                    }
+                }
+            }
+        }
+    }
+    
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

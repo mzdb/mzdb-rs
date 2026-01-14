@@ -182,12 +182,13 @@ fn bb_row_buffer_to_spectrum_buffer(
         let spectrum_id = first_bb_index.spectra_ids[spectrum_slice_idx];
         
         // Skip if not in the requested spectrum IDs
+        // Use binary_search for O(log n) lookup (spectrum_ids is sorted)
         if let Some(ids) = spectrum_ids {
-            if !ids.contains(&spectrum_id) {
+            if ids.binary_search(&spectrum_id).is_err() {
                 continue;
             }
         }
-        
+
         let mut spectrum_peak_count = 0;
         let mut spectrum_slices = Vec::with_capacity(bb_count);
 
@@ -304,34 +305,84 @@ impl<'a> SpectrumIterator<'a> {
     /// Create a new spectrum iterator for a specific DIA isolation window
     ///
     /// This efficiently iterates over MS2 spectra matching the given `main_precursor_mz`
-    /// using SQL filtering. Spectra are yielded one at a time without preloading.
+    /// using tolerance-based filtering. Spectra are yielded one at a time without preloading.
     ///
     /// # Arguments
     /// * `db` - Database connection
     /// * `entity_cache` - Pre-loaded entity cache
-    /// * `main_precursor_mz` - The exact precursor m/z value for the isolation window
+    /// * `main_precursor_mz` - The target precursor m/z value for the isolation window
+    /// * `precursor_mz_tol` - Optional m/z tolerance in Daltons (default: 0.1)
+    ///
+    /// # Tolerance
+    /// The tolerance parameter allows matching spectra whose precursor m/z is within
+    /// ±precursor_mz_tol of the target value. For example:
+    /// - precursor_mz_tol = 0.0: Exact match only (may miss spectra due to rounding)
+    /// - precursor_mz_tol = 0.1: Match within ±0.1 Da (recommended for rounded window values)
+    /// - precursor_mz_tol = 0.5: Match within ±0.5 Da (wider window)
+    ///
+    /// When using `get_isolation_windows()` which returns rounded values (1 decimal place),
+    /// a tolerance of 0.1 is recommended to capture all spectra in the window.
     pub fn new_dia(
         db: &'a Connection,
         entity_cache: &'a EntityCache,
         main_precursor_mz: f64,
+        precursor_mz_tol: Option<f64>,
     ) -> Result<Self> {
+        let precursor_mz_tol = precursor_mz_tol.unwrap_or(0.1);
+
         // Pre-compute spectrum IDs matching this isolation window
-        let dia_spectrum_ids: Vec<i64> = entity_cache
+        // Use tolerance-based matching instead of exact equality
+        let mut dia_spectrum_ids: Vec<i64> = entity_cache
             .spectrum_headers
             .iter()
-            .filter(|h| h.ms_level == 2 && h.precursor_mz == Some(main_precursor_mz))
+            .filter(|h| {
+                h.ms_level == 2 &&
+                h.precursor_mz
+                    .map(|mz| (mz - main_precursor_mz).abs() <= precursor_mz_tol)
+                    .unwrap_or(false)
+            })
             .map(|h| h.id)
             .collect();
-        
-        // Query bounding boxes for MS2 spectra with this precursor m/z
-        let stmt = db
-            .prepare(
-                "SELECT bounding_box.* FROM bounding_box, spectrum \
-                 WHERE spectrum.id = bounding_box.first_spectrum_id \
-                 AND spectrum.ms_level = 2 \
-                 AND spectrum.main_precursor_mz = ?1"
+
+        // Ensure sorted for efficient binary search during filtering
+        dia_spectrum_ids.sort_unstable();
+
+        // Check msn_bb_time_width to determine optimal query strategy
+        let msn_bb_time_width = {
+            use crate::metadata::{get_mzdb_metadata, parse_msn_bb_time_width};
+            get_mzdb_metadata(db)
+                .ok()
+                .flatten()
+                .and_then(|metadata| parse_msn_bb_time_width(&metadata.param_tree))
+        };
+
+        // Choose SQL query based on msn_bb_time_width:
+        // - If 0: Each BB contains single spectrum, can filter by first_spectrum_id's precursor_mz
+        // - If > 0: Multiple spectra per BB, must use run_slice join to filter by ms_level only
+        let stmt = if msn_bb_time_width == Some(0.0) {
+            // Optimization: BBs contain single spectra, filter by precursor_mz
+            // Embed values directly in SQL to avoid storing them in struct
+            let min_precursor_mz = main_precursor_mz - precursor_mz_tol;
+            let max_precursor_mz = main_precursor_mz + precursor_mz_tol;
+
+            let sql = format!(
+                "SELECT bounding_box.* FROM bounding_box \
+                 INNER JOIN spectrum ON bounding_box.first_spectrum_id = spectrum.id \
+                 WHERE spectrum.ms_level = 2 \
+                 AND spectrum.main_precursor_mz BETWEEN {} AND {}",
+                min_precursor_mz, max_precursor_mz
+            );
+
+            db.prepare(&sql).dot()?
+        } else {
+            // General case: BBs may contain multiple spectra, filter by ms_level only
+            db.prepare(
+                "SELECT bounding_box.* FROM bounding_box \
+                 INNER JOIN run_slice ON bounding_box.run_slice_id = run_slice.id \
+                 WHERE run_slice.ms_level = 2"
             )
-            .dot()?;
+            .dot()?
+        };
 
         Ok(Self {
             stmt,
@@ -356,18 +407,10 @@ impl<'a> SpectrumIterator<'a> {
             // 2. rows will be dropped when Self is dropped
             // 3. rows will never outlive stmt
             let rows = unsafe {
-                match self.dia_param {
-                    Some(mz) => {
-                        std::mem::transmute::<rusqlite::Rows<'_>, rusqlite::Rows<'a>>(
-                            self.stmt.query([mz]).dot()?
-                        )
-                    }
-                    None => {
-                        std::mem::transmute::<rusqlite::Rows<'_>, rusqlite::Rows<'a>>(
-                            self.stmt.query([]).dot()?
-                        )
-                    }
-                }
+                // No parameters needed - values are embedded in SQL
+                std::mem::transmute::<rusqlite::Rows<'_>, rusqlite::Rows<'a>>(
+                    self.stmt.query([]).dot()?
+                )
             };
             self.rows = Some(rows);
         }
@@ -376,7 +419,7 @@ impl<'a> SpectrumIterator<'a> {
 
     fn read_next_bb(&mut self) -> Result<Option<BoundingBox>> {
         self.ensure_rows()?;
-        
+
         if let Some(ref mut rows) = self.rows {
             if let Some(row) = rows.next().dot()? {
                 return Ok(Some(BoundingBox {
@@ -388,7 +431,7 @@ impl<'a> SpectrumIterator<'a> {
                 }));
             }
         }
-        
+
         Ok(None)
     }
 
@@ -398,10 +441,10 @@ impl<'a> SpectrumIterator<'a> {
         }
 
         let mut temp_buffer = Vec::with_capacity(100);
-        
+
         // For DIA, filter to only the matching spectrum IDs
         let spectrum_ids = self.dia_spectrum_ids.as_deref();
-        
+
         bb_row_buffer_to_spectrum_buffer(
             &self.bb_row_buffer,
             &mut temp_buffer,
@@ -409,14 +452,14 @@ impl<'a> SpectrumIterator<'a> {
             spectrum_ids,
         )
         .dot()?;
-        
+
         self.bb_row_buffer.clear();
-        
+
         // Only sort for non-DIA iteration (DIA spectra are already in correct order)
         if self.dia_param.is_none() {
             temp_buffer.sort_by(|s1, s2| s1.header.id.cmp(&s2.header.id));
         }
-        
+
         self.spectrum_buffer.extend(temp_buffer);
 
         Ok(())
@@ -506,42 +549,49 @@ impl<'a> FallibleIterator for SpectrumIterator<'a> {
 // ============================================================================
 
 /// Iterate over MS2 spectra for a specific DIA isolation window (by main_precursor_mz)
-/// 
+///
 /// This is much more efficient than `for_each_spectrum` with post-filtering because
 /// it uses SQL to filter directly on main_precursor_mz, avoiding loading unnecessary data.
-/// 
+///
 /// Spectra are streamed one at a time without preloading all into memory.
 /// Spectra are returned in retention time order.
+///
+/// # Arguments
+/// * `precursor_mz_tol` - Optional m/z tolerance in Daltons (default: 0.1)
 pub fn for_each_dia_spectrum<F>(
     db: &Connection,
     entity_cache: &EntityCache,
     main_precursor_mz: f64,
+    precursor_mz_tol: Option<f64>,
     mut on_each_spectrum: F,
 ) -> Result<()>
 where
     F: FnMut(&Spectrum) -> Result<()>,
 {
-    let mut iter = SpectrumIterator::new_dia(db, entity_cache, main_precursor_mz)?;
-    
+    let mut iter = SpectrumIterator::new_dia(db, entity_cache, main_precursor_mz, precursor_mz_tol)?;
+
     while let Some(spectrum) = iter.next()? {
         on_each_spectrum(&spectrum)?;
     }
-    
+
     Ok(())
 }
 
 /// Collect all MS2 spectra for a specific DIA isolation window
-/// 
+///
 /// This is a convenience function that collects all spectra into a Vec.
 /// Spectra are returned sorted by retention time.
+///
+/// # Arguments
+/// * `precursor_mz_tol` - Optional m/z tolerance in Daltons (default: 0.1)
 pub fn collect_dia_spectra(
     db: &Connection,
     entity_cache: &EntityCache,
     main_precursor_mz: f64,
+    precursor_mz_tol: Option<f64>,
 ) -> Result<Vec<Spectrum>> {
     use fallible_iterator::FallibleIterator;
-    
-    let iter = SpectrumIterator::new_dia(db, entity_cache, main_precursor_mz)?;
+
+    let iter = SpectrumIterator::new_dia(db, entity_cache, main_precursor_mz, precursor_mz_tol)?;
     iter.collect()
 }
-
