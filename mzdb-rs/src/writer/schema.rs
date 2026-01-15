@@ -4,8 +4,49 @@
 //! an mzDB 0.7 format database. The schema is based on the mzdb4s implementation
 //! and includes all necessary tables, virtual tables (R-trees), and constraints.
 
+/// Macro to generate spectrum table column definitions and constraints
+///
+/// This macro is used to create both the temporary tmp_spectrum table
+/// and the permanent spectrum table, ensuring they have identical schemas.
+macro_rules! spectrum_columns {
+    () => {
+        r#"
+    initial_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    cycle INTEGER NOT NULL,
+    time REAL NOT NULL,
+    ms_level INTEGER NOT NULL,
+    activation_type TEXT(10),
+    tic REAL NOT NULL,
+    base_peak_mz REAL NOT NULL,
+    base_peak_intensity REAL NOT NULL,
+    main_precursor_mz REAL,
+    main_precursor_charge INTEGER,
+    data_points_count INTEGER NOT NULL,
+    param_tree TEXT NOT NULL,
+    scan_list TEXT,
+    precursor_list TEXT,
+    product_list TEXT,
+    shared_param_tree_id INTEGER,
+    instrument_configuration_id INTEGER,
+    source_file_id INTEGER,
+    run_id INTEGER NOT NULL,
+    data_processing_id INTEGER,
+    data_encoding_id INTEGER NOT NULL,
+    bb_first_spectrum_id INTEGER,
+    FOREIGN KEY (shared_param_tree_id) REFERENCES shared_param_tree (id),
+    FOREIGN KEY (instrument_configuration_id) REFERENCES instrument_configuration (id),
+    FOREIGN KEY (source_file_id) REFERENCES source_file (id),
+    FOREIGN KEY (run_id) REFERENCES run (id),
+    FOREIGN KEY (data_processing_id) REFERENCES data_processing (id),
+    FOREIGN KEY (data_encoding_id) REFERENCES data_encoding (id),
+    FOREIGN KEY (bb_first_spectrum_id) REFERENCES bounding_box (first_spectrum_id)
+"#
+    };
+}
+
 /// Complete mzDB schema DDL
-pub const MZDB_SCHEMA: &str = r#"
+pub const MZDB_SCHEMA: &str = concat!(r#"
 CREATE TABLE data_processing (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL
@@ -170,38 +211,9 @@ CREATE TABLE run_slice (
 );
 
 CREATE TEMPORARY TABLE tmp_spectrum (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    initial_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    cycle INTEGER NOT NULL,
-    time REAL NOT NULL,
-    ms_level INTEGER NOT NULL,
-    activation_type TEXT(10),
-    tic REAL NOT NULL,
-    base_peak_mz REAL NOT NULL,
-    base_peak_intensity REAL NOT NULL,
-    main_precursor_mz REAL,
-    main_precursor_charge INTEGER,
-    data_points_count INTEGER NOT NULL,
-    param_tree TEXT NOT NULL,
-    scan_list TEXT,
-    precursor_list TEXT,
-    product_list TEXT,
-    shared_param_tree_id INTEGER,
-    instrument_configuration_id INTEGER,
-    source_file_id INTEGER,
-    run_id INTEGER NOT NULL,
-    data_processing_id INTEGER,
-    data_encoding_id INTEGER NOT NULL,
-    bb_first_spectrum_id INTEGER,
-    FOREIGN KEY (shared_param_tree_id) REFERENCES shared_param_tree (id),
-    FOREIGN KEY (instrument_configuration_id) REFERENCES instrument_configuration (id),
-    FOREIGN KEY (source_file_id) REFERENCES source_file (id),
-    FOREIGN KEY (run_id) REFERENCES run (id),
-    FOREIGN KEY (data_processing_id) REFERENCES data_processing (id),
-    FOREIGN KEY (data_encoding_id) REFERENCES data_encoding (id),
-    FOREIGN KEY (bb_first_spectrum_id) REFERENCES bounding_box (first_spectrum_id)
-);
+    id INTEGER PRIMARY KEY AUTOINCREMENT,"#,
+spectrum_columns!(),
+r#");
 
 CREATE TABLE bounding_box (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -268,7 +280,18 @@ CREATE VIRTUAL TABLE bounding_box_msn_rtree USING rtree(
     min_time REAL NOT NULL,
     max_time REAL NOT NULL
 );
-"#;
+"#);
+
+/// Permanent spectrum table schema with all constraints
+///
+/// This matches the tmp_spectrum schema but creates a permanent table.
+/// Used in close() to convert tmp_spectrum to spectrum while preserving constraints.
+pub const SPECTRUM_TABLE_SCHEMA: &str = concat!(r#"
+CREATE TABLE spectrum (
+    id INTEGER PRIMARY KEY,"#,
+spectrum_columns!(),
+r#");
+"#);
 
 #[cfg(test)]
 mod tests {

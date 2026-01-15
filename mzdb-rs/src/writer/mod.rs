@@ -91,7 +91,7 @@ pub use bounding_box::{serialize_to_bounding_box, insert_bounding_box_data, inse
 pub use data_encoding::DataEncodingRegistry;
 pub use data_encoding::get_or_create_centroid_data_encoding;
 pub use run_slice::RunSliceFactory;
-pub use schema::MZDB_SCHEMA;
+pub use schema::{MZDB_SCHEMA, SPECTRUM_TABLE_SCHEMA};
 pub use dia_common::{
     DiaWriteContext, DiaSpectrumParams, DIA_SPECTRUM_INSERT_SQL,
     calculate_time_bounds, calculate_mz_bounds, calculate_mz_bounds_from_arrays,
@@ -110,50 +110,50 @@ pub use metadata::WriterMetadata;
 pub struct MzDbWriter {
     /// Database connection
     connection: Option<Connection>,
-    
+
     /// Path to the mzDB file
     db_path: String,
-    
+
     /// Metadata for the file
     metadata: WriterMetadata,
-    
+
     /// Bounding box dimensions
     bb_sizes: BBSizes,
-    
+
     /// Whether this is DIA/SWATH data
     is_dia: bool,
-    
+
     /// MS2 fragment detection m/z range (from acquisition parameters)
     /// Used to determine if MS2 run slices should be partitioned
     ms2_mz_range: Option<(f64, f64)>,
-    
+
     /// mzDB table param_tree (for method texts)
     mzdb_param_tree: String,
-    
+
     /// Model version (currently 0.7)
     model_version: f32,
-    
+
     /// Counter for inserted spectra
     inserted_spectra_count: i64,
-    
+
     /// Bounding box cache for accumulating spectrum data
     bb_cache: BoundingBoxCache,
-    
+
     /// Data encoding registry
     data_encoding_registry: DataEncodingRegistry,
-    
+
     /// Run slice factory
     run_slice_factory: RunSliceFactory,
-    
+
     /// Prepared statement for bounding box insertion
     bbox_insert_stmt: Option<Statement<'static>>,
-    
+
     /// Prepared statement for R-tree insertion
     rtree_insert_stmt: Option<Statement<'static>>,
-    
+
     /// Prepared statement for MSn R-tree insertion
     msn_rtree_insert_stmt: Option<Statement<'static>>,
-    
+
     /// Prepared statement for spectrum insertion
     spectrum_insert_stmt: Option<Statement<'static>>,
 }
@@ -195,7 +195,7 @@ impl MzDbWriter {
             spectrum_insert_stmt: None,
         })
     }
-    
+
     /// Open the database connection and initialize the schema
     ///
     /// This method:
@@ -209,7 +209,7 @@ impl MzDbWriter {
         // Open connection
         let mut conn = Connection::open(&self.db_path)
             .context("Failed to open database connection")?;
-        
+
         // Apply SQLite optimizations (same as mzdb4s)
         conn.execute_batch(
             "PRAGMA encoding='UTF-8';
@@ -224,24 +224,24 @@ impl MzDbWriter {
              PRAGMA ignore_check_constraints=ON;
              BEGIN TRANSACTION;"
         ).context("Failed to set SQLite pragmas")?;
-        
+
         // Create schema
         conn.execute_batch(MZDB_SCHEMA)
             .context("Failed to create mzDB schema")?;
-        
+
         // TODO: Prepare INSERT statements
         // This requires converting the statements to 'static lifetime
         // which is complex in Rust. We'll use direct execute calls instead.
-        
+
         // Insert metadata
         metadata::insert_metadata(&mut conn, &self.metadata, &self.bb_sizes, self.is_dia, &self.mzdb_param_tree)
             .context("Failed to insert metadata")?;
-        
+
         self.connection = Some(conn);
-        
+
         Ok(())
     }
-    
+
     /// Insert a spectrum into the mzDB file
     ///
     /// This is the main method for adding spectrum data. It handles:
@@ -267,7 +267,7 @@ impl MzDbWriter {
             data_encoding,
         )
     }
-    
+
     /// Insert a spectrum into the mzDB file, including empty spectra
     ///
     /// Same as `insert_spectrum()` but allows empty spectra (peaks_count = 0).
@@ -288,7 +288,7 @@ impl MzDbWriter {
             data_encoding,
         )
     }
-    
+
     /// Close the database and finalize the mzDB file
     ///
     /// This method:
@@ -302,24 +302,29 @@ impl MzDbWriter {
     pub fn close(mut self) -> Result<()> {
         // Flush remaining bounding boxes (needs the connection still in self)
         self.flush_all_bb_rows()?;
-        
+
         // Now take the connection
         let conn = self.connection.take()
             .context("No active connection")?;
-        
-        // Convert temporary spectrum table to permanent
-        conn.execute("CREATE TABLE spectrum AS SELECT * FROM tmp_spectrum;", [])
-            .context("Failed to create permanent spectrum table")?;
-        
+
+        // Convert temporary spectrum table to permanent with constraints preserved
+        // Create permanent spectrum table with same schema as tmp_spectrum (including all constraints)
+        conn.execute_batch(SPECTRUM_TABLE_SCHEMA)
+            .context("Failed to create spectrum table with constraints")?;
+
+        // Copy data from temporary to permanent table
+        conn.execute("INSERT INTO spectrum SELECT * FROM tmp_spectrum", [])
+            .context("Failed to copy data to spectrum table")?;
+
         // Insert data encodings
         data_encoding::insert_data_encodings(&conn, &self.data_encoding_registry)?;
-        
+
         // Insert run slices
         run_slice::insert_run_slices(&conn, &self.run_slice_factory)?;
-        
+
         // Create indexes
         self.create_indexes(&conn)?;
-        
+
         // Commit transaction first
         conn.execute_batch("COMMIT TRANSACTION;")
             .context("Failed to commit transaction")?;
@@ -336,7 +341,7 @@ impl MzDbWriter {
             "INSERT OR REPLACE INTO sqlite_sequence VALUES ('spectrum', ?1);",
             [self.inserted_spectra_count]
         ).context("Failed to update sqlite_sequence for spectrum")?;
-        
+
         // Run PRAGMA optimize to analyze tables and optimize query performance
         seq_conn.execute_batch("PRAGMA optimize;")
             .context("Failed to run PRAGMA optimize")?;
@@ -436,7 +441,7 @@ impl MzDbWriterBuilder {
     }
 
     /// Set MS2 fragment detection m/z range (for run slice partitioning)
-    /// 
+    ///
     /// If provided and bb_mz_height_msn < (high - low), DIA MS2 run slices
     /// will be partitioned for more efficient spatial queries.
     pub fn ms2_mz_range(mut self, range: Option<(f64, f64)>) -> Self {
