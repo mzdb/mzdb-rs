@@ -193,7 +193,7 @@ CREATE TEMPORARY TABLE tmp_spectrum (
     run_id INTEGER NOT NULL,
     data_processing_id INTEGER,
     data_encoding_id INTEGER NOT NULL,
-    bb_first_spectrum_id INTEGER NOT NULL,
+    bb_first_spectrum_id INTEGER,
     FOREIGN KEY (shared_param_tree_id) REFERENCES shared_param_tree (id),
     FOREIGN KEY (instrument_configuration_id) REFERENCES instrument_configuration (id),
     FOREIGN KEY (source_file_id) REFERENCES source_file (id),
@@ -274,18 +274,18 @@ CREATE VIRTUAL TABLE bounding_box_msn_rtree USING rtree(
 mod tests {
     use super::*;
     use rusqlite::Connection;
-    
+
     #[test]
     fn test_schema_is_valid() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(MZDB_SCHEMA).unwrap();
-        
+
         // Verify key regular tables exist
         let tables = vec![
             "data_processing", "software", "sample", "source_file",
             "run", "run_slice", "bounding_box"
         ];
-        
+
         for table in tables {
             let result: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -294,7 +294,7 @@ mod tests {
             ).unwrap();
             assert_eq!(result, 1, "Table {} should exist", table);
         }
-        
+
         // Verify temporary table exists (check sqlite_temp_master for temporary tables)
         let tmp_result: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_temp_master WHERE type='table' AND name='tmp_spectrum'",

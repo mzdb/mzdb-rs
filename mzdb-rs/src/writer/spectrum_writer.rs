@@ -278,6 +278,7 @@ fn insert_spectrum_header(
     let activation_type = sh.activation_type.as_deref();
     let precursor_mz = sh.precursor_mz;
     let precursor_charge = sh.precursor_charge;
+    let bb_id_opt = if bb_first_spectrum_id == 0 { None } else { Some(bb_first_spectrum_id) };
     
     conn.execute(
         "INSERT INTO tmp_spectrum VALUES (
@@ -309,7 +310,7 @@ fn insert_spectrum_header(
             1i64,                                 // 21: run_id
             1i64,                                 // 22: data_processing_id
             data_enc.id,                          // 23: data_encoding_id
-            bb_first_spectrum_id,                 // 24: bb_first_spectrum_id
+            bb_id_opt,                            // 24: bb_first_spectrum_id (NULL if 0)
         ],
     ).context("Failed to insert spectrum header")?;
     

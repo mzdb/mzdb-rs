@@ -697,13 +697,35 @@ pub fn get_spectrum(
         .dot()?;
 
     // Use parameterized query for better performance (SQLite caches the prepared statement)
-    let bb_first_spec_id: i64 = db
+    let bb_first_spec_id: Option<i64> = db
         .prepare_cached(spectrum_sql::GET_BB_FIRST_SPECTRUM_ID)
         .dot()?
         .query_row([spectrum_id], |row| row.get(0))
         .optional()
         .dot()?
         .ok_or_else(|| anyhow!("can't get bb_first_spectrum_id for spectrum with ID = {}", spectrum_id))?;
+
+    // If bb_first_spectrum_id is NULL, this is an empty spectrum with no data
+    let bb_first_spec_id = match bb_first_spec_id {
+        Some(id) => id,
+        None => {
+            // Return empty spectrum
+            return Ok(Spectrum {
+                header: spectrum_header.clone(),
+                data: SpectrumData {
+                    data_encoding: entity_cache.data_encodings_cache
+                        .get_data_encoding_by_spectrum_id(&spectrum_id)
+                        .ok_or_else(|| anyhow!("can't retrieve data encoding for spectrum ID={}", spectrum_id))?
+                        .clone(),
+                    peaks_count: 0,
+                    mz_array: vec![],
+                    intensity_array: vec![],
+                    lwhm_array: vec![],
+                    rwhm_array: vec![],
+                },
+            });
+        }
+    };
 
     let bb_count: i64 = db
         .prepare_cached(spectrum_sql::COUNT_BB_BY_FIRST_SPECTRUM_ID)
@@ -758,7 +780,7 @@ pub fn get_spectrum(
             None,
             None,
         )
-        .context(format!("Failed to read slice {} from BB {} (range: {}-{}, spectrum_id: {})", 
+        .context(format!("Failed to read slice {} from BB {} (range: {}-{}, spectrum_id: {})",
                         slice_idx, cur_bb.id, cur_bb.first_spectrum_id, cur_bb.last_spectrum_id, spectrum_id))?;
 
         sd_slices.push(spectrum_slice_data);
@@ -766,7 +788,7 @@ pub fn get_spectrum(
 
     let peaks_count = sd_slices.iter().map(|slice| slice.peaks_count).sum();
     let spectrum_data = merge_spectrum_slices(&mut sd_slices, peaks_count)
-        .context(format!("Failed to merge {} spectrum slices with {} total peaks for spectrum {}", 
+        .context(format!("Failed to merge {} spectrum slices with {} total peaks for spectrum {}",
                         sd_slices.len(), peaks_count, spectrum_id))?;
 
     Ok(Spectrum {
@@ -1151,7 +1173,7 @@ pub fn list_run_slices(db: &Connection) -> Result<Vec<RunSliceHeader>> {
     let mut stmt = db.prepare(
         "SELECT id, ms_level, number, begin_mz, end_mz, run_id FROM run_slice ORDER BY number"
     )?;
-    
+
     let slices = stmt.query_map([], run_slice_from_row)?;
     slices.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
@@ -1162,7 +1184,7 @@ pub fn list_run_slices_by_ms_level(db: &Connection, ms_level: i64) -> Result<Vec
         "SELECT id, ms_level, number, begin_mz, end_mz, run_id FROM run_slice \
          WHERE ms_level = ?1 ORDER BY number"
     )?;
-    
+
     let slices = stmt.query_map([ms_level], run_slice_from_row)?;
     slices.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
@@ -1178,8 +1200,8 @@ pub fn get_run_slice(db: &Connection, id: i64) -> Result<Option<RunSliceHeader>>
 
 /// Get run slice containing a specific m/z at a given MS level
 pub fn get_run_slice_containing_mz(
-    db: &Connection, 
-    mz: f64, 
+    db: &Connection,
+    mz: f64,
     ms_level: i64
 ) -> Result<Option<RunSliceHeader>> {
     let result = db
@@ -1222,7 +1244,7 @@ pub fn get_spectrum_ids_in_rt_range(
         ),
         None => "SELECT id FROM spectrum WHERE time >= ?1 AND time <= ?2 ORDER BY id".to_string(),
     };
-    
+
     let mut stmt = db.prepare(&query)?;
     let ids = stmt.query_map([min_rt, max_rt], |row| row.get(0))?;
     ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(Into::into)
@@ -1242,7 +1264,7 @@ pub fn get_spectrum_ids_in_cycle_range(
         ),
         None => "SELECT id FROM spectrum WHERE cycle >= ?1 AND cycle <= ?2 ORDER BY id".to_string(),
     };
-    
+
     let mut stmt = db.prepare(&query)?;
     let ids = stmt.query_map([min_cycle, max_cycle], |row| row.get(0))?;
     ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(Into::into)
@@ -1258,7 +1280,7 @@ pub fn get_ms2_spectrum_ids_for_precursor_mz(
         "SELECT id FROM spectrum WHERE ms_level = 2 \
          AND main_precursor_mz >= ?1 AND main_precursor_mz <= ?2 ORDER BY id"
     )?;
-    
+
     let ids = stmt.query_map([min_precursor_mz, max_precursor_mz], |row| row.get(0))?;
     ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(Into::into)
 }
@@ -1272,7 +1294,7 @@ pub fn get_bounding_box_ids_for_run_slice(db: &Connection, run_slice_id: i64) ->
     let mut stmt = db.prepare(
         "SELECT id FROM bounding_box WHERE run_slice_id = ?1 ORDER BY first_spectrum_id"
     )?;
-    
+
     let ids = stmt.query_map([run_slice_id], |row| row.get(0))?;
     ids.collect::<rusqlite::Result<Vec<i64>>>().map_err(Into::into)
 }
@@ -1292,7 +1314,7 @@ pub fn get_bounding_boxes_for_spectrum_range(
         "SELECT id, data, run_slice_id, first_spectrum_id, last_spectrum_id FROM bounding_box \
          WHERE first_spectrum_id <= ?2 AND last_spectrum_id >= ?1 ORDER BY first_spectrum_id"
     )?;
-    
+
     let boxes = stmt.query_map([first_spectrum_id, last_spectrum_id], |row| {
         Ok(BoundingBox {
             id: row.get(0)?,
@@ -1302,7 +1324,7 @@ pub fn get_bounding_boxes_for_spectrum_range(
             last_spectrum_id: row.get(4)?,
         })
     })?;
-    
+
     boxes.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
@@ -1329,40 +1351,40 @@ pub struct MzDbStats {
 pub fn get_mzdb_stats(db: &Connection) -> Result<MzDbStats> {
     // Use sqlite_sequence where possible for better performance
     let spectrum_count = get_table_records_count_impl(db, "spectrum")?.unwrap_or(0);
-    
+
     // These need WHERE clauses so we use COUNT(*) directly
     let ms1_count: i64 = db
         .prepare("SELECT COUNT(*) FROM spectrum WHERE ms_level = 1")?
         .query_row([], |row| row.get(0))?;
-    
+
     let ms2_count: i64 = db
         .prepare("SELECT COUNT(*) FROM spectrum WHERE ms_level = 2")?
         .query_row([], |row| row.get(0))?;
-    
+
     let chromatogram_count = get_table_records_count_impl(db, "chromatogram")?.unwrap_or(0);
     let bounding_box_count = get_table_records_count_impl(db, "bounding_box")?.unwrap_or(0);
     let run_slice_count = get_table_records_count_impl(db, "run_slice")?.unwrap_or(0);
-    
+
     let min_mz: Option<f64> = db
         .prepare("SELECT MIN(begin_mz) FROM run_slice")?
         .query_row([], |row| row.get(0))
         .ok();
-    
+
     let max_mz: Option<f64> = db
         .prepare("SELECT MAX(end_mz) FROM run_slice")?
         .query_row([], |row| row.get(0))
         .ok();
-    
+
     let min_rt: Option<f32> = db
         .prepare("SELECT MIN(time) FROM spectrum")?
         .query_row([], |row| row.get(0))
         .ok();
-    
+
     let max_rt: Option<f32> = db
         .prepare("SELECT MAX(time) FROM spectrum")?
         .query_row([], |row| row.get(0))
         .ok();
-    
+
     Ok(MzDbStats {
         spectrum_count,
         ms1_count,
@@ -1384,21 +1406,21 @@ pub fn get_mzdb_stats(db: &Connection) -> Result<MzDbStats> {
 /// Get unique MS2 isolation windows (for DIA data) by parsing precursor_list XML
 pub fn get_isolation_windows(db: &Connection) -> Result<Vec<MzRange>> {
     use std::collections::HashSet;
-    
+
     // Query all MS2 spectra with their precursor_list XML
     let mut stmt = db.prepare(
         "SELECT DISTINCT precursor_list FROM spectrum WHERE ms_level = 2 AND precursor_list IS NOT NULL"
     )?;
-    
+
     let precursor_lists: Vec<String> = stmt.query_map([], |row| row.get(0))?
         .filter_map(|r| r.ok())
         .collect();
-    
+
     // Parse isolation windows from XML and deduplicate
     // Use a HashSet with rounded values to handle floating point comparison
     let mut seen: HashSet<(i64, i64)> = HashSet::new();
     let mut windows = Vec::new();
-    
+
     for prec_list in &precursor_lists {
         if let Some(window) = parse_isolation_window_from_xml(prec_list) {
             // Round to 0.01 m/z precision for deduplication
@@ -1406,16 +1428,16 @@ pub fn get_isolation_windows(db: &Connection) -> Result<Vec<MzRange>> {
                 (window.min_mz * 100.0).round() as i64,
                 (window.max_mz * 100.0).round() as i64,
             );
-            
+
             if seen.insert(key) {
                 windows.push(window);
             }
         }
     }
-    
+
     // Sort by min_mz
     windows.sort_by(|a, b| a.min_mz.partial_cmp(&b.min_mz).unwrap_or(std::cmp::Ordering::Equal));
-    
+
     Ok(windows)
 }
 
@@ -1425,11 +1447,11 @@ pub fn is_dia_data(db: &Connection) -> Result<bool> {
     let ms2_count: i64 = db
         .prepare("SELECT COUNT(*) FROM spectrum WHERE ms_level = 2")?
         .query_row([], |row| row.get(0))?;
-    
+
     if ms2_count < 100 {
         return Ok(false);
     }
-    
+
     // Check if MSn R-tree exists (typically present for DIA)
     table_exists(db, "bounding_box_msn_rtree")
 }
@@ -1437,7 +1459,7 @@ pub fn is_dia_data(db: &Connection) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_mzdb_stats_struct() {
         let stats = MzDbStats {
@@ -1452,9 +1474,8 @@ mod tests {
             min_rt: Some(0.0),
             max_rt: Some(60.0),
         };
-        
+
         assert_eq!(stats.spectrum_count, 1000);
         assert_eq!(stats.ms1_count + stats.ms2_count, stats.spectrum_count);
     }
 }
-
