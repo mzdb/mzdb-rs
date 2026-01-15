@@ -36,7 +36,7 @@ use rusqlite::Connection;
 use crate::processing::dia::IsolationWindow;
 use crate::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel};
 use crate::processing::staggered::{StaggeredDiaDetector, StaggeredDiaInfo};
-use crate::model::{BBSizes, SpectrumHeader as ModelSpectrumHeader, Spectrum, SpectrumData, DataEncoding};
+use crate::model::{SpectrumHeader as ModelSpectrumHeader, Spectrum, SpectrumData, DataEncoding};
 use crate::writer::{
     xml_builder::generate_dia_precursor_list_xml_asymmetric,
 };
@@ -505,23 +505,18 @@ fn write_simplified_dia_mzdb_v2(
     use crate::writer::{MzDbWriterBuilder, WriterMetadata};
     use crate::MzDbReaderBuilder;
     use crate::model::{DataEncoding, DataMode, PeakEncoding, ByteOrder};
+    use fallible_iterator::FallibleIterator;
     use std::collections::HashMap;
 
     log::info!("Opening source mzDB for reading...");
-    let source_conn = Connection::open(source_mzdb_path)?;
     let source_reader = MzDbReaderBuilder::new(source_mzdb_path).build()?;
 
-    // Read BB sizes
+    // Get BB sizes from entity cache
     log::info!("Reading BB configuration...");
-    let bb_sizes = read_bb_sizes(&source_conn)?;
+    let bb_sizes = source_reader.entity_cache().bb_sizes.clone();
     log::info!("  BB sizes: MS1 {:.1}x{:.1} Da·s, MS2 {:.1}x{:.1} Da·s",
                bb_sizes.bb_mz_height_ms1, bb_sizes.bb_rt_width_ms1,
                bb_sizes.bb_mz_height_msn, bb_sizes.bb_rt_width_msn);
-
-    // Read all spectra sorted by time
-    log::info!("Reading all spectra from source...");
-    let all_source_spectra = read_all_spectra_sorted_by_time(&source_conn)?;
-    log::info!("  Found {} spectra total", all_source_spectra.len());
 
     // Build lookup: MS2 spectrum_id -> SimplifiedSpectrum
     let simplified_map: HashMap<i64, &SimplifiedSpectrum> = simplified_spectra
@@ -551,44 +546,36 @@ fn write_simplified_dia_mzdb_v2(
         compression: "none".to_string(),
     };
 
-    // Process all spectra in time order
+    // Iterate through all spectra in time order
     log::info!("Inserting spectra (interleaved MS1+MS2)...");
     let mut ms1_count = 0;
     let mut ms2_with_data = 0;
     let mut ms2_empty = 0;
+    let mut total_count = 0;
 
-    for (idx, source_spec) in all_source_spectra.iter().enumerate() {
-        if idx % 1000 == 0 {
-            log::info!("  Progress: {}/{} spectra", idx, all_source_spectra.len());
+    let mut iter = source_reader.iter_spectra(None)?;
+    while let Some(spectrum) = iter.next()? {
+        total_count += 1;
+
+        if total_count % 1000 == 0 {
+            log::info!("  Progress: {} spectra", total_count);
         }
 
-        if source_spec.ms_level == 1 {
-            // MS1: read from source and insert
-            match convert_ms1_spectrum(source_spec, &source_reader) {
-                Ok(spectrum) => {
-                    writer.insert_spectrum(&spectrum, &encoding)?;
-                    ms1_count += 1;
-                }
-                Err(e) => {
-                    // Handle corrupted spectrum (missing BB) by creating empty entry
-                    log::warn!("Failed to read MS1 spectrum {}: {}. Creating empty spectrum (file corruption: missing BB).",
-                               source_spec.id, e);
-                    let empty_ms1 = create_empty_ms1_spectrum(source_spec, &encoding);
-                    writer.insert_spectrum_allow_empty(&empty_ms1, &encoding)?;
-                    ms1_count += 1;
-                }
-            }
-        } else if source_spec.ms_level == 2 {
+        if spectrum.header.ms_level == 1 {
+            // MS1: insert as-is
+            writer.insert_spectrum(&spectrum, &encoding)?;
+            ms1_count += 1;
+        } else if spectrum.header.ms_level == 2 {
             // MS2: check if simplified data exists
-            if let Some(simplified) = simplified_map.get(&source_spec.id) {
-                // Has data: convert and insert
-                let spectrum = convert_simplified_to_spectrum(simplified, source_spec, &encoding);
-                writer.insert_spectrum(&spectrum, &encoding)?;
+            if let Some(simplified) = simplified_map.get(&spectrum.header.id) {
+                // Has data: create spectrum from simplified data
+                let simplified_spectrum = convert_simplified_to_spectrum_simple(simplified, &spectrum.header, &encoding);
+                writer.insert_spectrum(&simplified_spectrum, &encoding)?;
                 ms2_with_data += 1;
             } else {
-                // Empty: create empty spectrum
-                let spectrum = create_empty_ms2_spectrum(source_spec, &encoding);
-                writer.insert_spectrum_allow_empty(&spectrum, &encoding)?;
+                // Empty: create empty spectrum preserving header
+                let empty_spectrum = create_empty_ms2_spectrum_from_header(&spectrum.header, &encoding);
+                writer.insert_spectrum_allow_empty(&empty_spectrum, &encoding)?;
                 ms2_empty += 1;
             }
         }
@@ -614,95 +601,17 @@ fn write_simplified_dia_mzdb_v2(
 // ============================================================================
 
 
-/// Read BB sizes from mzDB param_tree
-pub fn read_bb_sizes(conn: &Connection) -> Result<BBSizes> {
-    let param_tree: String = conn.query_row(
-        "SELECT param_tree FROM mzdb LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?;
+// ============================================================================
+// Helper Functions for Writer Integration
+// ============================================================================
 
-    Ok(BBSizes {
-        bb_mz_height_ms1: parse_param(&param_tree, "ms1_bb_mz_width")?,
-        bb_rt_width_ms1: parse_param(&param_tree, "ms1_bb_time_width")? as f32,
-        bb_mz_height_msn: parse_param(&param_tree, "msn_bb_mz_width")?,
-        bb_rt_width_msn: parse_param(&param_tree, "msn_bb_time_width")? as f32,
-    })
-}
-
-/// Parse a parameter value from XML
-fn parse_param(xml: &str, name: &str) -> Result<f64> {
-    if let Some(start) = xml.find(&format!("name=\"{}\"", name)) {
-        if let Some(value_start) = xml[start..].find("value=\"") {
-            let value_pos = start + value_start + 7;
-            if let Some(value_end) = xml[value_pos..].find('"') {
-                return xml[value_pos..value_pos + value_end]
-                    .parse()
-                    .context("Failed to parse param value");
-            }
-        }
-    }
-    bail!("Parameter {} not found", name)
-}
-
-/// Source spectrum from database
-pub struct SourceSpectrum {
-    pub id: i64,
-    pub title: String,
-    pub cycle: i64,
-    pub time: f32,
-    pub ms_level: i64,
-    pub tic: f32,
-    pub base_peak_mz: f64,
-    pub base_peak_intensity: f32,
-    pub param_tree: Option<String>,
-    pub scan_list: Option<String>,
-    pub precursor_list: Option<String>,
-    pub data_points_count: i64,
-    pub bb_first_spectrum_id: i64,
-    pub data_encoding_id: i64,
-}
-
-/// Read all spectra from database sorted by time
-pub fn read_all_spectra_sorted_by_time(conn: &Connection) -> Result<Vec<SourceSpectrum>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, cycle, time, ms_level, tic, base_peak_mz, base_peak_intensity,
-                param_tree, scan_list, precursor_list, data_points_count,
-                bb_first_spectrum_id, data_encoding_id
-         FROM spectrum
-         ORDER BY time, id"
-    )?;
-
-    let spectra = stmt.query_map([], |row| {
-        Ok(SourceSpectrum {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            cycle: row.get(2)?,
-            time: row.get(3)?,
-            ms_level: row.get(4)?,
-            tic: row.get(5)?,
-            base_peak_mz: row.get(6)?,
-            base_peak_intensity: row.get(7)?,
-            param_tree: row.get(8)?,
-            scan_list: row.get(9)?,
-            precursor_list: row.get(10)?,
-            data_points_count: row.get(11)?,
-            bb_first_spectrum_id: row.get(12)?,
-            data_encoding_id: row.get(13)?,
-        })
-    })?;
-
-    spectra.collect::<Result<Vec<_>, _>>()
-        .context("Failed to read spectra")
-}
-
-/// Convert SimplifiedSpectrum to model Spectrum
-pub fn convert_simplified_to_spectrum(
+/// Convert SimplifiedSpectrum to model Spectrum (using existing header)
+fn convert_simplified_to_spectrum_simple(
     simplified: &SimplifiedSpectrum,
-    source: &SourceSpectrum,
+    source_header: &ModelSpectrumHeader,
     data_encoding: &DataEncoding,
 ) -> Spectrum {
-    let tic: f32 = simplified.intensity_array.iter().map(|&i| i).sum();
+    let tic: f32 = simplified.intensity_array.iter().sum();
     let (base_peak_mz, base_peak_intensity) = simplified.mz_array.iter()
         .zip(&simplified.intensity_array)
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
@@ -718,7 +627,7 @@ pub fn convert_simplified_to_spectrum(
     Spectrum {
         header: ModelSpectrumHeader {
             id: simplified.original_spectrum_id,
-            initial_id: simplified.original_spectrum_id,
+            initial_id: source_header.initial_id,
             title: format!("cycle={} msLevel=2 simplified", simplified.cycle),
             cycle: simplified.cycle as i64,
             time: simplified.time,
@@ -730,16 +639,16 @@ pub fn convert_simplified_to_spectrum(
             precursor_mz: Some(simplified.precursor_mz),
             precursor_charge: None,
             peaks_count: simplified.mz_array.len() as i64,
-            param_tree_str: source.param_tree.clone(),
-            scan_list_str: source.scan_list.clone(),
+            param_tree_str: source_header.param_tree_str.clone(),
+            scan_list_str: source_header.scan_list_str.clone(),
             precursor_list_str: Some(precursor_list),
             product_list_str: None,
-            shared_param_tree_id: None,
-            instrument_configuration_id: 1,
-            source_file_id: 1,
-            run_id: 1,
-            data_processing_id: 1,
-            data_encoding_id: 1,
+            shared_param_tree_id: source_header.shared_param_tree_id,
+            instrument_configuration_id: source_header.instrument_configuration_id,
+            source_file_id: source_header.source_file_id,
+            run_id: source_header.run_id,
+            data_processing_id: source_header.data_processing_id,
+            data_encoding_id: source_header.data_encoding_id,
             bb_first_spectrum_id: 0,
         },
         data: SpectrumData {
@@ -753,33 +662,33 @@ pub fn convert_simplified_to_spectrum(
     }
 }
 
-/// Create empty MS2 spectrum
-pub fn create_empty_ms2_spectrum(source: &SourceSpectrum, data_encoding: &DataEncoding) -> Spectrum {
+/// Create empty MS2 spectrum from header
+fn create_empty_ms2_spectrum_from_header(source_header: &ModelSpectrumHeader, data_encoding: &DataEncoding) -> Spectrum {
     Spectrum {
         header: ModelSpectrumHeader {
-            id: source.id,
-            initial_id: source.id,
-            title: source.title.clone(),
-            cycle: source.cycle,
-            time: source.time,
+            id: source_header.id,
+            initial_id: source_header.initial_id,
+            title: source_header.title.clone(),
+            cycle: source_header.cycle,
+            time: source_header.time,
             ms_level: 2,
-            activation_type: Some("HCD".to_string()),
+            activation_type: source_header.activation_type.clone(),
             tic: 0.0,
             base_peak_mz: 0.0,
             base_peak_intensity: 0.0,
-            precursor_mz: None,
-            precursor_charge: None,
+            precursor_mz: source_header.precursor_mz,
+            precursor_charge: source_header.precursor_charge,
             peaks_count: 0,
-            param_tree_str: source.param_tree.clone(),
-            scan_list_str: source.scan_list.clone(),
-            precursor_list_str: source.precursor_list.clone(),
+            param_tree_str: source_header.param_tree_str.clone(),
+            scan_list_str: source_header.scan_list_str.clone(),
+            precursor_list_str: source_header.precursor_list_str.clone(),
             product_list_str: None,
-            shared_param_tree_id: None,
-            instrument_configuration_id: 1,
-            source_file_id: 1,
-            run_id: 1,
-            data_processing_id: 1,
-            data_encoding_id: 1,
+            shared_param_tree_id: source_header.shared_param_tree_id,
+            instrument_configuration_id: source_header.instrument_configuration_id,
+            source_file_id: source_header.source_file_id,
+            run_id: source_header.run_id,
+            data_processing_id: source_header.data_processing_id,
+            data_encoding_id: source_header.data_encoding_id,
             bb_first_spectrum_id: 0,
         },
         data: SpectrumData {
@@ -793,48 +702,4 @@ pub fn create_empty_ms2_spectrum(source: &SourceSpectrum, data_encoding: &DataEn
     }
 }
 
-/// Convert source MS1 spectrum to model Spectrum
-pub fn convert_ms1_spectrum(source: &SourceSpectrum, reader: &crate::MzDbReader) -> Result<Spectrum> {
-    // Read full spectrum data using reader
-    reader.get_spectrum(source.id)
-}
-
-/// Create empty MS1 spectrum (for read failures)
-pub fn create_empty_ms1_spectrum(source: &SourceSpectrum, data_encoding: &DataEncoding) -> Spectrum {
-    Spectrum {
-        header: ModelSpectrumHeader {
-            id: source.id,
-            initial_id: source.id,
-            title: source.title.clone(),
-            cycle: source.cycle,
-            time: source.time,
-            ms_level: 1,
-            activation_type: None,
-            tic: 0.0,
-            base_peak_mz: 0.0,
-            base_peak_intensity: 0.0,
-            precursor_mz: None,
-            precursor_charge: None,
-            peaks_count: 0,
-            param_tree_str: source.param_tree.clone(),
-            scan_list_str: source.scan_list.clone(),
-            precursor_list_str: None,
-            product_list_str: None,
-            shared_param_tree_id: None,
-            instrument_configuration_id: 1,
-            source_file_id: 1,
-            run_id: 1,
-            data_processing_id: 1,
-            data_encoding_id: 1,
-            bb_first_spectrum_id: 0,
-        },
-        data: SpectrumData {
-            data_encoding: data_encoding.clone(),
-            peaks_count: 0,
-            mz_array: vec![],
-            intensity_array: vec![],
-            lwhm_array: vec![],
-            rwhm_array: vec![],
-        },
-    }
-}
+// ============================================================================
