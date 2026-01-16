@@ -70,7 +70,7 @@ pub use signal::filtering::{
     compute_sg_coefficients,
 };
 
-pub use signal::detection::{
+pub use signal::finder::{
     PeakelFinder, BasicPeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig,
     HistogramBasedPeakelFinder,
 };

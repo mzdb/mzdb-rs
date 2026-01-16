@@ -9,7 +9,7 @@
 
 use mzdb::MzDbReader;
 use mzdb::processing::model::{Peak, Peakel, PeakelBuilder, LcContext, HasPeakelData};
-use mzdb::processing::signal::detection::{BasicPeakelFinder, SmartPeakelFinder, PeakelFinder};
+use mzdb::processing::signal::finder::{BasicPeakelFinder, SmartPeakelFinder, PeakelFinder};
 use mzdb::processing::signal::filtering::{SavitzkyGolaySmoother, SignalSmoother, BaselineRemover};
 use mzdb::processing::math;
 use mzdb::processing::ms;

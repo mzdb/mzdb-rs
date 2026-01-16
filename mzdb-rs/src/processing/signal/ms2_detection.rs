@@ -32,7 +32,7 @@ use anyhow_ext::anyhow;
 use crate::MzDbReader;
 use crate::metadata::parse_isolation_window_offsets_from_xml;
 use crate::processing::peakeldb::PeakelData;
-use super::detection::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig};
+use super::finder::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig};
 
 // ============================================================================
 // Isolation Window
