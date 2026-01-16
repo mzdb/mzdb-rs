@@ -1,3 +1,4 @@
+mod bounding_box;
 mod cache;
 mod chromatogram;
 mod iterator;

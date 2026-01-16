@@ -74,6 +74,7 @@
 //! - [`processing`]: Signal processing algorithms (requires `processing` feature)
 
 pub mod cache;
+pub mod bounding_box;
 pub mod chromatogram;
 pub mod iterator;
 pub mod metadata;

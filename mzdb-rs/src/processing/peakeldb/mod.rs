@@ -34,8 +34,6 @@ pub mod ms2;
 // Re-export common types
 pub use common::{
     PeakelData, ExtendedPeakel,
-    parse_peaks_blob, parse_peaks_blob_to_peakel_data,
-    extract_i64_array, extract_f32_array, extract_f64_array,
     chrono_lite_timestamp,
 };
 

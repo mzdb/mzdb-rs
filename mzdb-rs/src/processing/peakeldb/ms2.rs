@@ -17,8 +17,8 @@ use std::path::Path;
 use anyhow_ext::{Context, Result};
 use rusqlite::{params, Connection};
 
-use crate::processing::dia::{IsolationWindow, DiaMs2PeakelRecord, PeaksData};
-use super::common::{chrono_lite_timestamp, parse_peaks_blob, ExtendedPeakel, PeakelData};
+use crate::processing::dia::{IsolationWindow, DiaMs2PeakelRecord};
+use super::common::{chrono_lite_timestamp, ExtendedPeakel, PeakelData};
 
 // ============================================================================
 // Schema
@@ -196,10 +196,7 @@ impl Ms2PeakelDbReader {
             ) = result?;
 
             // Parse the MessagePack peaks blob
-            let (spectrum_ids, elution_times, mz_values, intensities) =
-                parse_peaks_blob(&peaks_blob)?;
-
-            let data = PeakelData::from_vectors(spectrum_ids, elution_times, mz_values, intensities);
+            let data = PeakelData::from_msgpack(&peaks_blob)?;
 
             peakels.push(ExtendedPeakel::new_ms2_dia(
                 id,
@@ -326,15 +323,16 @@ impl Ms2PeakelDbWriter {
             )?;
 
             for peakel in peakels {
-                // Serialize peaks data to MessagePack
-                let peaks_blob = serialize_peaks_data(&peakel.peaks)?;
+                // Serialize peaks data to MessagePack using PeakelData's method
+                let peaks_blob = peakel.peaks.to_msgpack()?;
 
-                // Calculate min/max for R-tree
-                let min_mz = peakel.peaks.mz_values.iter().cloned().fold(f64::INFINITY, f64::min);
-                let max_mz = peakel.peaks.mz_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let min_time = peakel.peaks.elution_times.iter().cloned().fold(f32::INFINITY, f32::min);
-                let max_time = peakel.peaks.elution_times.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let min_intensity = peakel.peaks.intensity_values.iter().cloned().fold(f32::INFINITY, f32::min);
+                // Calculate min/max for R-tree using HasPeakelData trait methods
+                use crate::processing::model::HasPeakelData;
+                let min_mz = peakel.peaks.min_mz();
+                let max_mz = peakel.peaks.max_mz();
+                let min_time = peakel.peaks.min_time();
+                let max_time = peakel.peaks.max_time();
+                let min_intensity = peakel.peaks.intensities().iter().cloned().fold(f32::INFINITY, f32::min);
 
                 stmt.execute(params![
                     peakel.id,
@@ -371,39 +369,6 @@ impl Ms2PeakelDbWriter {
 
         Ok(())
     }
-}
-
-// ============================================================================
-// Serialization
-// ============================================================================
-
-/// Serialize peaks data to MessagePack format
-fn serialize_peaks_data(peaks: &PeaksData) -> Result<Vec<u8>> {
-    use rmpv::Value;
-
-    let spectrum_ids: Vec<Value> = peaks.spectrum_ids.iter()
-        .map(|&id| Value::Integer(id.into()))
-        .collect();
-    let elution_times: Vec<Value> = peaks.elution_times.iter()
-        .map(|&t| Value::F32(t))
-        .collect();
-    let mz_values: Vec<Value> = peaks.mz_values.iter()
-        .map(|&mz| Value::F64(mz))
-        .collect();
-    let intensities: Vec<Value> = peaks.intensity_values.iter()
-        .map(|&i| Value::F32(i))
-        .collect();
-
-    let value = Value::Array(vec![
-        Value::Array(spectrum_ids),
-        Value::Array(elution_times),
-        Value::Array(mz_values),
-        Value::Array(intensities),
-    ]);
-
-    let mut buf = Vec::new();
-    rmpv::encode::write_value(&mut buf, &value)?;
-    Ok(buf)
 }
 
 // ============================================================================
