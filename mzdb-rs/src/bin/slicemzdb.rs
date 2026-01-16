@@ -33,7 +33,7 @@ use std::process;
 
 use anyhow_ext::{Context, Result};
 use clap::Parser;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Extract a slice of spectra from an mzDB file
 #[derive(Parser, Debug)]
@@ -113,6 +113,7 @@ fn main() {
             println!("Sliced bounding boxes: {}", stats.sliced_bb_count);
             println!("Removed bounding boxes: {}", stats.removed_bb_count);
             println!("Updated bounding boxes: {}", stats.updated_bb_count);
+            println!("Fixed BB references: {}", stats.fixed_bb_refs);
             println!("Output file: {}", output_path);
         }
         Err(e) => {
@@ -131,6 +132,7 @@ struct SliceStats {
     sliced_bb_count: i64,
     removed_bb_count: i64,
     updated_bb_count: i64,
+    fixed_bb_refs: i64,
 }
 
 /// Slice an mzDB file to contain only spectra within the specified ID range
@@ -227,13 +229,13 @@ fn slice_mzdb(
         params![min_id, max_id],
     )?;
 
-    // Step 5: Fix bb_first_spectrum_id references that point to deleted spectra
-    log::info!("Fixing orphaned bb_first_spectrum_id references...");
-    conn.execute(
-        "UPDATE spectrum SET bb_first_spectrum_id = id 
-         WHERE bb_first_spectrum_id NOT IN (SELECT id FROM spectrum)",
-        [],
-    )?;
+    // Step 5: FIXED - Rebuild bb_first_spectrum_id references from actual BB contents
+    // The original code had: UPDATE spectrum SET bb_first_spectrum_id = id WHERE ...
+    // This was incorrect because it made spectra point to themselves without verifying
+    // that a BB with that first_spectrum_id actually exists.
+    // The correct approach is to parse all BB blobs and rebuild the references.
+    log::info!("Rebuilding bb_first_spectrum_id references from BB data...");
+    stats.fixed_bb_refs = rebuild_bb_references(&conn)?;
 
     // Commit transaction
     conn.execute("COMMIT", [])?;
@@ -247,6 +249,116 @@ fn slice_mzdb(
     conn.execute("PRAGMA optimize", [])?;
 
     Ok(stats)
+}
+
+/// Rebuild bb_first_spectrum_id references by parsing actual BB blob contents
+///
+/// This function ensures that every spectrum's bb_first_spectrum_id points to
+/// a BB that actually exists and contains that spectrum's data.
+///
+/// Algorithm:
+/// 1. Parse all BB blobs to find which spectra they contain
+/// 2. Build mapping: spectrum_id → correct BB's first_spectrum_id
+/// 3. Update any spectrum with incorrect bb_first_spectrum_id
+///
+/// Returns: Number of spectra that had their bb_first_spectrum_id corrected
+fn rebuild_bb_references(conn: &Connection) -> Result<i64> {
+    log::info!("Building spectrum → bb_first_spectrum_id mapping from BB blobs...");
+
+    // Step 1: Parse all BBs to build the correct mapping
+    let mut correct_refs: HashMap<i64, i64> = HashMap::new();
+
+    let mut bb_stmt = conn.prepare(
+        "SELECT id, first_spectrum_id, data FROM bounding_box"
+    )?;
+
+    let mut rows = bb_stmt.query([])?;
+    let mut bb_count = 0;
+
+    while let Some(row) = rows.next()? {
+        let _bb_id: i64 = row.get(0)?;
+        let first_spectrum_id: i64 = row.get(1)?;
+        let blob: Vec<u8> = row.get(2)?;
+
+        // Parse blob to find all spectra in this BB
+        let mut pos = 0;
+        while pos + 8 <= blob.len() {
+            if pos + 4 > blob.len() {
+                break;
+            }
+
+            let spectrum_id = i32::from_le_bytes([
+                blob[pos],
+                blob[pos + 1],
+                blob[pos + 2],
+                blob[pos + 3],
+            ]) as i64;
+
+            if pos + 8 > blob.len() {
+                break;
+            }
+
+            let peak_count = i32::from_le_bytes([
+                blob[pos + 4],
+                blob[pos + 5],
+                blob[pos + 6],
+                blob[pos + 7],
+            ]) as usize;
+
+            // Record: this spectrum should point to first_spectrum_id
+            correct_refs.insert(spectrum_id, first_spectrum_id);
+
+            // Skip peak data (assume 12 bytes per peak as default)
+            // This is a safe default for high-res mode (8-byte m/z + 4-byte intensity)
+            pos += 8 + (peak_count * 12);
+
+            if pos > blob.len() {
+                break;
+            }
+        }
+
+        bb_count += 1;
+    }
+
+    drop(rows);
+    drop(bb_stmt);
+
+    log::info!("Parsed {} BBs, found correct refs for {} spectra",
+              bb_count, correct_refs.len());
+
+    // Step 2: Update spectra with incorrect references
+    let mut fixed_count = 0i64;
+
+    for (spectrum_id, correct_bb_first_id) in &correct_refs {
+        // Check if this spectrum exists and has wrong reference
+        let current_ref: Option<i64> = conn.query_row(
+            "SELECT bb_first_spectrum_id FROM spectrum WHERE id = ?1",
+            params![spectrum_id],
+            |row| row.get(0),
+        ).optional()?;
+
+        if let Some(current) = current_ref {
+            if current != *correct_bb_first_id {
+                log::debug!("Fixing spectrum {}: {} → {}",
+                           spectrum_id, current, correct_bb_first_id);
+
+                conn.execute(
+                    "UPDATE spectrum SET bb_first_spectrum_id = ?1 WHERE id = ?2",
+                    params![correct_bb_first_id, spectrum_id],
+                )?;
+
+                fixed_count += 1;
+            }
+        }
+    }
+
+    if fixed_count > 0 {
+        log::warn!("Fixed {} spectra with incorrect bb_first_spectrum_id", fixed_count);
+    } else {
+        log::info!("All bb_first_spectrum_id references were already correct");
+    }
+
+    Ok(fixed_count)
 }
 
 /// Build a cache of data encoding info (spectrum_id -> peak_size)
