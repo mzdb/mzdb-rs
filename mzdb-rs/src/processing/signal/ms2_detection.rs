@@ -27,12 +27,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+#[cfg(feature = "processing-parallel")]
 use anyhow_ext::anyhow;
 
 use crate::MzDbReader;
 use crate::metadata::parse_isolation_window_offsets_from_xml;
 use crate::processing::peakeldb::PeakelData;
-use super::finder::{BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig};
+use super::detection::{find_nearest_peak, create_peakel_finder};
 
 // ============================================================================
 // Isolation Window
@@ -108,33 +109,7 @@ struct IndexedMs2Spectrum {
 impl IndexedMs2Spectrum {
     /// Find the nearest peak within m/z tolerance using binary search
     fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64) -> Option<(f64, f32, usize)> {
-        if self.peaks.is_empty() {
-            return None;
-        }
-
-        let min_mz = target_mz - mz_tol_da;
-        let max_mz = target_mz + mz_tol_da;
-
-        // Binary search for start position
-        let start = self.peaks.partition_point(|p| p.0 < min_mz);
-
-        // Find the nearest peak within the m/z range
-        let mut best: Option<(f64, f32, usize)> = None;
-        let mut best_diff = mz_tol_da;
-
-        for i in start..self.peaks.len() {
-            let (mz, intensity, peak_idx) = self.peaks[i];
-            if mz > max_mz {
-                break;
-            }
-            let diff = (mz - target_mz).abs();
-            if diff < best_diff {
-                best_diff = diff;
-                best = Some((mz, intensity, peak_idx));
-            }
-        }
-
-        best
+        find_nearest_peak(&self.peaks, target_mz, mz_tol_da)
     }
 }
 
@@ -147,14 +122,23 @@ impl IndexedMs2Spectrum {
 pub struct DiaMs2PeakelConfig {
     /// m/z tolerance in PPM for XIC extraction
     pub mz_tol_ppm: f64,
-    /// Minimum intensity threshold for peak detection
+    /// Minimum intensity threshold for peak detection (used during spectrum loading)
     pub min_intensity: f32,
     /// Minimum number of points per peakel
     pub min_peaks: usize,
     /// Maximum consecutive gaps before stopping walk
     pub max_consecutive_gaps: usize,
+    /// Maximum total gaps across both directions (use usize::MAX for unlimited)
+    pub max_total_gaps: usize,
     /// Maximum RT window in seconds
     pub max_time_window: f32,
+    /// Intensity percentile for peak filtering (0.0-1.0)
+    /// Peaks below this percentile threshold will be skipped during walking
+    pub intensity_percentile: f32,
+    /// Minimum peakel amplitude (apex/min intensity ratio)
+    pub min_peakel_amplitude: f32,
+    /// Minimum peakel duration in seconds
+    pub min_peakel_duration: f32,
     /// Algorithm to use: "basic" or "smart"
     pub algorithm: String,
 }
@@ -166,7 +150,11 @@ impl Default for DiaMs2PeakelConfig {
             min_intensity: 100.0,
             min_peaks: 5,
             max_consecutive_gaps: 3,
+            max_total_gaps: usize::MAX,
             max_time_window: 1200.0,
+            intensity_percentile: 0.9,
+            min_peakel_amplitude: 1.5,
+            min_peakel_duration: 0.0,
             algorithm: "smart".to_string(),
         }
     }
@@ -347,30 +335,41 @@ impl DiaMs2PeakelDetector {
         // Sort peaks by intensity (descending)
         all_peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        // Calculate intensity threshold from percentile (Scala-style)
+        let nb_peaks = all_peaks.len();
+        let intensity_threshold = if nb_peaks > 10 {
+            let pos = (nb_peaks as f32 * self.config.intensity_percentile) as usize;
+            let pos = pos.min(nb_peaks - 1);
+            all_peaks[pos].1
+        } else {
+            0.0
+        };
+
+        log::debug!("Intensity threshold for window {:.1}: {:.1} (from {} peaks at {}% percentile)",
+                   window.target_mz, intensity_threshold, nb_peaks, self.config.intensity_percentile * 100.0);
+
         // Track used peaks
         let mut used_peaks: Vec<HashSet<usize>> = vec![HashSet::new(); indexed_spectra.len()];
 
         // Create the peakel finder with the configured min_peaks
-        let finder: Box<dyn PeakelFinder> = match self.config.algorithm.as_str() {
-            "smart" => {
-                let mut smart_config = SmartPeakelFinderConfig::default();
-                smart_config.min_peaks_count = self.config.min_peaks;
-                Box::new(SmartPeakelFinder::with_config(smart_config))
-            },
-            _ => {
-                // Use configured min_peaks for BasicPeakelFinder too
-                Box::new(BasicPeakelFinder::new(2, self.config.min_peaks))
-            }
-        };
+        let finder = create_peakel_finder(&self.config.algorithm, self.config.min_peaks);
 
         let mut detected_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
         let mut peakel_id = 1i64;
 
+        let half_of_max_total_gaps = 1 + (self.config.max_total_gaps / 2);
+        let max_half_duration = self.config.max_time_window / 2.0;
+
         // Walking algorithm - process peaks from highest to lowest intensity
-        for &(apex_mz, _apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx) in &all_peaks {
+        for &(apex_mz, apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx) in &all_peaks {
             // Skip if already used
             if used_peaks[apex_spectrum_idx].contains(&apex_peak_idx) {
                 continue;
+            }
+
+            // Stop at intensity threshold (peaks are sorted by descending intensity)
+            if apex_intensity < intensity_threshold {
+                break;
             }
 
             // Calculate m/z tolerance in Daltons
@@ -379,15 +378,18 @@ impl DiaMs2PeakelDetector {
             // XIC extraction using walking approach
             let mut xic_peaks: Vec<(f64, f32, f32, usize, usize)> = Vec::new();
 
-            // Add the apex peak
-            xic_peaks.push((apex_mz, _apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx));
-
             // Walk in both directions: right (+1) first, then left (-1)
             for direction in [1i32, -1i32] {
                 let mut consecutive_gap_count = 0usize;
-                let mut offset = 1i32;
+                let mut half_gaps_count = 0usize;
+                let mut offset = if direction > 0 { 1 } else { 0 };
 
                 loop {
+                    // Check half gaps limit (Scala: halfGapsCount <= halfOfMaxTotalGaps)
+                    if half_gaps_count > half_of_max_total_gaps {
+                        break;
+                    }
+
                     let cur_idx = apex_spectrum_idx as i32 + (offset * direction);
 
                     // Check bounds
@@ -397,26 +399,30 @@ impl DiaMs2PeakelDetector {
 
                     let cur_spectrum = &indexed_spectra[cur_idx as usize];
 
-                    // Check time window
-                    if (cur_spectrum.time - apex_rt).abs() > self.config.max_time_window / 2.0 {
+                    // Check time window (Scala: Math.abs(curTime - apexTime) > this.maxHalfDuration)
+                    if (cur_spectrum.time - apex_rt).abs() > max_half_duration {
                         break;
                     }
 
                     // Try to find the nearest peak within m/z tolerance
                     if let Some((mz, intensity, peak_idx)) = cur_spectrum.find_nearest_peak(apex_mz, mz_tol_da) {
-                        // Stop at used peak boundary
-                        if used_peaks[cur_idx as usize].contains(&peak_idx) {
-                            break;
-                        }
-
-                        if direction > 0 {
-                            xic_peaks.push((mz, intensity, cur_spectrum.time, cur_idx as usize, peak_idx));
+                        // Scala: nearestPeakIdx != -1 && usedPeakMap(...).get(nearestPeakIdx) == false
+                        if !used_peaks[cur_idx as usize].contains(&peak_idx) {
+                            if direction > 0 {
+                                xic_peaks.push((mz, intensity, cur_spectrum.time, cur_idx as usize, peak_idx));
+                            } else {
+                                xic_peaks.insert(0, (mz, intensity, cur_spectrum.time, cur_idx as usize, peak_idx));
+                            }
+                            consecutive_gap_count = 0;
                         } else {
-                            xic_peaks.insert(0, (mz, intensity, cur_spectrum.time, cur_idx as usize, peak_idx));
+                            // Peak exists but already used - counts as gap
+                            consecutive_gap_count += 1;
+                            half_gaps_count += 1;
                         }
-                        consecutive_gap_count = 0;
                     } else {
+                        // No peak found - counts as gap
                         consecutive_gap_count += 1;
+                        half_gaps_count += 1;
                     }
 
                     // Stop if too many consecutive gaps
@@ -427,6 +433,10 @@ impl DiaMs2PeakelDetector {
                     offset += 1;
                 }
             }
+
+            // Add the apex peak in proper position
+            let apex_pos = xic_peaks.partition_point(|p| p.2 < apex_rt);
+            xic_peaks.insert(apex_pos, (apex_mz, apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx));
 
             // Need at least min_peaks for peakel detection
             if xic_peaks.len() < self.config.min_peaks {
@@ -441,27 +451,85 @@ impl DiaMs2PeakelDetector {
             // Detect peakels
             let peakel_indices = finder.find_peakels_indices(&xic_pairs);
 
-            // Process all detected peakels
+            // Find the peakel containing the apex (Scala: matchingPeakelIdxOpt)
+            let mut matching_range: Option<(usize, usize)> = None;
+            let mut detected_peak_indices: HashSet<usize> = HashSet::new();
+
             for (start, end) in &peakel_indices {
-                if end - start + 1 < self.config.min_peaks {
+                // Check if apex is within this peakel's time range
+                let start_time = xic_peaks[*start].2;
+                let end_time = xic_peaks[*end].2;
+                if apex_rt >= start_time && apex_rt <= end_time {
+                    matching_range = Some((*start, *end));
+                }
+                // Track all detected peak indices
+                for i in *start..=*end {
+                    detected_peak_indices.insert(i);
+                }
+            }
+
+            // Mark noisy peaks as used (Scala: peaks not in any detected peakel)
+            for i in 0..xic_peaks.len() {
+                if !detected_peak_indices.contains(&i) {
+                    let (_, _, _, spec_idx, peak_idx) = xic_peaks[i];
+                    used_peaks[spec_idx].insert(peak_idx);
+                }
+            }
+
+            // Process matching peakel if found
+            if let Some((start, end)) = matching_range {
+                let peakel_peaks = &xic_peaks[start..=end];
+
+                // Skip if not enough peaks
+                if peakel_peaks.len() < self.config.min_peaks {
                     continue;
                 }
 
-                let peakel_peaks = &xic_peaks[*start..=*end];
+                // Find apex index within peakel
+                // FIXME: is it equivalent to the commented code?
+                let apex_index = apex_pos.saturating_sub(start);
 
-                // Check if any peak is already used
-                let any_used = peakel_peaks.iter()
-                    .any(|(_, _, _, spec_idx, peak_idx)| used_peaks[*spec_idx].contains(peak_idx));
-
-                if any_used {
-                    continue;
-                }
-
-                // Find the actual apex
-                let (_, apex_peak) = peakel_peaks.iter()
+                // Find the actual apex (highest intensity in the peakel)
+                /*let (apex_idx_in_peakel, apex_peak) = peakel_peaks.iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                    .unwrap();
+                    .unwrap();*/
+
+                // Validation 1: apex must not be first or last peak (Scala check)
+                if apex_index == 0 || apex_index == peakel_peaks.len() - 1 {
+                    continue;
+                }
+
+                // Validation 2: check amplitude (Scala: intensityAmplitude < minPeakelAmplitude)
+                let min_int = peakel_peaks.iter()
+                    .map(|(_, i, _, _, _)| *i)
+                    .filter(|i| *i > 0.0)
+                    .fold(f32::INFINITY, f32::min);
+
+                let apex_peak = peakel_peaks[apex_index];
+                let amplitude = if min_int > 0.0 && min_int < f32::INFINITY {
+                    apex_peak.1 / min_int
+                } else {
+                    2.0
+                };
+
+                if amplitude < self.config.min_peakel_amplitude {
+                    continue;
+                }
+
+                // Validation 3: check duration (Scala: peakel.calcDuration() < minPeakelDuration)
+                let first_rt = peakel_peaks.first().unwrap().2;
+                let last_rt = peakel_peaks.last().unwrap().2;
+                let duration = last_rt - first_rt;
+
+                if duration < self.config.min_peakel_duration {
+                    continue;
+                }
+
+                // All validations passed - now mark peaks as used (Scala: after validation)
+                for (_, _, _, spec_idx, peak_idx) in peakel_peaks {
+                    used_peaks[*spec_idx].insert(*peak_idx);
+                }
 
                 // Calculate weighted m/z
                 let total_intensity: f64 = peakel_peaks.iter().map(|(_, i, _, _, _)| *i as f64).sum();
@@ -484,22 +552,6 @@ impl DiaMs2PeakelDetector {
                 if area == 0.0 {
                     area = peakel_peaks.iter().map(|(_, i, _, _, _)| *i).sum();
                 }
-
-                // Calculate duration
-                let first_rt = peakel_peaks.first().unwrap().2;
-                let last_rt = peakel_peaks.last().unwrap().2;
-                let duration = last_rt - first_rt;
-
-                // Calculate amplitude
-                let min_int = peakel_peaks.iter()
-                    .map(|(_, i, _, _, _)| *i)
-                    .filter(|i| *i > 0.0)
-                    .fold(f32::INFINITY, f32::min);
-                let amplitude = if min_int > 0.0 && min_int < f32::INFINITY {
-                    apex_peak.1 / min_int
-                } else {
-                    1.0
-                };
 
                 // Get spectrum IDs
                 let first_spectrum_id = indexed_spectra[peakel_peaks.first().unwrap().3].spectrum_id;
@@ -527,11 +579,6 @@ impl DiaMs2PeakelDetector {
                         .map(|(_, int, _, _, _)| *int)
                         .collect(),
                 );
-
-                // Mark all peaks as used
-                for (_, _, _, spec_idx, peak_idx) in peakel_peaks {
-                    used_peaks[*spec_idx].insert(*peak_idx);
-                }
 
                 detected_peakels.push(DiaMs2PeakelRecord {
                     id: peakel_id,
@@ -803,6 +850,7 @@ mod tests {
         assert_eq!(config.mz_tol_ppm, 10.0);
         assert_eq!(config.min_intensity, 100.0);
         assert_eq!(config.min_peaks, 5);
+        assert_eq!(config.intensity_percentile, 0.9);
         assert_eq!(config.algorithm, "smart");
     }
 

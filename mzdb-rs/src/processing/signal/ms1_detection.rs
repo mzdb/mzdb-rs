@@ -47,6 +47,9 @@ use crate::iterator::RunSliceIterator;
 use super::finder::{
     BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig,
 };
+use super::detection::{
+    find_nearest_peak_from_slices, is_target_mz_within_range, sort_indices_by_descending_f32_value,
+};
 
 // ============================================================================
 // Configuration
@@ -63,10 +66,16 @@ pub struct Ms1PeakelConfig {
     pub min_peaks: usize,
     /// Maximum consecutive gaps before stopping walk
     pub max_consecutive_gaps: usize,
+    /// Maximum total gaps across both directions (use usize::MAX for unlimited)
+    pub max_total_gaps: usize,
     /// Maximum RT window in seconds
     pub max_time_window: f32,
     /// Intensity percentile for peak filtering (0.0-1.0)
     pub intensity_percentile: f32,
+    /// Minimum peakel amplitude (apex/min intensity ratio)
+    pub min_peakel_amplitude: f32,
+    /// Minimum peakel duration in seconds
+    pub min_peakel_duration: f32,
     /// Algorithm to use: "basic" or "smart"
     pub algorithm: String,
 }
@@ -78,8 +87,11 @@ impl Default for Ms1PeakelConfig {
             min_intensity: 0.0,
             min_peaks: 5,
             max_consecutive_gaps: 3,
+            max_total_gaps: usize::MAX,
             max_time_window: 1200.0,
             intensity_percentile: 0.9,
+            min_peakel_amplitude: 1.5,
+            min_peakel_duration: 0.0,
             algorithm: "smart".to_string(),
         }
     }
@@ -114,6 +126,7 @@ impl Ms1PeakelConfig {
 /// are cloned (cheap ref count increment), not the actual data.
 #[derive(Clone)]
 struct PeakListRef {
+    #[allow(dead_code)] // Kept for debugging and Scala compatibility
     spectrum_id: i64,
     time: f32,
     /// m/z values (Arc-wrapped for efficient sharing across run slices)
@@ -156,33 +169,13 @@ impl PeakListRef {
             return None;
         }
 
-        let min_mz = target_mz - mz_tol_da;
-        let max_mz = target_mz + mz_tol_da;
-
         // Quick range check using cached bounds
-        if min_mz > self.max_mz || max_mz < self.min_mz {
+        if !is_target_mz_within_range(target_mz, mz_tol_da, self.min_mz, self.max_mz) {
             return None;
         }
 
-        // Binary search for start position
-        let start = self.mz_values.partition_point(|&mz| mz < min_mz);
-
-        let mut best: Option<(f64, f32, usize)> = None;
-        let mut best_diff = mz_tol_da;
-
-        for i in start..self.mz_values.len() {
-            let mz = self.mz_values[i];
-            if mz > max_mz {
-                break;
-            }
-            let diff = (mz - target_mz).abs();
-            if diff < best_diff {
-                best_diff = diff;
-                best = Some((mz, self.intensity_values[i], i));
-            }
-        }
-
-        best
+        // Use common binary search implementation
+        find_nearest_peak_from_slices(&self.mz_values, &self.intensity_values, target_mz, mz_tol_da)
     }
 }
 
@@ -227,7 +220,6 @@ impl PeakListTriplet {
                             if let Some((mz2, int2, idx2)) = prev_pkl.find_nearest_peak(target_mz, mz_tol_da) {
                                 let diff2 = (mz2 - target_mz).abs();
                                 if diff2 < min_mz_diff {
-                                    min_mz_diff = diff2;
                                     result = Some((mz2, int2, 0, idx2));
                                 }
                             }
@@ -640,7 +632,7 @@ fn build_run_slice_peak_data(
     }
 
     // Index-based sorting (2-3x faster than tuple sorting)
-    let sorted_indices = sort_indices_by_descending_intensity(&intensities);
+    let sorted_indices = sort_indices_by_descending_f32_value(&intensities);
 
     Ok(RunSlicePeakData {
         current_rs_header: rs_header.clone(),
@@ -649,15 +641,6 @@ fn build_run_slice_peak_data(
         peak_metadata,
         sorted_indices,
     })
-}
-
-/// Sort indices by descending intensity (Scala-style optimization).
-fn sort_indices_by_descending_intensity(intensities: &[f32]) -> Vec<usize> {
-    let mut indices: Vec<usize> = (0..intensities.len()).collect();
-    indices.sort_by(|&a, &b| {
-        intensities[b].partial_cmp(&intensities[a]).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    indices
 }
 
 /// Detect peakels within a run slice window.
@@ -670,12 +653,13 @@ fn detect_peakels_in_slice(
     let mz_tol_ppm = config.mz_tol_ppm;
     let min_peaks = config.min_peaks;
     let max_consecutive_gaps = config.max_consecutive_gaps;
+    let half_of_max_total_gaps = 1 + (config.max_total_gaps / 2);
     let max_half_duration = config.max_time_window / 2.0;
 
     let mut peakels = Vec::new();
     let mut used_peaks: HashSet<(usize, usize, usize)> = HashSet::new();
 
-    // Intensity threshold
+    // Intensity threshold (Scala: intensityDescPeakCoords at 90th percentile)
     let intensity_threshold = if peak_data.sorted_indices.len() > 10 {
         let pos = (peak_data.sorted_indices.len() as f32 * config.intensity_percentile) as usize;
         let pos = pos.min(peak_data.sorted_indices.len() - 1);
@@ -691,30 +675,39 @@ fn detect_peakels_in_slice(
         let apex_spectrum_idx = coord.spectrum_idx;
         let apex_peak_idx = coord.peak_idx;
 
+        // Skip if apex peak already used
         if used_peaks.contains(&(apex_spectrum_idx, 1, apex_peak_idx)) {
             continue;
         }
 
+        // Stop if we reach the intensity threshold
         if apex_intensity < intensity_threshold {
             break;
         }
 
+        // Skip if outside run slice m/z range
         if apex_mz < rs_header.begin_mz || apex_mz > rs_header.end_mz {
             continue;
         }
 
-        // Extract XIC
+        // Extract XIC using walking algorithm
         let mz_tol_da = apex_mz * mz_tol_ppm * 1e-6;
         let mut xic_data: Vec<(f32, f64)> = Vec::new();
         let mut xic_mz_values: Vec<f64> = Vec::new();
         let mut xic_peak_indices: Vec<(usize, usize, usize)> = Vec::new();
 
-        // Walk both directions
+        // Walk both directions (Scala: isRightDirection loop)
         for direction in [1i32, -1] {
             let mut gap_count = 0;
+            let mut half_gaps_count = 0;
             let mut offset = if direction > 0 { 1 } else { 0 };
 
             loop {
+                // Check half gaps limit (Scala: halfGapsCount <= halfOfMaxTotalGaps)
+                if half_gaps_count > half_of_max_total_gaps {
+                    break;
+                }
+
                 let target_idx = apex_spectrum_idx as i32 + direction * offset;
                 if target_idx < 0 || target_idx as usize >= peak_data.spectra.len() {
                     break;
@@ -723,6 +716,7 @@ fn detect_peakels_in_slice(
 
                 let spectrum = &peak_data.spectra[target_idx];
 
+                // Check time window (Scala: Math.abs(curTime - apexTime) > this.maxHalfDuration)
                 if (spectrum.time - apex_time).abs() > max_half_duration {
                     break;
                 }
@@ -730,6 +724,7 @@ fn detect_peakels_in_slice(
                 if let Some((mz, intensity, pkl_idx, peak_idx)) =
                     spectrum.triplet.find_nearest_peak(apex_mz, mz_tol_da)
                 {
+                    // Scala: nearestPeakIdx != -1 && usedPeakMap(...).get(nearestPeakIdx) == false
                     if !used_peaks.contains(&(target_idx, pkl_idx, peak_idx)) {
                         if direction > 0 {
                             xic_data.push((spectrum.time, intensity as f64));
@@ -742,12 +737,17 @@ fn detect_peakels_in_slice(
                         }
                         gap_count = 0;
                     } else {
+                        // Peak exists but already used - counts as gap
                         gap_count += 1;
+                        half_gaps_count += 1;
                     }
                 } else {
+                    // No peak found - counts as gap
                     gap_count += 1;
+                    half_gaps_count += 1;
                 }
 
+                // Scala: consecutiveGapCount <= maxConsecutiveGaps
                 if gap_count > max_consecutive_gaps {
                     break;
                 }
@@ -756,36 +756,92 @@ fn detect_peakels_in_slice(
             }
         }
 
-        // Add apex
+        // Add apex peak
         let apex_pos = xic_data.partition_point(|&(t, _)| t < apex_time);
         xic_data.insert(apex_pos, (apex_time, apex_intensity as f64));
         xic_mz_values.insert(apex_pos, apex_mz);
         xic_peak_indices.insert(apex_pos, (apex_spectrum_idx, 1, apex_peak_idx));
 
-        // Detect peakels
+        // Detect peakels using finder
         if xic_data.len() >= min_peaks {
             let ranges = finder.find_peakels_indices(&xic_data);
 
-            for (start, end) in ranges {
-                let xic = &xic_data[start..=end];
-                let has_apex = xic.iter().any(|&(t, _)| (t - apex_time).abs() < 0.01);
+            // Find the peakel containing the apex (Scala: matchingPeakelIdxOpt)
+            let mut matching_range: Option<(usize, usize)> = None;
+            let mut detected_peak_indices: HashSet<usize> = HashSet::new();
 
-                if has_apex && xic.len() >= min_peaks {
-                    for i in start..=end {
-                        used_peaks.insert(xic_peak_indices[i]);
-                    }
-
-                    let spectrum_ids: SmallVec<[i64; 16]> = xic_peak_indices[start..=end]
-                        .iter()
-                        .map(|(idx, _, _)| peak_data.spectra[*idx].spectrum_id)
-                        .collect();
-
-                    let elution_times: SmallVec<[f32; 16]> = xic.iter().map(|(t, _)| *t).collect();
-                    let mz_values: SmallVec<[f64; 16]> = xic_mz_values[start..=end].iter().copied().collect();
-                    let intensity_values: SmallVec<[f32; 16]> = xic.iter().map(|(_, i)| *i as f32).collect();
-
-                    peakels.push(Peakel::new(spectrum_ids, elution_times, mz_values, intensity_values, None, None));
+            for (start, end) in &ranges {
+                // Check if apex is within this peakel's time range
+                let start_time = xic_data[*start].0;
+                let end_time = xic_data[*end].0;
+                if apex_time >= start_time && apex_time <= end_time {
+                    matching_range = Some((*start, *end));
                 }
+                // Track all detected peak indices
+                for i in *start..=*end {
+                    detected_peak_indices.insert(i);
+                }
+            }
+
+            // Mark noisy peaks as used (Scala: peaks not in any detected peakel)
+            for i in 0..xic_data.len() {
+                if !detected_peak_indices.contains(&i) {
+                    used_peaks.insert(xic_peak_indices[i]);
+                }
+            }
+
+            // Process matching peakel if found
+            if let Some((start, end)) = matching_range {
+                let xic = &xic_data[start..=end];
+
+                // Skip if not enough peaks
+                if xic.len() < min_peaks {
+                    continue;
+                }
+
+                // Find apex index within peakel
+                let apex_index = (apex_pos as i32 - start as i32) as usize;
+
+                // Validation 1: apex must not be first or last peak (Scala check)
+                if apex_index == 0 || apex_index == xic.len() - 1 {
+                    continue;
+                }
+
+                // Validation 2: check amplitude (Scala: intensityAmplitude < minPeakelAmplitude)
+                let intensities: Vec<f32> = xic.iter().map(|(_, i)| *i as f32).collect();
+                let min_intensity = intensities.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_intensity = intensities.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let amplitude = if min_intensity > 0.0 { max_intensity / min_intensity } else { 2.0 };
+
+                if amplitude < config.min_peakel_amplitude {
+                    continue;
+                }
+
+                // Validation 3: check duration (Scala: peakel.calcDuration() < minPeakelDuration)
+                let first_time = xic.first().unwrap().0;
+                let last_time = xic.last().unwrap().0;
+                let duration = last_time - first_time;
+
+                if duration < config.min_peakel_duration {
+                    continue;
+                }
+
+                // All validations passed - now mark peaks as used (Scala: after validation)
+                for i in start..=end {
+                    used_peaks.insert(xic_peak_indices[i]);
+                }
+
+                // Build the peakel
+                let spectrum_ids: SmallVec<[i64; 16]> = xic_peak_indices[start..=end]
+                    .iter()
+                    .map(|(idx, _, _)| peak_data.spectra[*idx].spectrum_id)
+                    .collect();
+
+                let elution_times: SmallVec<[f32; 16]> = xic.iter().map(|(t, _)| *t).collect();
+                let mz_values: SmallVec<[f64; 16]> = xic_mz_values[start..=end].iter().copied().collect();
+                let intensity_values: SmallVec<[f32; 16]> = intensities.into();
+
+                peakels.push(Peakel::new(spectrum_ids, elution_times, mz_values, intensity_values, None, None));
             }
         }
     }

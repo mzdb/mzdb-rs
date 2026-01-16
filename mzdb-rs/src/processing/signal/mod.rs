@@ -6,8 +6,8 @@
 //! - MS1 peakel detection using walking algorithm
 //! - MS2 DIA peakel detection using walking algorithm
 
-pub mod finder;
 pub mod filtering;
-//pub mod detection;
+pub mod finder;
+pub mod detection;
 pub mod ms1_detection;
 pub mod ms2_detection;

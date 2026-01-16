@@ -81,9 +81,22 @@ struct Args {
     #[arg(long = "max-gaps", default_value = "3")]
     max_consecutive_gaps: usize,
 
-    /// Intensity percentile threshold (0.0-1.0) for MS1 detection
+    /// Maximum total gaps across both walking directions (default: unlimited)
+    #[arg(long = "max-total-gaps", default_value = "4294967295")]
+    max_total_gaps: usize,
+
+    /// Intensity percentile threshold (0.0-1.0) for peak filtering
+    /// Peaks below this percentile will be skipped during walking
     #[arg(long = "intensity-pct", default_value = "0.9")]
     intensity_percentile: f32,
+
+    /// Minimum peakel amplitude (apex/min intensity ratio)
+    #[arg(long = "min-amplitude", default_value = "1.5")]
+    min_peakel_amplitude: f32,
+
+    /// Minimum peakel duration in seconds
+    #[arg(long = "min-duration", default_value = "0.0")]
+    min_peakel_duration: f32,
 
     /// Algorithm: 'basic' or 'smart'
     #[arg(long = "algo", default_value = "smart")]
@@ -107,20 +120,20 @@ fn parse_threads(threads_arg: &str) -> Result<usize> {
     let available_cpus = std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(1);
-    
+
     let requested = if threads_arg.eq_ignore_ascii_case("auto") {
         available_cpus
     } else {
         threads_arg.parse::<usize>()
             .map_err(|_| anyhow!("Invalid threads value '{}'. Use a positive number or 'auto'", threads_arg))?
     };
-    
+
     if requested < 1 {
         bail!("Threads must be at least 1, got {}", requested);
     }
-    
+
     if requested > available_cpus {
-        eprintln!("Warning: Requested {} threads but only {} CPUs available. Capping to {}.", 
+        eprintln!("Warning: Requested {} threads but only {} CPUs available. Capping to {}.",
                   requested, available_cpus, available_cpus);
         Ok(available_cpus)
     } else {
@@ -138,7 +151,7 @@ fn main() -> Result<()> {
         2 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
-    
+
     env_logger::Builder::new()
         .filter_level(log_level)
         .format_timestamp_millis()
@@ -146,7 +159,7 @@ fn main() -> Result<()> {
 
     // Parse and validate threads parameter
     let num_threads = parse_threads(&args.threads)?;
-    
+
     // Check if parallel processing is available
     if num_threads > 1 {
         #[cfg(feature = "processing-parallel")]
@@ -180,9 +193,9 @@ fn main() -> Result<()> {
     println!("Opening mzDB file...");
     let reader = MzDbReader::open(args.mzdb_file_path.to_str().unwrap())?;
     let headers = reader.get_spectrum_headers();
-    
+
     println!("Total spectra: {}", headers.len());
-    
+
     // Count MS levels
     let ms1_count = headers.iter().filter(|h| h.ms_level == 1).count();
     let ms2_count = headers.iter().filter(|h| h.ms_level == 2).count();
@@ -201,7 +214,7 @@ fn main() -> Result<()> {
 
     println!();
     println!("Done!");
-    
+
     Ok(())
 }
 
@@ -210,24 +223,30 @@ fn main() -> Result<()> {
 // ============================================================================
 
 fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
-    // Build configuration for Ms1PeakelDetector  
+    // Build configuration for Ms1PeakelDetector
     let config = Ms1PeakelConfig {
         mz_tol_ppm: args.mz_tol_ppm,
         min_intensity: args.min_intensity,
         min_peaks: args.min_peaks,
         max_consecutive_gaps: args.max_consecutive_gaps,
+        max_total_gaps: args.max_total_gaps,
         max_time_window: 1200.0,
+        intensity_percentile: args.intensity_percentile,
+        min_peakel_amplitude: args.min_peakel_amplitude,
+        min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
     };
 
     println!("Detecting MS1 peakels using walking algorithm...");
-    println!("  Config: mz_tol={} ppm, min_peaks={}, min_intensity={}, max_gaps={}", 
+    println!("  Config: mz_tol={} ppm, min_peaks={}, min_intensity={}, max_gaps={}",
              config.mz_tol_ppm, config.min_peaks, config.min_intensity, config.max_consecutive_gaps);
+    println!("  Validation: min_amplitude={}, min_duration={}s",
+             config.min_peakel_amplitude, config.min_peakel_duration);
 
     // Create detector and run detection
     let detector = Ms1PeakelDetector::with_config(config);
     let peakels = detector.detect_peakels_with_threads(reader, num_threads)?;
-    
+
     if peakels.is_empty() {
         println!("No peakels detected. Check if the file contains MS1 data.");
         return Ok(());
@@ -286,20 +305,26 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         min_intensity: args.min_intensity,
         min_peaks: args.min_peaks,
         max_consecutive_gaps: args.max_consecutive_gaps,
+        max_total_gaps: args.max_total_gaps,
         max_time_window: 1200.0,
+        intensity_percentile: args.intensity_percentile,
+        min_peakel_amplitude: args.min_peakel_amplitude,
+        min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
     };
-    
+
     let detector = DiaMs2PeakelDetector::with_config(config);
-    
+
     println!("Detecting MS2 peakels (DIA mode)...");
+    println!("  Validation: min_amplitude={}, min_duration={}s",
+             args.min_peakel_amplitude, args.min_peakel_duration);
     let (windows, peakels) = detector.detect_all_peakels_with_threads(reader, num_threads)?;
-    
+
     println!();
     println!("=== DIA MS2 Peakel Detection Results ===");
     println!("Isolation windows: {}", windows.len());
     println!("Total MS2 peakels: {}", peakels.len());
-    
+
     // Print per-window statistics
     println!();
     println!("Peakels per isolation window:");
@@ -307,24 +332,24 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         let window_peakel_count = peakels.iter()
             .filter(|p| p.isolation_window_id == window.id)
             .count();
-        println!("  {:.1} m/z: {} peakels ({} spectra)", 
+        println!("  {:.1} m/z: {} peakels ({} spectra)",
                  window.target_mz, window_peakel_count, window.spectrum_count);
     }
-    
+
     // Top peakels by intensity
     let mut sorted_peakels = peakels.clone();
-    sorted_peakels.sort_by(|a, b| 
+    sorted_peakels.sort_by(|a, b|
         b.apex_intensity.partial_cmp(&a.apex_intensity).unwrap_or(std::cmp::Ordering::Equal)
     );
-    
+
     println!();
     println!("Top 10 MS2 peakels by intensity:");
     for (i, peakel) in sorted_peakels.iter().take(10).enumerate() {
         println!("  {:2}: fragment m/z={:.4}, precursor={:.1}, RT={:.2}s, int={:.2e}, peaks={}",
-            i + 1, peakel.mz, peakel.precursor_mz, peakel.elution_time, 
+            i + 1, peakel.mz, peakel.precursor_mz, peakel.elution_time,
             peakel.apex_intensity, peakel.peaks_count);
     }
-    
+
     // Get input filename for metadata
     let input_filename = args.mzdb_file_path
         .file_name()
@@ -347,12 +372,12 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
             write_ms2_dia_peakeldb(&args.output_file_path, input_filename, &windows, &peakels)?;
         }
     }
-    
+
     println!("Output written to: {:?}", args.output_file_path);
-    
+
     // Print statistics
     print_ms2_statistics(&peakels);
-    
+
     Ok(())
 }
 
@@ -412,11 +437,11 @@ fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Resu
 fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<()> {
     use std::io::Write;
     use std::fs::File;
-    
+
     let mut file = File::create(path)?;
-    
+
     writeln!(file, "id\tmoz\telution_time\tduration\tapex_intensity\tarea\tpeak_count\tfirst_spectrum_id\tapex_spectrum_id\tlast_spectrum_id")?;
-    
+
     for (idx, peakel) in peakels.iter().enumerate() {
         writeln!(
             file,
@@ -433,7 +458,7 @@ fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<
             peakel.last_spectrum_id().unwrap_or(0),
         )?;
     }
-    
+
     Ok(())
 }
 

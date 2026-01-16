@@ -16,7 +16,7 @@
 //!
 //! ```rust
 //! use mzdb::processing::signal::filtering::{SavitzkyGolaySmoother, SignalSmoother};
-//! use mzdb::processing::signal::detection::{SmartPeakelFinder, PeakelFinder};
+//! use mzdb::processing::signal::finder::{SmartPeakelFinder, PeakelFinder};
 //!
 //! // Create some time-intensity pairs
 //! let data: Vec<(f32, f64)> = vec![
@@ -73,6 +73,13 @@ pub use signal::filtering::{
 pub use signal::finder::{
     PeakelFinder, BasicPeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig,
     HistogramBasedPeakelFinder,
+};
+
+// Re-export common detection utilities
+pub use signal::detection::{
+    find_nearest_peak_from_slices, find_nearest_peak,
+    sort_indices_by_descending_f32_value, is_target_mz_within_range,
+    create_peakel_finder,
 };
 
 // Re-export MS1 detection types
