@@ -849,6 +849,7 @@ fn process_work_item(
         // Extract XIC using walking algorithm
         let mz_tol_da = apex_mz * mz_tol_ppm * 1e-6;
         let mut xic_data: Vec<(f32, f64)> = Vec::new();
+        let mut xic_mz_values: Vec<f64> = Vec::new();
         let mut xic_spectrum_ids: Vec<i64> = Vec::new();
         let mut xic_peak_indices: Vec<(usize, usize)> = Vec::new();
 
@@ -875,10 +876,12 @@ fn process_work_item(
                     if !used_peaks.contains(&(target_idx, peak_idx)) {
                         if direction > 0 {
                             xic_data.push((spectrum.time, intensity as f64));
+                            xic_mz_values.push(mz);
                             xic_spectrum_ids.push(spectrum.spectrum_id);
                             xic_peak_indices.push((target_idx, peak_idx));
                         } else {
                             xic_data.insert(0, (spectrum.time, intensity as f64));
+                            xic_mz_values.insert(0, mz);
                             xic_spectrum_ids.insert(0, spectrum.spectrum_id);
                             xic_peak_indices.insert(0, (target_idx, peak_idx));
                         }
@@ -901,6 +904,7 @@ fn process_work_item(
         // Add apex point
         let apex_insert_pos = xic_data.partition_point(|&(t, _)| t < apex_time);
         xic_data.insert(apex_insert_pos, (apex_time, apex_intensity as f64));
+        xic_mz_values.insert(apex_insert_pos, apex_mz);
         xic_spectrum_ids.insert(apex_insert_pos, work.all_spectra[apex_spectrum_idx].spectrum_id);
         xic_peak_indices.insert(apex_insert_pos, (apex_spectrum_idx, apex_peak_idx));
 
@@ -931,8 +935,9 @@ fn process_work_item(
                         .map(|(t, _)| *t)
                         .collect();
 
-                    let mz_values: SmallVec<[f64; 16]> = std::iter::repeat(apex_mz)
-                        .take(peakel_xic.len())
+                    let mz_values: SmallVec<[f64; 16]> = xic_mz_values[start_idx..=end_idx]
+                        .iter()
+                        .copied()
                         .collect();
 
                     let intensity_values: SmallVec<[f32; 16]> = peakel_xic

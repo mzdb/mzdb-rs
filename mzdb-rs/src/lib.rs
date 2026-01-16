@@ -140,8 +140,11 @@ pub use xml::{
     extract_scan_time, find_param_value, find_user_param_value, find_user_text,
 };
 
-// Re-export queries types and functions
-pub use queries::{MzDbStats, SpectrumParseBuffer, read_spectrum_slice_into_buffer};
+// Re-export bounding_box types and functions
+pub use bounding_box::{SpectrumParseBuffer, read_spectrum_slice_into_buffer, read_spectrum_slice_data_at, merge_spectrum_slices};
+
+// Re-export queries types
+pub use queries::MzDbStats;
 
 // Re-export query utility functions
 pub use query_utils::{

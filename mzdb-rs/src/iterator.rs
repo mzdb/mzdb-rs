@@ -23,6 +23,7 @@ use fallible_iterator::FallibleIterator;
 use rusqlite::{Connection, Statement};
 use std::collections::HashMap;
 
+use crate::bounding_box::{create_bbox, index_bbox, to_spectrum_slices, read_spectrum_slice_data_at, merge_spectrum_slices};
 use crate::model::*;
 use crate::queries::*;
 
@@ -626,6 +627,7 @@ pub fn collect_dia_spectra(
 ///     this.spectrumSliceBuffer = sl.toArray(new SpectrumSlice[sl.size()]);
 /// }
 /// ```
+#[allow(dead_code)] // Used by ms1_detection in processing module
 pub struct RunSliceIterator<'a> {
     /// SQL statement for fetching bounding boxes
     stmt: Statement<'a>,
@@ -668,7 +670,7 @@ impl<'a> RunSliceIterator<'a> {
     ///
     /// # Arguments
     /// * `connection` - Database connection
-    /// * `entity_cache` - Pre-loaded entity cache  
+    /// * `entity_cache` - Pre-loaded entity cache
     /// * `ms_level` - MS level to iterate (1 for MS1, 2 for MS2, etc.)
     pub fn new_with_ms_level(
         connection: &'a Connection,
@@ -689,7 +691,7 @@ impl<'a> RunSliceIterator<'a> {
              ORDER BY run_slice.begin_mz",
             ms_level
         );
-        
+
         let stmt = connection.prepare(&sql)?;
 
         Ok(Self {
@@ -715,6 +717,7 @@ impl<'a> RunSliceIterator<'a> {
     /// AND run_slice.begin_mz <= ?
     /// ORDER BY run_slice.begin_mz
     /// ```
+    #[allow(dead_code)]
     pub fn new_with_mz_range(
         connection: &'a Connection,
         entity_cache: &'a EntityCache,
@@ -737,7 +740,7 @@ impl<'a> RunSliceIterator<'a> {
              ORDER BY run_slice.begin_mz",
             min_run_slice_mz, max_run_slice_mz
         );
-        
+
         let stmt = connection.prepare(&sql)?;
 
         Ok(Self {
@@ -779,7 +782,7 @@ impl<'a> RunSliceIterator<'a> {
 
         if let Some(ref mut rows) = self.rows {
             if let Some(row) = rows.next()? {
-                return Ok(Some(crate::bounding_box::create_bbox(row)?));
+                return Ok(Some(create_bbox(row)?));
             }
         }
 
@@ -810,10 +813,10 @@ impl<'a> RunSliceIterator<'a> {
         };
 
         let current_run_slice_id = first_bb.run_slice_id;
-        
+
         // Index and convert first BB to spectrum slices
-        let bbox_index = crate::bounding_box::index_bbox(&first_bb, &self.entity_cache.data_encodings_cache)?;
-        let mut spectrum_slices = crate::bounding_box::to_spectrum_slices(
+        let bbox_index = index_bbox(&first_bb, &self.entity_cache.data_encodings_cache)?;
+        let mut spectrum_slices = to_spectrum_slices(
             &first_bb,
             &bbox_index,
             self.entity_cache,
@@ -823,8 +826,8 @@ impl<'a> RunSliceIterator<'a> {
         while let Some(bb) = self.read_next_bb()? {
             if bb.run_slice_id == current_run_slice_id {
                 // Same run slice - add its spectrum slices
-                let bbox_index = crate::bounding_box::index_bbox(&bb, &self.entity_cache.data_encodings_cache)?;
-                let mut bb_slices = crate::bounding_box::to_spectrum_slices(
+                let bbox_index = index_bbox(&bb, &self.entity_cache.data_encodings_cache)?;
+                let mut bb_slices = to_spectrum_slices(
                     &bb,
                     &bbox_index,
                     self.entity_cache,
@@ -840,7 +843,7 @@ impl<'a> RunSliceIterator<'a> {
         // No more bounding boxes
         self.bb_has_next = false;
         self.first_bb = None;
-        
+
         Ok(spectrum_slices)
     }
 }
@@ -856,17 +859,17 @@ impl<'a> FallibleIterator for RunSliceIterator<'a> {
 
         // Get spectrum slices for current run slice
         let spectrum_slices = self.init_spectrum_slice_buffer()?;
-        
+
         if spectrum_slices.is_empty() {
             return Ok(None);
         }
 
         // Get run_slice_id from first spectrum slice
         let run_slice_id = spectrum_slices[0].run_slice_id;
-        
+
         // Build RunSliceData
         let run_slice_data = RunSliceData::new(run_slice_id, spectrum_slices);
-        
+
         // Get RunSliceHeader
         let run_slice_header = self.run_slice_headers
             .get(&run_slice_id)
@@ -893,6 +896,7 @@ impl<'a> FallibleIterator for RunSliceIterator<'a> {
 /// let run_slices = collect_run_slices(&db, &cache).unwrap();
 /// println!("Found {} run slices", run_slices.len());
 /// ```
+#[allow(dead_code)] // Public API for library consumers
 pub fn collect_run_slices(
     connection: &Connection,
     entity_cache: &EntityCache,
