@@ -421,7 +421,10 @@ impl DiaMs2PeakelDetector {
                 smart_config.min_peaks_count = self.config.min_peaks;
                 Box::new(SmartPeakelFinder::with_config(smart_config))
             },
-            _ => Box::new(BasicPeakelFinder::default_params()),
+            _ => {
+                // Use configured min_peaks for BasicPeakelFinder too
+                Box::new(BasicPeakelFinder::new(2, self.config.min_peaks))
+            }
         };
 
         let mut detected_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();

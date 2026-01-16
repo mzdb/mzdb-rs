@@ -106,6 +106,7 @@ struct Args {
 pub struct Ms1PeakelDetectionConfig {
     pub mz_tol_ppm: f64,
     pub min_peaks_count: usize,
+    pub min_intensity: f32,
     pub intensity_percentile: f32,
     pub max_consecutive_gaps: usize,
     pub max_time_window: f32,
@@ -117,6 +118,7 @@ impl Default for Ms1PeakelDetectionConfig {
         Self {
             mz_tol_ppm: 10.0,
             min_peaks_count: 5,
+            min_intensity: 0.0,
             intensity_percentile: 0.9,
             max_consecutive_gaps: 3,
             max_time_window: 1200.0,
@@ -138,7 +140,10 @@ impl Ms1PeakelDetectionConfig {
                 };
                 Box::new(SmartPeakelFinder::with_config(finder_config))
             }
-            _ => Box::new(BasicPeakelFinder::default_params()),
+            _ => {
+                // Use configured min_peaks_count for BasicPeakelFinder too
+                Box::new(BasicPeakelFinder::new(2, self.min_peaks_count))
+            }
         }
     }
 }
@@ -254,6 +259,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
     let config = Ms1PeakelDetectionConfig {
         mz_tol_ppm: args.mz_tol_ppm,
         min_peaks_count: args.min_peaks,
+        min_intensity: args.min_intensity,
         intensity_percentile: args.intensity_percentile,
         max_consecutive_gaps: args.max_consecutive_gaps,
         max_time_window: 1200.0,
@@ -261,6 +267,8 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
     };
 
     println!("Detecting MS1 peakels...");
+    println!("  Config: mz_tol={} ppm, min_peaks={}, min_intensity={}, max_gaps={}", 
+             config.mz_tol_ppm, config.min_peaks_count, config.min_intensity, config.max_consecutive_gaps);
     let peakels = detect_ms1_peakels(reader, &config, num_threads)?;
     
     if peakels.is_empty() {
@@ -319,17 +327,33 @@ fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig, num_
     
     // Build a map of all peaks organized by approximate m/z bins
     let mz_bin_size = config.mz_tol_ppm * 0.001;
+    let min_intensity = config.min_intensity;
     
-    println!("  Collecting peaks from MS1 spectra...");
+    println!("  Collecting peaks from MS1 spectra (min_intensity={})...", min_intensity);
     let mut peaks_by_mz_bin: BTreeMap<i64, Vec<(f64, f32, i64, f32)>> = BTreeMap::new();
+    let mut total_peaks = 0usize;
+    let mut filtered_peaks = 0usize;
+    let mut skipped_spectra = 0usize;
     
     for header in &ms1_headers {
-        let spectrum = mzdb.get_spectrum(header.id)
-            .with_context(|| format!("Failed to read spectrum {}", header.id))?;
+        let spectrum = match mzdb.get_spectrum(header.id) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Skipping spectrum {} due to error: {}", header.id, e);
+                skipped_spectra += 1;
+                continue;
+            }
+        };
         
-        let rt = header.time * 60.0; // Convert to seconds
+        let rt = header.time; // Time is already in seconds in mzDB
         
         for (&mz, &intensity) in spectrum.data.mz_array.iter().zip(spectrum.data.intensity_array.iter()) {
+            total_peaks += 1;
+            // Filter by minimum intensity
+            if intensity < min_intensity {
+                continue;
+            }
+            filtered_peaks += 1;
             let bin = (mz / mz_bin_size) as i64;
             peaks_by_mz_bin.entry(bin)
                 .or_default()
@@ -337,6 +361,11 @@ fn detect_ms1_peakels(mzdb: &MzDbReader, config: &Ms1PeakelDetectionConfig, num_
         }
     }
     
+    if skipped_spectra > 0 {
+        println!("  Warning: Skipped {} spectra due to read errors", skipped_spectra);
+    }
+    
+    println!("  Collected {} peaks (filtered {} of {} total)", filtered_peaks, total_peaks - filtered_peaks, total_peaks);
     println!("  Found {} m/z bins with peaks", peaks_by_mz_bin.len());
     
     // Convert to Vec for parallel processing
