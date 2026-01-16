@@ -431,18 +431,6 @@ pub struct RunSliceHeader {
     pub run_id: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct RunSliceData {
-    pub id: i64,
-    pub spectrum_slice: Vec<SpectrumSlice>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RunSlice {
-    pub header: RunSliceHeader,
-    pub data: RunSliceData,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct BBSizes {
     pub bb_mz_height_ms1: f64,
@@ -568,3 +556,68 @@ impl EntityCache {
             .and_then(|&idx| self.spectrum_headers.get(idx))
     }
 }
+
+// ============================================================================
+// RunSlice - For m/z-sliced iteration
+// ============================================================================
+
+/// Run slice data containing all spectrum slices for a given m/z range
+///
+/// This is the Rust port of Java's `fr.profi.mzdb.model.RunSliceData`
+#[derive(Clone, Debug)]
+pub struct RunSliceData {
+    /// Run slice ID
+    pub run_slice_id: i64,
+    /// All spectrum slices in this run slice
+    pub spectrum_slices: Vec<SpectrumSlice>,
+}
+
+impl RunSliceData {
+    /// Create a new RunSliceData
+    pub fn new(run_slice_id: i64, spectrum_slices: Vec<SpectrumSlice>) -> Self {
+        Self {
+            run_slice_id,
+            spectrum_slices,
+        }
+    }
+}
+
+/// Complete run slice with header and data
+///
+/// This is the Rust port of Java's `fr.profi.mzdb.model.RunSlice`
+///
+/// # Java Reference
+/// ```java
+/// public class RunSlice {
+///     protected final RunSliceHeader header;
+///     protected final RunSliceData data;
+///     
+///     public RunSliceHeader getHeader() { return header; }
+///     public RunSliceData getData() { return data; }
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct RunSlice {
+    /// Run slice metadata
+    pub header: RunSliceHeader,
+    /// Run slice spectrum data
+    pub data: RunSliceData,
+}
+
+impl RunSlice {
+    /// Create a new RunSlice
+    pub fn new(header: RunSliceHeader, data: RunSliceData) -> Self {
+        Self { header, data }
+    }
+    
+    /// Get the run slice header
+    pub fn get_header(&self) -> &RunSliceHeader {
+        &self.header
+    }
+    
+    /// Get the run slice data
+    pub fn get_data(&self) -> &RunSliceData {
+        &self.data
+    }
+}
+

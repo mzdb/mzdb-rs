@@ -75,6 +75,17 @@ pub use signal::detection::{
     HistogramBasedPeakelFinder,
 };
 
+// Re-export MS1 detection types
+pub use signal::ms1_detection::{
+    Ms1PeakelDetector, Ms1PeakelConfig,
+};
+
+// Re-export MS2 detection types (also available via dia module)
+pub use signal::ms2_detection::{
+    IsolationWindow, DiaMs2PeakelRecord, DiaMs2PeakelConfig,
+    DiaMs2PeakelDetector,
+};
+
 pub use ms::{
     ppm_to_da, da_to_ppm, mz_range_from_ppm, mz_within_tolerance,
     mz_to_mass, mass_to_mz, isotope_mz,
@@ -88,17 +99,12 @@ pub use math::{
     median, mad, robust_noise_threshold,
 };
 
-// Re-export DIA types
-pub use dia::{
-    IsolationWindow, PeaksData, DiaMs2PeakelRecord, DiaMs2PeakelConfig,
-    DiaMs2PeakelDetector, write_dia_peakeldb,
-};
+// Re-export DIA types (for backward compatibility, these come from signal::ms2_detection)
+pub use dia::write_dia_peakeldb;
 
 // Re-export peakeldb types
 pub use peakeldb::{
     PeakelData, ExtendedPeakel,
-    parse_peaks_blob, parse_peaks_blob_to_peakel_data,
-    extract_i64_array, extract_f32_array, extract_f64_array,
     chrono_lite_timestamp,
     Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord, serialize_ms1_peakel_data,
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,

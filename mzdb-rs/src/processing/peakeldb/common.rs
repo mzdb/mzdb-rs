@@ -6,8 +6,7 @@
 //! - MessagePack blob parsing utilities
 //! - Timestamp generation
 
-use anyhow_ext::{bail, Result};
-use rmpv::Value;
+use anyhow_ext::Result;
 use smallvec::SmallVec;
 
 use crate::processing::model::HasPeakelData;
@@ -48,6 +47,16 @@ impl PeakelData {
         }
     }
 
+    /// Create with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            spectrum_ids: SmallVec::with_capacity(capacity),
+            elution_times: SmallVec::with_capacity(capacity),
+            mz_values: SmallVec::with_capacity(capacity),
+            intensities: SmallVec::with_capacity(capacity),
+        }
+    }
+
     /// Create from Vec data (converts to SmallVec)
     pub fn from_vectors(
         spectrum_ids: Vec<i64>,
@@ -61,6 +70,50 @@ impl PeakelData {
             mz_values: SmallVec::from_vec(mz_values),
             intensities: SmallVec::from_vec(intensities),
         }
+    }
+
+    /// Get the number of data points
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.spectrum_ids.len()
+    }
+
+    /// Check if empty
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.spectrum_ids.is_empty()
+    }
+
+    /// Serialize to MessagePack bytes using rmp_serde
+    /// 
+    /// Format: tuple of 4 arrays [spectrum_ids, elution_times, mz_values, intensities]
+    pub fn to_msgpack(&self) -> Result<Vec<u8>> {
+        let data = (
+            self.spectrum_ids.as_slice(),
+            self.elution_times.as_slice(),
+            self.mz_values.as_slice(),
+            self.intensities.as_slice(),
+        );
+        rmp_serde::to_vec(&data)
+            .map_err(|e| anyhow_ext::anyhow!("msgpack serialization error: {}", e))
+    }
+
+    /// Deserialize from MessagePack bytes
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self> {
+        let (spectrum_ids, elution_times, mz_values, intensities): 
+            (Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>) = 
+            rmp_serde::from_slice(bytes)
+                .map_err(|e| anyhow_ext::anyhow!("msgpack deserialization error: {}", e))?;
+        
+        Ok(Self::from_vectors(spectrum_ids, elution_times, mz_values, intensities))
+    }
+
+    /// Push a single data point
+    pub fn push(&mut self, spectrum_id: i64, elution_time: f32, mz: f64, intensity: f32) {
+        self.spectrum_ids.push(spectrum_id);
+        self.elution_times.push(elution_time);
+        self.mz_values.push(mz);
+        self.intensities.push(intensity);
     }
 }
 
@@ -274,94 +327,6 @@ impl From<&crate::processing::Peakel> for ExtendedPeakel {
 }
 
 // ============================================================================
-// MessagePack Blob Parsing
-// ============================================================================
-
-/// Parse a MessagePack-encoded peaks blob from peakelDB
-///
-/// The blob format is an array of 4 arrays:
-/// - spectrum_ids: i64[]
-/// - elution_times: f32[]
-/// - mz_values: f64[]
-/// - intensities: f32[]
-///
-/// # Arguments
-/// * `data` - Raw bytes of the MessagePack-encoded blob
-///
-/// # Returns
-/// Tuple of (spectrum_ids, elution_times, mz_values, intensities)
-pub fn parse_peaks_blob(data: &[u8]) -> Result<(Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>)> {
-    let value: Value = rmpv::decode::read_value(&mut &data[..])?;
-
-    if let Value::Array(arrays) = value {
-        if arrays.len() != 4 {
-            bail!("Expected 4 arrays in peaks blob, got {}", arrays.len());
-        }
-
-        let spectrum_ids = extract_i64_array(&arrays[0])?;
-        let elution_times = extract_f32_array(&arrays[1])?;
-        let mz_values = extract_f64_array(&arrays[2])?;
-        let intensities = extract_f32_array(&arrays[3])?;
-
-        Ok((spectrum_ids, elution_times, mz_values, intensities))
-    } else {
-        bail!("Expected array at top level of peaks blob")
-    }
-}
-
-/// Parse a MessagePack-encoded peaks blob directly into PeakelData
-pub fn parse_peaks_blob_to_peakel_data(blob: &[u8]) -> Result<PeakelData> {
-    let (spectrum_ids, elution_times, mz_values, intensities) = parse_peaks_blob(blob)?;
-    Ok(PeakelData::from_vectors(spectrum_ids, elution_times, mz_values, intensities))
-}
-
-/// Extract an array of i64 values from a MessagePack Value
-pub fn extract_i64_array(value: &Value) -> Result<Vec<i64>> {
-    if let Value::Array(arr) = value {
-        arr.iter()
-            .map(|v| match v {
-                Value::Integer(i) => Ok(i.as_i64().unwrap_or(0)),
-                _ => Ok(0),
-            })
-            .collect()
-    } else {
-        bail!("Expected array, got {:?}", value);
-    }
-}
-
-/// Extract an array of f32 values from a MessagePack Value
-pub fn extract_f32_array(value: &Value) -> Result<Vec<f32>> {
-    if let Value::Array(arr) = value {
-        arr.iter()
-            .map(|v| match v {
-                Value::F32(f) => Ok(*f),
-                Value::F64(f) => Ok(*f as f32),
-                Value::Integer(i) => Ok(i.as_f64().unwrap_or(0.0) as f32),
-                _ => Ok(0.0),
-            })
-            .collect()
-    } else {
-        bail!("Expected array, got {:?}", value);
-    }
-}
-
-/// Extract an array of f64 values from a MessagePack Value
-pub fn extract_f64_array(value: &Value) -> Result<Vec<f64>> {
-    if let Value::Array(arr) = value {
-        arr.iter()
-            .map(|v| match v {
-                Value::F64(f) => Ok(*f),
-                Value::F32(f) => Ok(*f as f64),
-                Value::Integer(i) => Ok(i.as_f64().unwrap_or(0.0)),
-                _ => Ok(0.0),
-            })
-            .collect()
-    } else {
-        bail!("Expected array, got {:?}", value);
-    }
-}
-
-// ============================================================================
 // Timestamp Utilities
 // ============================================================================
 
@@ -443,53 +408,4 @@ mod tests {
         assert!(ms2.is_ms2_dia());
     }
 
-    #[test]
-    fn test_extract_i64_array() {
-        let value = Value::Array(vec![
-            Value::Integer(1.into()),
-            Value::Integer(2.into()),
-            Value::Integer(3.into()),
-        ]);
-        let result = extract_i64_array(&value).unwrap();
-        assert_eq!(result, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn test_extract_f32_array() {
-        let value = Value::Array(vec![
-            Value::F32(1.0),
-            Value::F32(2.5),
-            Value::F32(3.0),
-        ]);
-        let result = extract_f32_array(&value).unwrap();
-        assert_eq!(result, vec![1.0, 2.5, 3.0]);
-    }
-
-    #[test]
-    fn test_extract_f64_array() {
-        let value = Value::Array(vec![
-            Value::F64(1.0),
-            Value::F64(2.5),
-            Value::F64(3.0),
-        ]);
-        let result = extract_f64_array(&value).unwrap();
-        assert_eq!(result, vec![1.0, 2.5, 3.0]);
-    }
-
-    #[test]
-    fn test_extract_array_type_conversion() {
-        // Test f64 -> f32 conversion
-        let value = Value::Array(vec![
-            Value::F64(1.5),
-        ]);
-        let result = extract_f32_array(&value).unwrap();
-        assert!((result[0] - 1.5).abs() < 0.001);
-        
-        // Test f32 -> f64 conversion
-        let value = Value::Array(vec![
-            Value::F32(1.5),
-        ]);
-        let result = extract_f64_array(&value).unwrap();
-        assert!((result[0] - 1.5).abs() < 0.001);
-    }
 }

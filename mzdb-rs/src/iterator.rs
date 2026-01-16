@@ -21,6 +21,7 @@
 use anyhow_ext::{anyhow, Context, Result};
 use fallible_iterator::FallibleIterator;
 use rusqlite::{Connection, Statement};
+use std::collections::HashMap;
 
 use crate::model::*;
 use crate::queries::*;
@@ -593,5 +594,311 @@ pub fn collect_dia_spectra(
     use fallible_iterator::FallibleIterator;
 
     let iter = SpectrumIterator::new_dia(db, entity_cache, main_precursor_mz, precursor_mz_tol)?;
+    iter.collect()
+}
+
+// ============================================================================
+// Run Slice Iterator
+// ============================================================================
+
+/// Iterator over RunSlices, grouped by run_slice_id
+///
+/// This is a port of Java's `AbstractRunSliceIterator` and `LcMsRunSliceIterator`.
+/// The iterator loads bounding boxes ordered by run_slice.begin_mz, groups them
+/// by run_slice_id, and returns complete RunSlice objects.
+///
+/// # Java Reference
+/// From `fr.profi.mzdb.io.reader.iterator.AbstractRunSliceIterator`:
+/// ```java
+/// protected void initSpectrumSliceBuffer() {
+///     this.spectrumSliceBuffer = this.firstBB.toSpectrumSlices();
+///     ArrayList<SpectrumSlice> sl = new ArrayList<SpectrumSlice>(Arrays.asList(this.spectrumSliceBuffer));
+///     
+///     while (bbHasNext = boundingBoxIterator.hasNext()) {
+///         BoundingBox bb = boundingBoxIterator.next();
+///         if (bb.getRunSliceId() == this.firstBB.getRunSliceId()) {
+///             sl.addAll(Arrays.asList(bb.toSpectrumSlices()));
+///         } else {
+///             this.firstBB = bb;
+///             break;
+///         }
+///     }
+///     this.spectrumSliceBuffer = sl.toArray(new SpectrumSlice[sl.size()]);
+/// }
+/// ```
+pub struct RunSliceIterator<'a> {
+    /// SQL statement for fetching bounding boxes
+    stmt: Statement<'a>,
+    /// Entity cache with headers and encodings
+    entity_cache: &'a EntityCache,
+    /// Rows iterator (initialized lazily)
+    rows: Option<rusqlite::Rows<'a>>,
+    /// First bounding box of next run slice (lookahead)
+    first_bb: Option<BoundingBox>,
+    /// Whether there are more bounding boxes
+    bb_has_next: bool,
+    /// Run slice headers by ID for metadata lookup
+    run_slice_headers: HashMap<i64, RunSliceHeader>,
+}
+
+impl<'a> RunSliceIterator<'a> {
+    /// Create a new RunSliceIterator for MS1 data
+    ///
+    /// Ported from Java's `LcMsRunSliceIterator` constructor
+    ///
+    /// # Arguments
+    /// * `connection` - Database connection
+    /// * `entity_cache` - Pre-loaded entity cache
+    ///
+    /// # SQL Query
+    /// ```sql
+    /// SELECT bounding_box.* FROM bounding_box, run_slice
+    /// WHERE run_slice.ms_level = 1
+    /// AND bounding_box.run_slice_id = run_slice.id
+    /// ORDER BY run_slice.begin_mz
+    /// ```
+    pub fn new(
+        connection: &'a Connection,
+        entity_cache: &'a EntityCache,
+    ) -> Result<Self> {
+        Self::new_with_ms_level(connection, entity_cache, 1)
+    }
+
+    /// Create a new RunSliceIterator for a specific MS level
+    ///
+    /// # Arguments
+    /// * `connection` - Database connection
+    /// * `entity_cache` - Pre-loaded entity cache  
+    /// * `ms_level` - MS level to iterate (1 for MS1, 2 for MS2, etc.)
+    pub fn new_with_ms_level(
+        connection: &'a Connection,
+        entity_cache: &'a EntityCache,
+        ms_level: i64,
+    ) -> Result<Self> {
+        // Load run slice headers for this MS level
+        let run_slice_headers = list_run_slices_by_ms_level(connection, ms_level)?
+            .into_iter()
+            .map(|header| (header.id, header))
+            .collect();
+
+        // Prepare SQL statement (matches Java query)
+        let sql = format!(
+            "SELECT bounding_box.* FROM bounding_box, run_slice \
+             WHERE run_slice.ms_level = {} \
+             AND bounding_box.run_slice_id = run_slice.id \
+             ORDER BY run_slice.begin_mz",
+            ms_level
+        );
+        
+        let stmt = connection.prepare(&sql)?;
+
+        Ok(Self {
+            stmt,
+            entity_cache,
+            rows: None,
+            first_bb: None,
+            bb_has_next: true,
+            run_slice_headers,
+        })
+    }
+
+    /// Create a RunSliceIterator for a specific m/z range (MS1 only)
+    ///
+    /// Ported from Java's `LcMsRunSliceIterator(minRunSliceMz, maxRunSliceMz)` constructor
+    ///
+    /// # SQL Query
+    /// ```sql
+    /// SELECT bounding_box.* FROM bounding_box, run_slice
+    /// WHERE run_slice.ms_level = 1
+    /// AND bounding_box.run_slice_id = run_slice.id
+    /// AND run_slice.end_mz >= ?
+    /// AND run_slice.begin_mz <= ?
+    /// ORDER BY run_slice.begin_mz
+    /// ```
+    pub fn new_with_mz_range(
+        connection: &'a Connection,
+        entity_cache: &'a EntityCache,
+        min_run_slice_mz: f64,
+        max_run_slice_mz: f64,
+    ) -> Result<Self> {
+        // Load run slice headers for MS1
+        let run_slice_headers = list_run_slices_by_ms_level(connection, 1)?
+            .into_iter()
+            .map(|header| (header.id, header))
+            .collect();
+
+        // Prepare SQL statement with m/z filter (embed params in SQL)
+        let sql = format!(
+            "SELECT bounding_box.* FROM bounding_box, run_slice \
+             WHERE run_slice.ms_level = 1 \
+             AND bounding_box.run_slice_id = run_slice.id \
+             AND run_slice.end_mz >= {} \
+             AND run_slice.begin_mz <= {} \
+             ORDER BY run_slice.begin_mz",
+            min_run_slice_mz, max_run_slice_mz
+        );
+        
+        let stmt = connection.prepare(&sql)?;
+
+        Ok(Self {
+            stmt,
+            entity_cache,
+            rows: None,
+            first_bb: None,
+            bb_has_next: true,
+            run_slice_headers,
+        })
+    }
+
+    /// Ensure rows are initialized (lazy initialization)
+    ///
+    /// This matches SpectrumIterator's pattern for managing Statement/Rows lifetimes
+    fn ensure_rows(&mut self) -> Result<()> {
+        if self.rows.is_some() {
+            return Ok(());
+        }
+
+        // Create Rows from Statement
+        // Safety: The rows borrow from stmt, and stmt lives as long as self
+        // This is safe because:
+        // 1. stmt is owned by Self and lives for 'a
+        // 2. rows will be dropped when Self is dropped
+        // 3. rows will never outlive stmt
+        let rows = unsafe {
+            std::mem::transmute::<rusqlite::Rows<'_>, rusqlite::Rows<'a>>(
+                self.stmt.query([])?
+            )
+        };
+        self.rows = Some(rows);
+        Ok(())
+    }
+
+    /// Read next bounding box from rows
+    fn read_next_bb(&mut self) -> Result<Option<BoundingBox>> {
+        self.ensure_rows()?;
+
+        if let Some(ref mut rows) = self.rows {
+            if let Some(row) = rows.next()? {
+                return Ok(Some(crate::bounding_box::create_bbox(row)?));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Initialize spectrum slice buffer for the current run slice
+    ///
+    /// This is the core algorithm ported from Java's `initSpectrumSliceBuffer()`.
+    /// It groups all bounding boxes with the same run_slice_id and converts them
+    /// to spectrum slices.
+    ///
+    /// # Returns
+    /// Vector of SpectrumSlices for the current run slice
+    fn init_spectrum_slice_buffer(&mut self) -> Result<Vec<SpectrumSlice>> {
+        // Get first BB (either from lookahead or from iterator)
+        let first_bb = if let Some(bb) = self.first_bb.take() {
+            bb
+        } else {
+            // Get next BB from iterator
+            match self.read_next_bb()? {
+                Some(bb) => bb,
+                None => {
+                    self.bb_has_next = false;
+                    return Ok(Vec::new());
+                }
+            }
+        };
+
+        let current_run_slice_id = first_bb.run_slice_id;
+        
+        // Index and convert first BB to spectrum slices
+        let bbox_index = crate::bounding_box::index_bbox(&first_bb, &self.entity_cache.data_encodings_cache)?;
+        let mut spectrum_slices = crate::bounding_box::to_spectrum_slices(
+            &first_bb,
+            &bbox_index,
+            self.entity_cache,
+        )?;
+
+        // Collect all BBs with the same run_slice_id
+        while let Some(bb) = self.read_next_bb()? {
+            if bb.run_slice_id == current_run_slice_id {
+                // Same run slice - add its spectrum slices
+                let bbox_index = crate::bounding_box::index_bbox(&bb, &self.entity_cache.data_encodings_cache)?;
+                let mut bb_slices = crate::bounding_box::to_spectrum_slices(
+                    &bb,
+                    &bbox_index,
+                    self.entity_cache,
+                )?;
+                spectrum_slices.append(&mut bb_slices);
+            } else {
+                // Different run slice - save for next iteration
+                self.first_bb = Some(bb);
+                return Ok(spectrum_slices);
+            }
+        }
+
+        // No more bounding boxes
+        self.bb_has_next = false;
+        self.first_bb = None;
+        
+        Ok(spectrum_slices)
+    }
+}
+
+impl<'a> FallibleIterator for RunSliceIterator<'a> {
+    type Item = RunSlice;
+    type Error = anyhow_ext::Error;
+
+    fn next(&mut self) -> Result<Option<Self::Item>> {
+        if !self.bb_has_next && self.first_bb.is_none() {
+            return Ok(None);
+        }
+
+        // Get spectrum slices for current run slice
+        let spectrum_slices = self.init_spectrum_slice_buffer()?;
+        
+        if spectrum_slices.is_empty() {
+            return Ok(None);
+        }
+
+        // Get run_slice_id from first spectrum slice
+        let run_slice_id = spectrum_slices[0].run_slice_id;
+        
+        // Build RunSliceData
+        let run_slice_data = RunSliceData::new(run_slice_id, spectrum_slices);
+        
+        // Get RunSliceHeader
+        let run_slice_header = self.run_slice_headers
+            .get(&run_slice_id)
+            .ok_or_else(|| anyhow!("RunSliceHeader not found for id: {}", run_slice_id))?
+            .clone();
+
+        // Return complete RunSlice
+        Ok(Some(RunSlice {
+            header: run_slice_header,
+            data: run_slice_data,
+        }))
+    }
+}
+
+/// Convenience function to collect all run slices for MS1
+///
+/// # Example
+/// ```no_run
+/// use mzdb::iterator::collect_run_slices;
+/// use rusqlite::Connection;
+///
+/// let db = Connection::open("file.mzDB").unwrap();
+/// let cache = mzdb::cache::create_entity_cache(&db).unwrap();
+/// let run_slices = collect_run_slices(&db, &cache).unwrap();
+/// println!("Found {} run slices", run_slices.len());
+/// ```
+pub fn collect_run_slices(
+    connection: &Connection,
+    entity_cache: &EntityCache,
+) -> Result<Vec<RunSlice>> {
+    use fallible_iterator::FallibleIterator;
+    
+    let iter = RunSliceIterator::new(connection, entity_cache)?;
     iter.collect()
 }

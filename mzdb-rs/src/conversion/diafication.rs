@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::model::DataPointProvider;
-use crate::processing::peakeldb::parse_peaks_blob;
+use crate::processing::peakeldb::PeakelData;
 use crate::writer::{
     DiaWriteContext, DiaSpectrumParams,
     calculate_time_bounds, calculate_mz_bounds, find_base_peak,
@@ -224,8 +224,7 @@ impl PeakelDbReader {
             ) = result?;
 
             // Parse the MessagePack peaks blob
-            let (spectrum_ids, elution_times, mz_values, intensities) =
-                parse_peaks_blob(&peaks_blob)?;
+            let peakel_data = PeakelData::from_msgpack(&peaks_blob)?;
 
             peakels.push(Peakel {
                 id,
@@ -238,10 +237,10 @@ impl PeakelDbReader {
                 first_spectrum_id,
                 last_spectrum_id,
                 apex_spectrum_id,
-                spectrum_ids,
-                elution_times,
-                mz_values,
-                intensities,
+                spectrum_ids: peakel_data.spectrum_ids.to_vec(),
+                elution_times: peakel_data.elution_times.to_vec(),
+                mz_values: peakel_data.mz_values.to_vec(),
+                intensities: peakel_data.intensities.to_vec(),
             });
         }
 
