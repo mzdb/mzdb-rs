@@ -110,6 +110,14 @@ pub use peakeldb::{
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,
 };
 
+#[cfg(feature = "dda2dia")]
+pub mod diafication;
+#[cfg(feature = "dda2dia")]
+pub use diafication::{
+    Dda2DiaConverter, DiaConversionOptions, DiaConversionStats
+};
+
+
 // Re-export DIA simplifier types (when feature enabled)
 #[cfg(feature = "shrinkdia")]
 pub use dia_simplifier::{

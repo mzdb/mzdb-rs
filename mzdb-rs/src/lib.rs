@@ -96,12 +96,6 @@ pub mod conversion;
 // Re-export conversion types (always available)
 pub use conversion::{MgfWriter, MgfWriterWithStats, MgfExportOptions, MgfExportStats};
 
-#[cfg(feature = "dda2dia")]
-pub use conversion::{
-    Dda2DiaConverter, DiaConversionOptions, DiaConversionStats,
-    Peakel, PeakelDbReader, DiaWindow, generate_dia_windows,
-};
-
 // Re-export main types for convenience
 pub use model::{
     AcquisitionMode, BBSizes, BoundingBox, BoundingBoxIndex, ByteOrder, DataEncoding,

@@ -25,7 +25,7 @@ use std::process;
 
 use clap::Parser;
 
-use mzdb::conversion::diafication::{Dda2DiaConverter, DiaConversionOptions};
+use mzdb::processing::diafication::{Dda2DiaConverter, DiaConversionOptions};
 
 /// Convert DDA mzDB files to simulated DIA format
 #[derive(Parser, Debug)]

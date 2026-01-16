@@ -6,11 +6,3 @@
 
 pub mod mgf;
 pub use mgf::{MgfWriter, MgfWriterWithStats, MgfExportOptions, MgfExportStats};
-
-#[cfg(feature = "dda2dia")]
-pub mod diafication;
-#[cfg(feature = "dda2dia")]
-pub use diafication::{
-    Dda2DiaConverter, DiaConversionOptions, DiaConversionStats,
-    Peakel, PeakelDbReader, DiaWindow, generate_dia_windows,
-};
