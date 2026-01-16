@@ -268,6 +268,108 @@ impl Ms1PeakelDbWriter {
 }
 
 // ============================================================================
+// Reader
+// ============================================================================
+
+/// Reader for MS1 peakeldb SQLite files
+pub struct Ms1PeakelDbReader {
+    conn: Connection,
+}
+
+impl Ms1PeakelDbReader {
+    /// Open a peakeldb file
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let conn = Connection::open(path.as_ref())
+            .context("Failed to open peakeldb file")?;
+        Ok(Self { conn })
+    }
+
+    /// Get a reference to the underlying connection
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Get the number of peakels in the database
+    pub fn get_peakel_count(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM peakel", [], |row| row.get(0))
+            .context("Failed to count peakels")
+    }
+
+    /// Read all peakels from the database as ExtendedPeakel
+    pub fn read_all_peakels(&self) -> Result<Vec<super::ExtendedPeakel>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, moz, elution_time, duration, gap_count, apex_intensity,
+                    area, amplitude, peak_count, peaks,
+                    first_spectrum_id, apex_spectrum_id, last_spectrum_id
+             FROM peakel
+             ORDER BY id",
+        )?;
+
+        let peakel_iter = stmt.query_map([], |row| {
+            let peaks_blob: Vec<u8> = row.get(9)?;
+            Ok((
+                row.get::<_, i64>(0)?,    // id
+                row.get::<_, f64>(1)?,    // moz -> mz
+                row.get::<_, f32>(2)?,    // elution_time
+                row.get::<_, f32>(3)?,    // duration
+                row.get::<_, i32>(4)?,    // gap_count
+                row.get::<_, f32>(5)?,    // apex_intensity
+                row.get::<_, f32>(6)?,    // area
+                row.get::<_, f32>(7)?,    // amplitude
+                row.get::<_, i32>(8)?,    // peak_count
+                peaks_blob,               // peaks (MessagePack blob)
+                row.get::<_, i64>(10)?,   // first_spectrum_id
+                row.get::<_, i64>(11)?,   // apex_spectrum_id
+                row.get::<_, i64>(12)?,   // last_spectrum_id
+            ))
+        })?;
+
+        let mut peakels = Vec::new();
+
+        for result in peakel_iter {
+            let (
+                id,
+                mz,
+                elution_time,
+                duration,
+                gap_count,
+                apex_intensity,
+                area,
+                amplitude,
+                peaks_count,
+                peaks_blob,
+                first_spectrum_id,
+                apex_spectrum_id,
+                last_spectrum_id,
+            ) = result?;
+
+            // Parse the MessagePack peaks blob
+            let data = super::PeakelData::from_msgpack(&peaks_blob)?;
+
+            peakels.push(super::ExtendedPeakel::new(
+                id,
+                mz,
+                elution_time,
+                duration,
+                gap_count,
+                apex_intensity,
+                area,
+                amplitude,
+                peaks_count,
+                first_spectrum_id,
+                apex_spectrum_id,
+                last_spectrum_id,
+                data,
+            ));
+        }
+
+        log::info!("Loaded {} peakels from MS1 peakeldb", peakels.len());
+        Ok(peakels)
+    }
+}
+
+// ============================================================================
 // Serialization
 // ============================================================================
 
@@ -277,9 +379,9 @@ impl Ms1PeakelDbWriter {
 pub fn serialize_ms1_peakel_data(peakel: &Peakel) -> Result<Vec<u8>> {
     let n = peakel.peaks_count();
     let mut data = Vec::with_capacity(4 + n * (8 + 4 + 8 + 4));
-    
+
     data.extend_from_slice(&(n as u32).to_le_bytes());
-    
+
     for &id in &peakel.spectrum_ids {
         data.extend_from_slice(&id.to_le_bytes());
     }
@@ -292,6 +394,6 @@ pub fn serialize_ms1_peakel_data(peakel: &Peakel) -> Result<Vec<u8>> {
     for &intensity in &peakel.intensity_values {
         data.extend_from_slice(&intensity.to_le_bytes());
     }
-    
+
     Ok(data)
 }

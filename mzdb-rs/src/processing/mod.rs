@@ -106,7 +106,7 @@ pub use dia::write_dia_peakeldb;
 pub use peakeldb::{
     PeakelData, ExtendedPeakel,
     chrono_lite_timestamp,
-    Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord, serialize_ms1_peakel_data,
+    Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord, serialize_ms1_peakel_data,
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,
 };
 

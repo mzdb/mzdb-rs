@@ -76,9 +76,9 @@ pub trait HasPeakelData {
             .map(|(i, _)| i)
     }
 
-    /// Find the index of a specific spectrum ID
+    /// Find the index of a specific spectrum ID (uses binary search)
     fn find_spectrum_index(&self, spectrum_id: i64) -> Option<usize> {
-        self.spectrum_ids().iter().position(|&id| id == spectrum_id)
+        self.spectrum_ids().binary_search(&spectrum_id).ok()
     }
 
     /// Get min m/z value
@@ -258,7 +258,7 @@ pub type RtIntensityPairs = Vec<RtIntensityPair>;
 
 /// A peakel is a chromatographic peak - a series of peaks across spectra
 /// representing the elution of a single analyte.
-/// 
+///
 /// Uses SmallVec to store up to 16 points on the stack, spilling to heap
 /// for larger peakels. Most peakels have fewer than 16 data points.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -283,7 +283,7 @@ pub struct Peakel {
 
 impl Peakel {
     /// Create a new peakel from SmallVec data
-    /// 
+    ///
     /// This is the primary constructor. For peakels with 16 or fewer points,
     /// data stays on the stack avoiding heap allocation.
     pub fn new(
@@ -312,9 +312,9 @@ impl Peakel {
             apex_index,
         }
     }
-    
+
     /// Create a new peakel from Vec data
-    /// 
+    ///
     /// The vectors are converted to SmallVec internally. Use this for
     /// convenience when working with existing Vec data.
     pub fn from_vectors(
@@ -468,7 +468,7 @@ impl HasPeakelData for Peakel {
 // ============================================================================
 
 /// Builder for constructing Peakels from individual peaks
-/// 
+///
 /// Uses SmallVec internally to match Peakel's storage, avoiding
 /// conversion overhead when building small peakels.
 #[derive(Clone, Debug)]

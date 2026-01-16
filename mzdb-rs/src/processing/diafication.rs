@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use mzdb::conversion::diafication::{Dda2DiaConverter, DiaConversionOptions};
+//! use mzdb::processing::diafication::{Dda2DiaConverter, DiaConversionOptions};
 //!
 //! let options = DiaConversionOptions::default();
 //! let converter = Dda2DiaConverter::new("input.mzDB", "peakels.peakeldb", options).unwrap();
@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::model::DataPointProvider;
-use crate::processing::peakeldb::PeakelData;
+use crate::processing::peakeldb::{ExtendedPeakel, Ms1PeakelDbReader, HasPeakelData};
 use crate::writer::{
     DiaWriteContext, DiaSpectrumParams,
     calculate_time_bounds, calculate_mz_bounds, find_base_peak,
@@ -97,168 +97,6 @@ impl DiaConversionOptions {
 }
 
 // ============================================================================
-// Peakel Types
-// ============================================================================
-
-/// A peakel represents a detected chromatographic peak
-#[derive(Debug, Clone)]
-pub struct Peakel {
-    /// Unique identifier
-    pub id: i32,
-    /// Centroid m/z value
-    pub mz: f64,
-    /// Elution time at apex (seconds)
-    pub elution_time: f32,
-    /// Intensity at apex
-    pub apex_intensity: f32,
-    /// Integrated area under the curve
-    pub area: f32,
-    /// Duration of the peak (seconds)
-    pub duration: f32,
-    /// Number of data points
-    pub peak_count: i32,
-    /// First spectrum ID in the peakel
-    pub first_spectrum_id: i64,
-    /// Last spectrum ID in the peakel
-    pub last_spectrum_id: i64,
-    /// Spectrum ID at the apex
-    pub apex_spectrum_id: i64,
-    /// Spectrum IDs at each data point
-    pub spectrum_ids: Vec<i64>,
-    /// Retention times at each data point (seconds)
-    pub elution_times: Vec<f32>,
-    /// m/z values at each data point
-    pub mz_values: Vec<f64>,
-    /// Intensities at each data point
-    pub intensities: Vec<f32>,
-}
-
-impl Peakel {
-    /// Check if peakel contains a given m/z within tolerance
-    pub fn contains_mz(&self, mz: f64, tolerance_ppm: f64) -> bool {
-        let tolerance = self.mz * tolerance_ppm / 1_000_000.0;
-        (self.mz - mz).abs() <= tolerance
-    }
-
-    /// Check if peakel contains a given spectrum_id
-    pub fn contains_spectrum(&self, spectrum_id: i64) -> bool {
-        self.spectrum_ids.contains(&spectrum_id)
-    }
-
-    /// Get the index of a spectrum in this peakel
-    pub fn spectrum_index(&self, spectrum_id: i64) -> Option<usize> {
-        self.spectrum_ids.iter().position(|&id| id == spectrum_id)
-    }
-
-    /// Get intensity at a specific spectrum, if present
-    pub fn intensity_at_spectrum(&self, spectrum_id: i64) -> Option<f32> {
-        self.spectrum_index(spectrum_id)
-            .map(|idx| self.intensities[idx])
-    }
-
-    /// Get the apex spectrum index
-    pub fn apex_index(&self) -> Option<usize> {
-        self.spectrum_ids
-            .iter()
-            .position(|&id| id == self.apex_spectrum_id)
-    }
-}
-
-// ============================================================================
-// Peakel Database Reader
-// ============================================================================
-
-/// Reader for peakeldb SQLite files
-pub struct PeakelDbReader {
-    conn: Connection,
-}
-
-impl PeakelDbReader {
-    /// Open a peakeldb file
-    pub fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path).context("Failed to open peakeldb file")?;
-        Ok(Self { conn })
-    }
-
-    /// Read all peakels from the database
-    pub fn read_all_peakels(&self) -> Result<Vec<Peakel>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, moz, elution_time, duration, apex_intensity, area, 
-                    peak_count, peaks,
-                    first_spectrum_id, apex_spectrum_id, last_spectrum_id
-             FROM peakel",
-        )?;
-
-        let peakel_iter = stmt.query_map([], |row| {
-            let peaks_blob: Vec<u8> = row.get(7)?;
-            Ok((
-                row.get::<_, i32>(0)?,  // id
-                row.get::<_, f64>(1)?,  // moz
-                row.get::<_, f32>(2)?,  // elution_time
-                row.get::<_, f32>(3)?,  // duration
-                row.get::<_, f32>(4)?,  // apex_intensity
-                row.get::<_, f32>(5)?,  // area
-                row.get::<_, i32>(6)?,  // peak_count
-                peaks_blob,             // peaks (MessagePack blob)
-                row.get::<_, i64>(8)?,  // first_spectrum_id
-                row.get::<_, i64>(9)?,  // apex_spectrum_id
-                row.get::<_, i64>(10)?, // last_spectrum_id
-            ))
-        })?;
-
-        let mut peakels = Vec::new();
-
-        for result in peakel_iter {
-            let (
-                id,
-                mz,
-                elution_time,
-                duration,
-                apex_intensity,
-                area,
-                peak_count,
-                peaks_blob,
-                first_spectrum_id,
-                apex_spectrum_id,
-                last_spectrum_id,
-            ) = result?;
-
-            // Parse the MessagePack peaks blob
-            let peakel_data = PeakelData::from_msgpack(&peaks_blob)?;
-
-            peakels.push(Peakel {
-                id,
-                mz,
-                elution_time,
-                apex_intensity,
-                area,
-                duration,
-                peak_count,
-                first_spectrum_id,
-                last_spectrum_id,
-                apex_spectrum_id,
-                spectrum_ids: peakel_data.spectrum_ids.to_vec(),
-                elution_times: peakel_data.elution_times.to_vec(),
-                mz_values: peakel_data.mz_values.to_vec(),
-                intensities: peakel_data.intensities.to_vec(),
-            });
-        }
-
-        log::info!("Loaded {} peakels from peakeldb", peakels.len());
-        Ok(peakels)
-    }
-
-    /// Get the number of peakels in the database
-    pub fn get_peakel_count(&self) -> Result<i64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM peakel", [], |row| row.get(0))
-            .context("Failed to count peakels")
-    }
-}
-
-// Note: parse_peaks_blob and extract_*_array functions are now in processing::peakeldb::common
-
-// ============================================================================
 // Spectrum Data (simplified for conversion)
 // ============================================================================
 
@@ -303,7 +141,7 @@ impl DataPointProvider for SimpleSpectrumData {
     fn mz_array(&self) -> &[f64] {
         &self.mz_array
     }
-    
+
     fn intensity_array(&self) -> &[f32] {
         &self.intensity_array
     }
@@ -388,7 +226,7 @@ pub struct RescaledSpectrum {
     /// Original MS2 spectrum ID
     pub original_spectrum_id: i64,
     /// Associated peakel ID
-    pub peakel_id: i32,
+    pub peakel_id: i64,
     /// Target cycle for this rescaled spectrum
     pub target_cycle: i32,
     /// Precursor m/z from the peakel
@@ -560,7 +398,7 @@ impl Dda2DiaConverter {
         let mzdb_conn =
             Connection::open(&self.mzdb_path).context("Failed to open mzDB file")?;
         let peakeldb =
-            PeakelDbReader::open(&self.peakeldb_path).context("Failed to open peakeldb file")?;
+            Ms1PeakelDbReader::open(&self.peakeldb_path).context("Failed to open peakeldb file")?;
 
         // Read peakels
         log::info!("Reading peakels...");
@@ -668,7 +506,7 @@ pub struct DiaConversionStats {
 // ============================================================================
 
 /// SQL columns for spectrum header queries
-const SPECTRUM_HEADER_COLUMNS: &str = 
+const SPECTRUM_HEADER_COLUMNS: &str =
     "id, initial_id, title, cycle, time, ms_level, activation_type,
      tic, base_peak_mz, base_peak_intensity, main_precursor_mz,
      main_precursor_charge, data_points_count, param_tree,
@@ -734,7 +572,7 @@ fn get_all_spectrum_headers(conn: &Connection) -> Result<Vec<SimpleSpectrumHeade
 }
 
 /// Build an index of peakels by m/z for fast lookup
-fn build_peakel_index(peakels: &[Peakel]) -> HashMap<i64, Vec<usize>> {
+fn build_peakel_index(peakels: &[ExtendedPeakel]) -> HashMap<i64, Vec<usize>> {
     let mut index: HashMap<i64, Vec<usize>> = HashMap::new();
 
     for (i, peakel) in peakels.iter().enumerate() {
@@ -848,13 +686,13 @@ fn parse_spectrum_from_bb(bb_data: &[u8], spectrum_id: i64) -> Result<SimpleSpec
 fn process_ms2_spectra(
     conn: &Connection,
     ms2_headers: &[SimpleSpectrumHeader],
-    peakels: &[Peakel],
+    peakels: &[ExtendedPeakel],
     peakel_index: &HashMap<i64, Vec<usize>>,
     tolerance_ppm: f64,
     spectrum_to_cycle: &HashMap<i64, i32>,
 ) -> Result<Vec<RescaledSpectrum>> {
     let mut rescaled_spectra = Vec::new();
-    let mut best_spectra_for_peakel: HashMap<i32, (i32, SimpleSpectrumHeader, SimpleSpectrumData)> =
+    let mut best_spectra_for_peakel: HashMap<i64, (i32, SimpleSpectrumHeader, SimpleSpectrumData)> =
         HashMap::new();
 
     // First pass: find the best MS2 spectrum for each peakel (closest to apex)
@@ -878,19 +716,20 @@ fn process_ms2_spectra(
             }
 
             let ms2_time = header.time;
-            let peakel_start_time = peakel.elution_times.first().copied().unwrap_or(0.0);
-            let peakel_end_time = peakel.elution_times.last().copied().unwrap_or(0.0);
+            let peakel_start_time = peakel.elution_times().first().copied().unwrap_or(0.0);
+            let peakel_end_time = peakel.elution_times().last().copied().unwrap_or(0.0);
 
             if ms2_time < peakel_start_time || ms2_time > peakel_end_time {
                 continue;
             }
 
+            // Use apex_data_index which finds the index by stored apex_spectrum_id
             let apex_idx = peakel
-                .apex_index()
-                .unwrap_or(peakel.spectrum_ids.len() / 2);
+                .apex_data_index()
+                .unwrap_or(peakel.spectrum_ids().len() / 2);
 
             let closest_idx = peakel
-                .elution_times
+                .elution_times()
                 .iter()
                 .enumerate()
                 .min_by(|(_, a), (_, b)| {
@@ -930,8 +769,8 @@ fn process_ms2_spectra(
         let peakel = peakels.iter().find(|p| p.id == *peakel_id).unwrap();
         let apex_intensity = peakel.apex_intensity;
 
-        for (i, &target_spectrum_id) in peakel.spectrum_ids.iter().enumerate() {
-            let point_intensity = peakel.intensities[i];
+        for (i, &target_spectrum_id) in peakel.spectrum_ids().iter().enumerate() {
+            let point_intensity = peakel.intensities()[i];
             let target_cycle = spectrum_to_cycle
                 .get(&target_spectrum_id)
                 .copied()
@@ -991,7 +830,7 @@ fn write_dia_mzdb(
 
     // Delete MS2 bounding boxes
     conn.execute(
-        "DELETE FROM bounding_box WHERE run_slice_id IN 
+        "DELETE FROM bounding_box WHERE run_slice_id IN
          (SELECT id FROM run_slice WHERE ms_level = 2)",
         [],
     )?;

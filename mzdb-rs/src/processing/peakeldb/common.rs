@@ -263,7 +263,7 @@ impl ExtendedPeakel {
         }
     }
 
-    /// Get the index of the apex spectrum in the peaks data
+    /// Get the index of the apex spectrum in the peaks data (by stored apex_spectrum_id)
     pub fn apex_data_index(&self) -> Option<usize> {
         self.data.find_spectrum_index(self.apex_spectrum_id)
     }
@@ -272,6 +272,23 @@ impl ExtendedPeakel {
     #[inline]
     pub fn is_ms2_dia(&self) -> bool {
         self.isolation_window_id.is_some()
+    }
+
+    /// Check if peakel's m/z matches a given m/z within ppm tolerance
+    pub fn contains_mz(&self, mz: f64, tolerance_ppm: f64) -> bool {
+        let tolerance = self.mz * tolerance_ppm / 1_000_000.0;
+        (self.mz - mz).abs() <= tolerance
+    }
+
+    /// Check if peakel contains a given spectrum_id (uses binary search)
+    pub fn contains_spectrum(&self, spectrum_id: i64) -> bool {
+         self.data.find_spectrum_index(spectrum_id).is_some()
+    }
+
+    /// Get intensity at a specific spectrum, if present
+    pub fn intensity_at_spectrum(&self, spectrum_id: i64) -> Option<f32> {
+        self.data.find_spectrum_index(spectrum_id)
+            .map(|idx| self.data.intensities[idx])
     }
 }
 
@@ -394,13 +411,13 @@ mod tests {
     #[test]
     fn test_extended_peakel_is_ms2_dia() {
         let data = PeakelData::new();
-        
+
         let ms1 = ExtendedPeakel::new(
             1, 500.0, 100.0, 10.0, 0, 1000.0, 5000.0, 10.0, 5,
             1, 3, 5, data.clone()
         );
         assert!(!ms1.is_ms2_dia());
-        
+
         let ms2 = ExtendedPeakel::new_ms2_dia(
             1, 500.0, 100.0, 10.0, 0, 1000.0, 5000.0, 10.0, 5,
             1, 3, 5, 1, 400.0, data

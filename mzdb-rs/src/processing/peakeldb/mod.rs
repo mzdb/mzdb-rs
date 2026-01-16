@@ -41,7 +41,7 @@ pub use common::{
 pub use crate::processing::model::HasPeakelData;
 
 pub use ms1::{
-    Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
+    Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
     serialize_ms1_peakel_data,
 };
 
