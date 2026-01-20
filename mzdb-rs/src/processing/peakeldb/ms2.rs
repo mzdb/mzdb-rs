@@ -18,7 +18,8 @@ use anyhow_ext::{Context, Result};
 use rusqlite::{params, Connection};
 
 use crate::processing::dia::{IsolationWindow, DiaMs2PeakelRecord};
-use super::common::{chrono_lite_timestamp, ExtendedPeakel, PeakelData};
+use crate::processing::model::HasPeakelData;
+use super::common::{chrono_lite_timestamp, ExtendedPeakel, PeakelSerializer};
 
 // ============================================================================
 // Schema
@@ -196,7 +197,7 @@ impl Ms2PeakelDbReader {
             ) = result?;
 
             // Parse the MessagePack peaks blob
-            let data = PeakelData::from_msgpack(&peaks_blob)?;
+            let data = PeakelSerializer::from_msgpack(&peaks_blob)?;
 
             peakels.push(ExtendedPeakel::new_ms2_dia(
                 id,
@@ -323,45 +324,47 @@ impl Ms2PeakelDbWriter {
             )?;
 
             for peakel in peakels {
-                // Serialize peaks data to MessagePack using PeakelData's method
-                let peaks_blob = peakel.peaks.to_msgpack()?;
+                // Serialize peaks data to MessagePack using PeakelSerializer
+                // DiaMs2PeakelRecord implements HasPeakelData, so we can serialize directly
+                let peaks_blob = PeakelSerializer::to_msgpack(peakel)?;
 
                 // Calculate min/max for R-tree using HasPeakelData trait methods
-                use crate::processing::model::HasPeakelData;
-                let min_mz = peakel.peaks.min_mz();
-                let max_mz = peakel.peaks.max_mz();
-                let min_time = peakel.peaks.min_time();
-                let max_time = peakel.peaks.max_time();
-                let min_intensity = peakel.peaks.intensities().iter().cloned().fold(f32::INFINITY, f32::min);
+                let min_mz = peakel.min_mz();
+                let max_mz = peakel.max_mz();
+                let min_time = peakel.min_time();
+                let max_time = peakel.max_time();
+                let min_intensity = peakel.calc_min_intensity().unwrap_or(0.0);
+                let apex_intensity = peakel.apex_intensity();
+                let amplitude = if min_intensity == 0.0 {0.0} else {apex_intensity / min_intensity};
 
                 stmt.execute(params![
-                    peakel.id,
-                    peakel.mz,
-                    peakel.elution_time,
-                    peakel.duration,
-                    peakel.gap_count,
-                    peakel.apex_intensity,
-                    peakel.area,
-                    peakel.amplitude,
-                    peakel.peaks_count,
+                    peakel.id(),
+                    peakel.mz(),
+                    peakel.elution_time(),
+                    peakel.duration(),
+                    peakel.gap_count(),
+                    apex_intensity,
+                    peakel.area(),
+                    amplitude,
+                    peakel.peaks_count(),
                     peaks_blob,
                     Option::<String>::None, // serialized_properties
-                    peakel.first_spectrum_id,
-                    peakel.apex_spectrum_id,
-                    peakel.last_spectrum_id,
+                    peakel.first_spectrum_id(),
+                    peakel.apex_spectrum_id(),
+                    peakel.last_spectrum_id(),
                     peakel.isolation_window_id,
                     peakel.precursor_mz,
                     1, // map_id
                 ])?;
 
                 rtree_stmt.execute(params![
-                    peakel.id,
+                    peakel.id(),
                     min_mz,
                     max_mz,
                     min_time as f64,
                     max_time as f64,
                     min_intensity as f64,
-                    peakel.apex_intensity as f64,
+                    peakel.apex_intensity() as f64,
                 ])?;
             }
         }
@@ -378,14 +381,18 @@ impl Ms2PeakelDbWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::processing::Peakel;
 
     #[test]
     fn test_extended_peakel_apex_index() {
-        let data = PeakelData::from_vectors(
+        let data = Peakel::from_vectors(
             vec![100, 101, 102, 103, 104],
             vec![98.0, 99.0, 100.0, 101.0, 102.0],
             vec![500.0, 500.1, 500.0, 500.1, 500.0],
             vec![1000.0, 5000.0, 10000.0, 5000.0, 1000.0],
+            None,
+            None,
+            0,
         );
 
         let peakel = ExtendedPeakel::new_ms2_dia(

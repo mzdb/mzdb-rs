@@ -35,8 +35,9 @@ use roxmltree::Document;
 use rusqlite::Connection;
 
 use crate::processing::dia::IsolationWindow;
-use crate::processing::peakeldb::{ExtendedPeakel, PeakelData};
+use crate::processing::peakeldb::ExtendedPeakel;
 use crate::processing::model::{HasPeakelData, generate_peakel_id};
+use crate::processing::Peakel;
 
 // ============================================================================
 // Helper Functions for Isolation Window Parsing
@@ -1033,7 +1034,7 @@ pub struct MergedPeakel {
     /// Area under curve
     pub area: f32,
     /// Combined data points
-    pub data: PeakelData,
+    pub data: Peakel,
     /// Statistics about the merge
     pub merge_stats: MergeStats,
     /// Target unstaggered window ID
@@ -1098,21 +1099,21 @@ impl PeakelMerger {
         let mut all_points: Vec<(i64, f32, f64, f32)> = Vec::new();
 
         // Add cycle A points
-        for i in 0..peakel_a.data.len() {
+        for i in 0..peakel_a.data.peaks_count() {
             all_points.push((
                 peakel_a.data.spectrum_ids[i],
                 peakel_a.data.elution_times[i],
                 peakel_a.data.mz_values[i],
-                peakel_a.data.intensities[i],
+                peakel_a.data.intensity_values[i],
             ));
         }
 
         // Add cycle B points (with optional scaling)
-        for i in 0..peakel_b.data.len() {
+        for i in 0..peakel_b.data.peaks_count() {
             let intensity = if let Some(factor) = scale_factor {
-                peakel_b.data.intensities[i] * factor as f32
+                peakel_b.data.intensity_values[i] * factor as f32
             } else {
-                peakel_b.data.intensities[i]
+                peakel_b.data.intensity_values[i]
             };
             all_points.push((
                 peakel_b.data.spectrum_ids[i],
@@ -1125,12 +1126,15 @@ impl PeakelMerger {
         // Sort by elution time
         all_points.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-        // Build merged PeakelData
-        let merged_data = PeakelData::from_vectors(
+        // Build merged Peakel
+        let merged_data = Peakel::from_vectors(
             all_points.iter().map(|p| p.0).collect(),
             all_points.iter().map(|p| p.1).collect(),
             all_points.iter().map(|p| p.2).collect(),
             all_points.iter().map(|p| p.3).collect(),
+            None,
+            None,
+            0,
         );
 
         // Calculate summary statistics
@@ -1193,7 +1197,6 @@ impl Default for PeakelMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallvec::SmallVec;
 
     fn create_test_isolation_window(id: i64, target_mz: f64, half_width: f64) -> IsolationWindow {
         IsolationWindow {
@@ -1209,14 +1212,17 @@ mod tests {
         spectrum_ids: Vec<i64>,
         times: Vec<f32>,
         intensities: Vec<f32>,
-    ) -> PeakelData {
+    ) -> Peakel {
         let mz_values: Vec<f64> = vec![500.0; spectrum_ids.len()];
-        PeakelData {
-            spectrum_ids: SmallVec::from_vec(spectrum_ids),
-            elution_times: SmallVec::from_vec(times),
-            mz_values: SmallVec::from_vec(mz_values),
-            intensities: SmallVec::from_vec(intensities),
-        }
+        Peakel::from_vectors(
+            spectrum_ids,
+            times,
+            mz_values,
+            intensities,
+            None,
+            None,
+            0,
+        )
     }
 
     #[test]

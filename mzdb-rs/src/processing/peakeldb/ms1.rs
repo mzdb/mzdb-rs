@@ -212,15 +212,15 @@ impl Ms1PeakelDbWriter {
             let max_mz = peakel.max_mz();
             let min_time = peakel.min_time();
             let max_time = peakel.max_time();
-            let min_intensity = peakel.intensities().iter().cloned().fold(f32::INFINITY, f32::min);
+            let min_intensity = peakel.calc_min_intensity().unwrap_or(0.0);
 
-            let peaks_blob = serialize_ms1_peakel_data(peakel)?;
+            let peaks_blob = super::PeakelSerializer::to_msgpack(peakel)?;
             let left_hwhm_mean = peakel.left_hwhm_mean();
             let right_hwhm_mean = peakel.right_hwhm_mean();
             let first_spectrum_id = peakel.first_spectrum_id().unwrap_or(0);
             let apex_spectrum_id = peakel.apex_spectrum_id().unwrap_or(0);
             let last_spectrum_id = peakel.last_spectrum_id().unwrap_or(0);
-            let amplitude = apex_intensity / min_intensity.max(1.0);
+            let amplitude = if min_intensity == 0.0 {0.0} else {apex_intensity / min_intensity};
 
             // Use Option for nullable HWHM values (null if not computed)
             let left_hwhm_opt: Option<f32> = if left_hwhm_mean > 0.0 { Some(left_hwhm_mean as f32) } else { None };
@@ -345,7 +345,7 @@ impl Ms1PeakelDbReader {
             ) = result?;
 
             // Parse the MessagePack peaks blob
-            let data = super::PeakelData::from_msgpack(&peaks_blob)?;
+            let data = super::PeakelSerializer::from_msgpack(&peaks_blob)?;
 
             peakels.push(super::ExtendedPeakel::new(
                 id,
@@ -367,33 +367,4 @@ impl Ms1PeakelDbReader {
         log::info!("Loaded {} peakels from MS1 peakeldb", peakels.len());
         Ok(peakels)
     }
-}
-
-// ============================================================================
-// Serialization
-// ============================================================================
-
-/// Serialize MS1 peakel data to binary format
-///
-/// Format: [count: u32][spectrum_ids: i64[]][elution_times: f32[]][mz_values: f64[]][intensities: f32[]]
-pub fn serialize_ms1_peakel_data(peakel: &Peakel) -> Result<Vec<u8>> {
-    let n = peakel.peaks_count();
-    let mut data = Vec::with_capacity(4 + n * (8 + 4 + 8 + 4));
-
-    data.extend_from_slice(&(n as u32).to_le_bytes());
-
-    for &id in &peakel.spectrum_ids {
-        data.extend_from_slice(&id.to_le_bytes());
-    }
-    for &time in &peakel.elution_times {
-        data.extend_from_slice(&time.to_le_bytes());
-    }
-    for &mz in &peakel.mz_values {
-        data.extend_from_slice(&mz.to_le_bytes());
-    }
-    for &intensity in &peakel.intensity_values {
-        data.extend_from_slice(&intensity.to_le_bytes());
-    }
-
-    Ok(data)
 }

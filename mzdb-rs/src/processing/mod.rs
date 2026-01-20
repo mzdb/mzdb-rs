@@ -77,7 +77,7 @@ pub use signal::finder::{
 
 // Re-export common detection utilities
 pub use signal::detection::{
-    find_nearest_peak_from_slices, find_nearest_peak,
+    find_nearest_peak_from_slices,
     sort_indices_by_descending_f32_value, is_target_mz_within_range,
     create_peakel_finder,
 };
@@ -111,9 +111,9 @@ pub use dia::write_dia_peakeldb;
 
 // Re-export peakeldb types
 pub use peakeldb::{
-    PeakelData, ExtendedPeakel,
+    ExtendedPeakel, PeakelSerializer,
     chrono_lite_timestamp,
-    Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord, serialize_ms1_peakel_data,
+    Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,
 };
 

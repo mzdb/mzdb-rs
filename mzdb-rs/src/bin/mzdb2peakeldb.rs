@@ -339,15 +339,15 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
     // Top peakels by intensity
     let mut sorted_peakels = peakels.clone();
     sorted_peakels.sort_by(|a, b|
-        b.apex_intensity.partial_cmp(&a.apex_intensity).unwrap_or(std::cmp::Ordering::Equal)
+        b.apex_intensity().partial_cmp(&a.apex_intensity()).unwrap_or(std::cmp::Ordering::Equal)
     );
 
     println!();
     println!("Top 10 MS2 peakels by intensity:");
     for (i, peakel) in sorted_peakels.iter().take(10).enumerate() {
         println!("  {:2}: fragment m/z={:.4}, precursor={:.1}, RT={:.2}s, int={:.2e}, peaks={}",
-            i + 1, peakel.mz, peakel.precursor_mz, peakel.elution_time,
-            peakel.apex_intensity, peakel.peaks_count);
+            i + 1, peakel.mz(), peakel.precursor_mz, peakel.elution_time(),
+            peakel.apex_intensity(), peakel.peaks_count());
     }
 
     // Get input filename for metadata
@@ -412,18 +412,18 @@ fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Resu
         writeln!(
             file,
             "{}\t{:.6}\t{:.4}\t{:.4}\t{}\t{:.2}\t{:.2}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{:.4}",
-            peakel.id,
-            peakel.mz,
-            peakel.elution_time,
-            peakel.duration,
-            peakel.gap_count,
-            peakel.apex_intensity,
-            peakel.area,
-            peakel.amplitude,
-            peakel.peaks_count,
-            peakel.first_spectrum_id,
-            peakel.apex_spectrum_id,
-            peakel.last_spectrum_id,
+            peakel.id(),
+            peakel.mz(),
+            peakel.elution_time(),
+            peakel.duration(),
+            peakel.gap_count(),
+            peakel.apex_intensity(),
+            peakel.area(),
+            peakel.amplitude(),
+            peakel.peaks_count(),
+            peakel.first_spectrum_id(),
+            peakel.apex_spectrum_id(),
+            peakel.last_spectrum_id(),
             peakel.isolation_window_id,
             peakel.precursor_mz,
         )?;
@@ -518,12 +518,12 @@ fn print_ms2_statistics(peakels: &[DiaMs2PeakelRecord]) {
     print_statistics(
         "MS2 DIA Peakel Statistics",
         peakels.len(),
-        peakels.iter().map(|p| p.area as f64).sum(),
-        peakels.iter().map(|p| p.duration).sum::<f32>() / n,
-        peakels.iter().map(|p| p.peaks_count as f32).sum::<f32>() / n,
-        peakels.iter().map(|p| p.mz).fold(f64::INFINITY, f64::min),
-        peakels.iter().map(|p| p.mz).fold(f64::NEG_INFINITY, f64::max),
-        peakels.iter().map(|p| p.elution_time).fold(f32::INFINITY, f32::min),
-        peakels.iter().map(|p| p.elution_time).fold(f32::NEG_INFINITY, f32::max),
+        peakels.iter().map(|p| p.area() as f64).sum(),
+        peakels.iter().map(|p| p.duration()).sum::<f32>() / n,
+        peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
+        peakels.iter().map(|p| p.mz()).fold(f64::INFINITY, f64::min),
+        peakels.iter().map(|p| p.mz()).fold(f64::NEG_INFINITY, f64::max),
+        peakels.iter().map(|p| p.elution_time()).fold(f32::INFINITY, f32::min),
+        peakels.iter().map(|p| p.elution_time()).fold(f32::NEG_INFINITY, f32::max),
     );
 }

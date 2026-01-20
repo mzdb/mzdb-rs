@@ -13,13 +13,13 @@
 //! # Common Types
 //!
 //! The `common` module provides shared types:
-//! - `PeakelData`: Raw peaks data arrays (spectrum_ids, elution_times, mz_values, intensities)
+//! - `PeakelSerializer`: Static methods for MessagePack serialization/deserialization
 //! - `ExtendedPeakel`: Complete peakel with summary fields + raw data
 //!
 //! # Example
 //!
 //! ```no_run
-//! use mzdb::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel, PeakelData};
+//! use mzdb::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel, PeakelSerializer};
 //!
 //! // Read MS2 DIA peakeldb
 //! let reader = Ms2PeakelDbReader::open("peakels.peakeldb").unwrap();
@@ -33,7 +33,7 @@ pub mod ms2;
 
 // Re-export common types
 pub use common::{
-    PeakelData, ExtendedPeakel,
+    ExtendedPeakel, PeakelSerializer,
     chrono_lite_timestamp,
 };
 
@@ -42,7 +42,6 @@ pub use crate::processing::model::HasPeakelData;
 
 pub use ms1::{
     Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
-    serialize_ms1_peakel_data,
 };
 
 pub use ms2::{

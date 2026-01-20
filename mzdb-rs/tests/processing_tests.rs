@@ -614,6 +614,7 @@ fn test_peakel_model() {
         intensity_values,
         None,
         None,
+        0,
     );
     
     println!("Peakel properties:");
@@ -626,6 +627,7 @@ fn test_peakel_model() {
     println!("  Weighted RT: {:.2}s", peakel.calc_weighted_average_time());
     println!("  Duration: {:.2}s", peakel.calc_duration());
     println!("  Area: {:.0}", peakel.area());
+    println!("  Gap count: {}", peakel.gap_count);
     
     assert_eq!(peakel.peaks_count(), 5);
     assert_eq!(peakel.apex_index(), Some(2));  // Peak at intensity 1000
@@ -633,6 +635,7 @@ fn test_peakel_model() {
     assert_eq!(peakel.apex_elution_time(), Some(12.0));
     assert_eq!(peakel.calc_duration(), 4.0);
     assert_eq!(peakel.area(), 2200.0);
+    assert_eq!(peakel.gap_count, 0);
 }
 
 #[test]

@@ -34,7 +34,6 @@ pub fn generate_feature_id() -> i64 {
 /// (spectrum IDs, elution times, m/z values, intensities) from various
 /// peakel representations:
 /// - `Peakel`: Core processing type
-/// - `PeakelData`: Raw data container (in peakeldb module)
 /// - `ExtendedPeakel`: Database record type (in peakeldb module)
 /// 
 /// # Example
@@ -158,6 +157,32 @@ pub trait HasPeakelData {
     fn calc_area(&self) -> f32 {
         self.intensities().iter().sum()
     }
+    
+    /// Calculate minimum positive intensity (filtering out zeros and NaN)
+    /// 
+    /// Returns `None` if no valid positive intensities exist.
+    fn calc_min_intensity(&self) -> Option<f32> {
+        let min = self.intensities().iter()
+            .cloned()
+            .filter(|&i| i > 0.0 && !i.is_nan())
+            .fold(f32::INFINITY, f32::min);
+        
+        if min > 0.0 && min < f32::INFINITY {
+            Some(min)
+        } else {
+            None
+        }
+    }
+    
+    /// Calculate amplitude (apex intensity / min positive intensity)
+    /// 
+    /// Matches Scala: `getApexIntensity / intensityValues.filter(i => i > 0 && !i.isNaN).min`
+    fn calc_amplitude(&self) -> f32 {
+        match self.calc_min_intensity() {
+            Some(min_intensity) => self.apex_intensity().unwrap_or(0.0) / min_intensity,
+            None => f32::NAN,
+        }
+    }
 }
 
 // ============================================================================
@@ -279,6 +304,8 @@ pub struct Peakel {
     pub right_hwhms: Option<SmallVec<[f64; 16]>>,
     /// Index of the apex (most intense point)
     apex_index: usize,
+    /// Number of gaps (missing spectra) in the peakel
+    pub gap_count: usize,
 }
 
 impl Peakel {
@@ -293,6 +320,7 @@ impl Peakel {
         intensity_values: SmallVec<[f32; 16]>,
         left_hwhms: Option<SmallVec<[f64; 16]>>,
         right_hwhms: Option<SmallVec<[f64; 16]>>,
+        gap_count: usize,
     ) -> Self {
         let apex_index = intensity_values
             .iter()
@@ -310,6 +338,7 @@ impl Peakel {
             left_hwhms,
             right_hwhms,
             apex_index,
+            gap_count,
         }
     }
 
@@ -324,6 +353,7 @@ impl Peakel {
         intensity_values: Vec<f32>,
         left_hwhms: Option<Vec<f64>>,
         right_hwhms: Option<Vec<f64>>,
+        gap_count: usize,
     ) -> Self {
         let apex_index = intensity_values
             .iter()
@@ -341,6 +371,7 @@ impl Peakel {
             left_hwhms: left_hwhms.map(SmallVec::from_vec),
             right_hwhms: right_hwhms.map(SmallVec::from_vec),
             apex_index,
+            gap_count,
         }
     }
 
@@ -479,6 +510,7 @@ pub struct PeakelBuilder {
     intensity_values: SmallVec<[f32; 16]>,
     left_hwhms: SmallVec<[f64; 16]>,
     right_hwhms: SmallVec<[f64; 16]>,
+    gap_count: usize,
 }
 
 impl Default for PeakelBuilder {
@@ -490,6 +522,7 @@ impl Default for PeakelBuilder {
             intensity_values: SmallVec::new(),
             left_hwhms: SmallVec::new(),
             right_hwhms: SmallVec::new(),
+            gap_count: 0,
         }
     }
 }
@@ -500,11 +533,23 @@ impl PeakelBuilder {
         Self::default()
     }
 
-    /// Create a new peakel builder with capacity
-    pub fn with_capacity(_capacity: usize) -> Self {
-        // SmallVec doesn't have with_capacity for inline storage,
-        // but will grow as needed
-        Self::default()
+    /// Create a new peakel builder with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            spectrum_ids: SmallVec::with_capacity(capacity),
+            elution_times: SmallVec::with_capacity(capacity),
+            mz_values: SmallVec::with_capacity(capacity),
+            intensity_values: SmallVec::with_capacity(capacity),
+            left_hwhms: SmallVec::with_capacity(capacity),
+            right_hwhms: SmallVec::with_capacity(capacity),
+            gap_count: 0,
+        }
+    }
+
+    /// Set the gap count for this peakel
+    pub fn set_gap_count(&mut self, gap_count: usize) -> &mut Self {
+        self.gap_count = gap_count;
+        self
     }
 
     /// Add a peak to the builder
@@ -567,6 +612,7 @@ impl PeakelBuilder {
             } else {
                 None
             },
+            self.gap_count,
         )
     }
 }
@@ -755,12 +801,30 @@ mod tests {
             vec![100.0, 200.0, 150.0],
             None,
             None,
+            0,
         );
 
         assert_eq!(peakel.peaks_count(), 3);
         assert_eq!(peakel.apex_index(), Some(1));
         assert_eq!(peakel.apex_intensity(), Some(200.0));
         assert_eq!(peakel.apex_elution_time(), Some(2.0));
+        assert_eq!(peakel.gap_count, 0);
+    }
+
+    #[test]
+    fn test_peakel_with_gaps() {
+        let peakel = Peakel::from_vectors(
+            vec![1, 3, 5],  // spectrum IDs with gaps (2 and 4 missing)
+            vec![1.0, 3.0, 5.0],
+            vec![500.0, 500.1, 500.2],
+            vec![100.0, 200.0, 150.0],
+            None,
+            None,
+            2,  // 2 gaps
+        );
+
+        assert_eq!(peakel.peaks_count(), 3);
+        assert_eq!(peakel.gap_count, 2);
     }
 
     #[test]
@@ -791,6 +855,23 @@ mod tests {
         let peakel = builder.build();
         assert_eq!(peakel.peaks_count(), 3);
         assert_eq!(peakel.apex_intensity(), Some(200.0));
+        assert_eq!(peakel.gap_count, 0);
+    }
+
+    #[test]
+    fn test_peakel_builder_with_gaps() {
+        let mut builder = PeakelBuilder::new();
+        builder.set_gap_count(3);
+        builder.add(&Peak::with_hwhm(
+            500.0,
+            100.0,
+            0.0,
+            0.0,
+            Some(LcContext::new(1, 1.0)),
+        ));
+
+        let peakel = builder.build();
+        assert_eq!(peakel.gap_count, 3);
     }
 
     #[test]
@@ -802,6 +883,7 @@ mod tests {
             vec![100.0, 200.0, 100.0],
             None,
             None,
+            0,
         );
 
         assert_eq!(peakel.calc_duration(), 2.0);

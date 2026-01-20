@@ -1,146 +1,79 @@
 //! Common utilities for peakelDB operations
 //!
 //! This module provides shared types and functions for peakelDB operations:
-//! - `PeakelData`: Raw peaks data arrays (spectrum_ids, elution_times, mz_values, intensities)
+//! - `PeakelSerializer`: Static methods for MessagePack serialization/deserialization of peakel data
 //! - `ExtendedPeakel`: Complete peakel with summary fields + raw data (for DB read/write)
-//! - MessagePack blob parsing utilities
 //! - Timestamp generation
 
 use anyhow_ext::Result;
-use smallvec::SmallVec;
 
 use crate::processing::model::HasPeakelData;
+use crate::processing::Peakel;
 
 // ============================================================================
-// PeakelData - Raw peaks data arrays
+// PeakelSerializer - MessagePack serialization/deserialization
 // ============================================================================
 
-/// Raw peaks data for a peakel using stack-optimized SmallVec.
+/// Utility struct for MessagePack serialization and deserialization of peakel data.
 /// 
-/// Stores up to 16 data points on the stack, spilling to heap for larger peakels.
-/// Most LC-MS peakels have fewer than 16 data points, making this efficient.
+/// Provides static methods to serialize any `HasPeakelData` implementor to MessagePack
+/// and deserialize MessagePack bytes back to `Peakel`.
 /// 
-/// This type is used for:
-/// - Storing raw peaks in `ExtendedPeakel`
-/// - Converting to/from MessagePack blobs in peakelDB
-/// - Conversion from/to the core `Peakel` type
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct PeakelData {
-    /// Spectrum IDs at each data point
-    pub spectrum_ids: SmallVec<[i64; 16]>,
-    /// Elution times at each data point (seconds)
-    pub elution_times: SmallVec<[f32; 16]>,
-    /// m/z values at each data point
-    pub mz_values: SmallVec<[f64; 16]>,
-    /// Intensities at each data point
-    pub intensities: SmallVec<[f32; 16]>,
-}
+/// # Format
+/// MessagePack tuple of 4 arrays: `[spectrum_ids, elution_times, mz_values, intensities]`
+/// Compatible with Scala mzdb-processing MessagePack format.
+/// 
+/// # Example
+/// ```ignore
+/// use mzdb::processing::{Peakel, PeakelSerializer};
+/// 
+/// // Serialize any HasPeakelData implementor
+/// let peakel: Peakel = /* ... */;
+/// let blob = PeakelSerializer::to_msgpack(&peakel)?;
+/// 
+/// // Deserialize back to Peakel
+/// let restored = PeakelSerializer::from_msgpack(&blob)?;
+/// ```
+pub struct PeakelSerializer;
 
-impl PeakelData {
-    /// Create empty peaks data
-    pub fn new() -> Self {
-        Self {
-            spectrum_ids: SmallVec::new(),
-            elution_times: SmallVec::new(),
-            mz_values: SmallVec::new(),
-            intensities: SmallVec::new(),
-        }
-    }
-
-    /// Create with pre-allocated capacity
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            spectrum_ids: SmallVec::with_capacity(capacity),
-            elution_times: SmallVec::with_capacity(capacity),
-            mz_values: SmallVec::with_capacity(capacity),
-            intensities: SmallVec::with_capacity(capacity),
-        }
-    }
-
-    /// Create from Vec data (converts to SmallVec)
-    pub fn from_vectors(
-        spectrum_ids: Vec<i64>,
-        elution_times: Vec<f32>,
-        mz_values: Vec<f64>,
-        intensities: Vec<f32>,
-    ) -> Self {
-        Self {
-            spectrum_ids: SmallVec::from_vec(spectrum_ids),
-            elution_times: SmallVec::from_vec(elution_times),
-            mz_values: SmallVec::from_vec(mz_values),
-            intensities: SmallVec::from_vec(intensities),
-        }
-    }
-
-    /// Get the number of data points
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.spectrum_ids.len()
-    }
-
-    /// Check if empty
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.spectrum_ids.is_empty()
-    }
-
-    /// Serialize to MessagePack bytes using rmp_serde
+impl PeakelSerializer {
+    /// Serialize peakel data to MessagePack bytes.
     /// 
-    /// Format: tuple of 4 arrays [spectrum_ids, elution_times, mz_values, intensities]
-    pub fn to_msgpack(&self) -> Result<Vec<u8>> {
+    /// Works with any type implementing `HasPeakelData` (Peakel, ExtendedPeakel, etc.)
+    pub fn to_msgpack<T: HasPeakelData>(peakel: &T) -> Result<Vec<u8>> {
         let data = (
-            self.spectrum_ids.as_slice(),
-            self.elution_times.as_slice(),
-            self.mz_values.as_slice(),
-            self.intensities.as_slice(),
+            peakel.spectrum_ids(),
+            peakel.elution_times(),
+            peakel.mz_values(),
+            peakel.intensities(),
         );
         rmp_serde::to_vec(&data)
             .map_err(|e| anyhow_ext::anyhow!("msgpack serialization error: {}", e))
     }
-
-    /// Deserialize from MessagePack bytes
-    pub fn from_msgpack(bytes: &[u8]) -> Result<Self> {
-        let (spectrum_ids, elution_times, mz_values, intensities): 
+    
+    /// Deserialize MessagePack bytes to a new Peakel.
+    /// 
+    /// Creates a Peakel with gap_count=0 and no HWHM data.
+    /// Note: gap_count and other metadata come from database columns, not the msgpack blob.
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Peakel> {
+        let (spectrum_ids, elution_times, mz_values, intensity_values): 
             (Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>) = 
             rmp_serde::from_slice(bytes)
                 .map_err(|e| anyhow_ext::anyhow!("msgpack deserialization error: {}", e))?;
         
-        Ok(Self::from_vectors(spectrum_ids, elution_times, mz_values, intensities))
-    }
-
-    /// Push a single data point
-    pub fn push(&mut self, spectrum_id: i64, elution_time: f32, mz: f64, intensity: f32) {
-        self.spectrum_ids.push(spectrum_id);
-        self.elution_times.push(elution_time);
-        self.mz_values.push(mz);
-        self.intensities.push(intensity);
-    }
-}
-
-impl Default for PeakelData {
-    fn default() -> Self {
-        Self::new()
+        Ok(Peakel::from_vectors(
+            spectrum_ids,
+            elution_times,
+            mz_values,
+            intensity_values,
+            None,
+            None,
+            0,
+        ))
     }
 }
 
-impl HasPeakelData for PeakelData {
-    fn spectrum_ids(&self) -> &[i64] {
-        &self.spectrum_ids
-    }
-
-    fn elution_times(&self) -> &[f32] {
-        &self.elution_times
-    }
-
-    fn mz_values(&self) -> &[f64] {
-        &self.mz_values
-    }
-
-    fn intensities(&self) -> &[f32] {
-        &self.intensities
-    }
-}
-
+// ============================================================================
 // ============================================================================
 // ExtendedPeakel - Complete peakel for DB operations
 // ============================================================================
@@ -152,7 +85,7 @@ impl HasPeakelData for PeakelData {
 /// 
 /// It contains:
 /// - Pre-computed summary fields (mz, elution_time, area, etc.)
-/// - Raw peaks data for detailed analysis
+/// - Raw peaks data via embedded `Peakel`
 /// - Optional MS2 DIA fields (isolation_window_id, precursor_mz)
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedPeakel {
@@ -187,7 +120,7 @@ pub struct ExtendedPeakel {
     pub precursor_mz: Option<f64>,
     
     /// Raw peaks data
-    pub data: PeakelData,
+    pub data: Peakel,
 }
 
 impl ExtendedPeakel {
@@ -205,7 +138,7 @@ impl ExtendedPeakel {
         first_spectrum_id: i64,
         apex_spectrum_id: i64,
         last_spectrum_id: i64,
-        data: PeakelData,
+        data: Peakel,
     ) -> Self {
         Self {
             id,
@@ -242,7 +175,7 @@ impl ExtendedPeakel {
         last_spectrum_id: i64,
         isolation_window_id: i64,
         precursor_mz: f64,
-        data: PeakelData,
+        data: Peakel,
     ) -> Self {
         Self {
             id,
@@ -288,7 +221,7 @@ impl ExtendedPeakel {
     /// Get intensity at a specific spectrum, if present
     pub fn intensity_at_spectrum(&self, spectrum_id: i64) -> Option<f32> {
         self.data.find_spectrum_index(spectrum_id)
-            .map(|idx| self.data.intensities[idx])
+            .map(|idx| self.data.intensity_values[idx])
     }
 }
 
@@ -313,32 +246,25 @@ impl HasPeakelData for ExtendedPeakel {
 /// Convert from the core Peakel type to ExtendedPeakel
 impl From<&crate::processing::Peakel> for ExtendedPeakel {
     fn from(peakel: &crate::processing::Peakel) -> Self {
-        let data = PeakelData {
-            spectrum_ids: peakel.spectrum_ids.clone(),
-            elution_times: peakel.elution_times.clone(),
-            mz_values: peakel.mz_values.clone(),
-            intensities: peakel.intensity_values.clone(),
-        };
-
-        let min_intensity = peakel.intensity_values.iter().cloned().fold(f32::INFINITY, f32::min).max(1.0);
         let apex_intensity = peakel.apex_intensity().unwrap_or(0.0);
+        let amplitude = peakel.calc_amplitude();
 
         Self {
             id: peakel.id,
             mz: peakel.calc_mz(),
             elution_time: peakel.apex_elution_time().unwrap_or(0.0),
             duration: peakel.calc_duration(),
-            gap_count: 0, // Not tracked in core Peakel
+            gap_count: peakel.gap_count as i32,
             apex_intensity,
             area: peakel.area(),
-            amplitude: apex_intensity / min_intensity,
+            amplitude: if amplitude.is_nan() { 1.0 } else { amplitude },
             peaks_count: peakel.peaks_count() as i32,
             first_spectrum_id: peakel.spectrum_ids.first().copied().unwrap_or(0),
             apex_spectrum_id: peakel.apex_spectrum_id().unwrap_or(0),
             last_spectrum_id: peakel.spectrum_ids.last().copied().unwrap_or(0),
             isolation_window_id: None,
             precursor_mz: None,
-            data,
+            data: peakel.clone(),
         }
     }
 }
@@ -374,33 +300,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_peakel_data_new() {
-        let data = PeakelData::new();
-        assert!(data.is_empty());
-        assert_eq!(data.len(), 0);
+    fn test_peakel_new() {
+        let data = Peakel::from_vectors(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            None,
+            None,
+            0,
+        );
+        assert_eq!(data.peaks_count(), 0);
     }
 
     #[test]
-    fn test_peakel_data_from_vecs() {
-        let data = PeakelData::from_vectors(
+    fn test_peakel_from_vecs() {
+        let data = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![10.0, 20.0, 30.0],
             vec![500.0, 500.1, 500.2],
             vec![100.0, 200.0, 150.0],
+            None,
+            None,
+            0,
         );
-        assert_eq!(data.len(), 3);
+        assert_eq!(data.peaks_count(), 3);
         assert_eq!(data.apex_index(), Some(1)); // index of 200.0
         assert_eq!(data.first_spectrum_id(), Some(1));
         assert_eq!(data.last_spectrum_id(), Some(3));
     }
 
     #[test]
-    fn test_peakel_data_min_max() {
-        let data = PeakelData::from_vectors(
+    fn test_peakel_min_max() {
+        let data = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![10.0, 20.0, 30.0],
             vec![500.0, 500.5, 500.2],
             vec![100.0, 200.0, 150.0],
+            None,
+            None,
+            0,
         );
         assert_eq!(data.min_mz(), 500.0);
         assert_eq!(data.max_mz(), 500.5);
@@ -410,7 +349,15 @@ mod tests {
 
     #[test]
     fn test_extended_peakel_is_ms2_dia() {
-        let data = PeakelData::new();
+        let data = Peakel::from_vectors(
+            vec![1, 3, 5],
+            vec![95.0, 100.0, 105.0],
+            vec![500.0, 500.0, 500.0],
+            vec![500.0, 1000.0, 500.0],
+            None,
+            None,
+            0,
+        );
 
         let ms1 = ExtendedPeakel::new(
             1, 500.0, 100.0, 10.0, 0, 1000.0, 5000.0, 10.0, 5,
