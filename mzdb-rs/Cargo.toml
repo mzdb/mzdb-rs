@@ -69,7 +69,7 @@ required-features = ["cli"]
 [[bin]]
 name = "mzdb2peakeldb"
 path = "src/bin/mzdb2peakeldb.rs"
-required-features = ["cli","processing-parallel"]
+required-features = ["cli","processing"]
 
 [[bin]]
 name = "dda2dia"

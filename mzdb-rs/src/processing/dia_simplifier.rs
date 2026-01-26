@@ -413,7 +413,7 @@ fn extract_peakel_data_points(
                 data_points.push(PeakelDataPoint {
                     spectrum_id: peakel.data.spectrum_ids[idx],
                     mz: peakel.data.mz_values[idx],
-                    intensity: peakel.data.intensities[idx],
+                    intensity: peakel.data.intensity_values[idx],
                     precursor_mz: window.target_mz,
                     isolation_lower: window.lower_mz,
                     isolation_upper: window.upper_mz,
