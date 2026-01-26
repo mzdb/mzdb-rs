@@ -19,7 +19,7 @@
 //!
 //! let reader = MzDbReader::open("staggered_dia.mzDB").unwrap();
 //! let detector = StaggeredDiaDetector::new();
-//! let stagger_info = detector.detect(&reader).unwrap();
+//! let stagger_info = detector.detect(reader.connection()).unwrap();
 //!
 //! if stagger_info.is_staggered {
 //!     println!("Staggered DIA detected!");

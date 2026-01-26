@@ -21,7 +21,7 @@ use crate::bounding_box::{create_bbox, index_bbox, read_spectrum_slice_data_at, 
 use crate::model::*;
 use crate::rtree::{SQLITE_RTREE_LB_CORR, SQLITE_RTREE_UB_CORR};
 use crate::query_utils::{
-    query_single_string, query_all_strings,
+    query_single_string, query_single_string_latin1_safe, query_all_strings,
     query_single_i64, query_single_i64_required,
     query_single_f32, query_single_f64,
     get_table_records_count as get_table_records_count_impl,
@@ -63,7 +63,8 @@ pub fn get_param_tree_spectrum(db: &Connection, spectrum_id: i64) -> Result<Opti
 
 /// Get param tree of the mzdb table
 pub fn get_param_tree_mzdb(db: &Connection) -> Result<Option<String>> {
-    query_single_string(db, "SELECT param_tree FROM mzdb LIMIT 1")
+    // Use Latin-1 safe variant as legacy pwiz-mzDB files may contain Latin-1 encoded text
+    query_single_string_latin1_safe(db, "SELECT param_tree FROM mzdb LIMIT 1")
 }
 
 /// Get the processing method param tree
