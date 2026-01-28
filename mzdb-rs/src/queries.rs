@@ -332,6 +332,28 @@ pub fn get_spectrum(
     })
 }
 
+/// Get simplified spectrum data by ID (m/z and intensity arrays only)
+///
+/// This is a convenience function that retrieves spectrum data and converts it
+/// to `SimpleSpectrumData`, discarding encoding info and fitted peak parameters.
+/// Useful for processing pipelines that only need m/z and intensity values.
+///
+/// # Arguments
+/// * `db` - Database connection
+/// * `spectrum_id` - The spectrum ID to retrieve
+/// * `entity_cache` - Entity cache with headers and data encodings
+///
+/// # Returns
+/// `SimpleSpectrumData` containing only m/z and intensity arrays
+pub fn get_simple_spectrum_data(
+    db: &Connection,
+    spectrum_id: i64,
+    entity_cache: &EntityCache,
+) -> Result<SimpleSpectrumData> {
+    let spectrum = get_spectrum(db, spectrum_id, entity_cache)?;
+    Ok(SimpleSpectrumData::from(spectrum.data))
+}
+
 // ============================================================================
 // Spectrum slices retrieval (for XIC)
 // ============================================================================

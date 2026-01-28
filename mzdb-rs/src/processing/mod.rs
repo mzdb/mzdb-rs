@@ -19,7 +19,7 @@
 //! use mzdb::processing::signal::finder::{SmartPeakelFinder, PeakelFinder};
 //!
 //! // Create some time-intensity pairs
-//! let data: Vec<(f32, f64)> = vec![
+//! let data: Vec<(f32, f32)> = vec![
 //!     (1.0, 100.0), (2.0, 200.0), (3.0, 500.0),
 //!     (4.0, 400.0), (5.0, 100.0), (6.0, 150.0),
 //!     (7.0, 200.0), (8.0, 150.0), (9.0, 100.0),

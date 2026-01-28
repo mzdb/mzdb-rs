@@ -244,9 +244,9 @@ pub trait PeakelDetector {
                 continue;
             }
             
-            let xic_pairs: Vec<(f32, f64)> = xic_times.iter()
+            let xic_pairs: Vec<(f32, f32)> = xic_times.iter()
                 .zip(xic_intensities.iter())
-                .map(|(&t, &i)| (t, i as f64))
+                .map(|(&t, &i)| (t, i))
                 .collect();
             
             let ranges = finder.find_peakels_indices(&xic_pairs);

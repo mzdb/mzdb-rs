@@ -36,6 +36,73 @@ pub trait DataPointProvider {
 }
 
 // ============================================================================
+// Simple Spectrum Data
+// ============================================================================
+
+/// Simplified spectrum data containing only m/z and intensity arrays
+///
+/// This is a lightweight alternative to `SpectrumData` for use cases that don't
+/// need data encoding information or fitted peak parameters (lwhm/rwhm).
+/// Commonly used in processing pipelines like DDA-to-DIA conversion.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SimpleSpectrumData {
+    /// m/z values (32-bit for centroid data)
+    pub mz_array: Vec<f32>,
+    /// Intensity values
+    pub intensity_array: Vec<f32>,
+}
+
+impl SimpleSpectrumData {
+    /// Create new empty spectrum data
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create spectrum data with pre-allocated capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            mz_array: Vec::with_capacity(capacity),
+            intensity_array: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Get number of peaks
+    pub fn peaks_count(&self) -> usize {
+        self.mz_array.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.mz_array.is_empty()
+    }
+
+    /// Scale all intensities by a factor
+    pub fn scale_intensities(&mut self, factor: f32) {
+        for intensity in &mut self.intensity_array {
+            *intensity *= factor;
+        }
+    }
+
+    /// Clear all data, keeping allocated capacity
+    pub fn clear(&mut self) {
+        self.mz_array.clear();
+        self.intensity_array.clear();
+    }
+}
+
+impl DataPointProvider for SimpleSpectrumData {
+    fn mz_array(&self) -> &[f32] {
+        &self.mz_array
+    }
+
+    fn intensity_array(&self) -> &[f32] {
+        &self.intensity_array
+    }
+}
+
+// Note: From<SpectrumData> impls are defined after SpectrumData struct
+
+// ============================================================================
 // Acquisition mode constants and enum
 // ============================================================================
 
@@ -366,6 +433,24 @@ impl DataPointProvider for SpectrumData {
     
     fn data_points_count(&self) -> usize {
         self.peaks_count
+    }
+}
+
+impl From<SpectrumData> for SimpleSpectrumData {
+    fn from(sd: SpectrumData) -> Self {
+        Self {
+            mz_array: sd.mz_array,
+            intensity_array: sd.intensity_array,
+        }
+    }
+}
+
+impl From<&SpectrumData> for SimpleSpectrumData {
+    fn from(sd: &SpectrumData) -> Self {
+        Self {
+            mz_array: sd.mz_array.clone(),
+            intensity_array: sd.intensity_array.clone(),
+        }
     }
 }
 

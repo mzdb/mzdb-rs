@@ -16,7 +16,7 @@ use crate::processing::math::calc_ternary_slopes;
 /// Trait for signal smoothers
 pub trait SignalSmoother {
     /// Smooth time-intensity pairs
-    fn smooth_time_intensity_pairs(&self, data: &[(f32, f64)]) -> Vec<(f32, f64)>;
+    fn smooth_time_intensity_pairs(&self, data: &[(f32, f32)]) -> Vec<(f32, f32)>;
 }
 
 // ============================================================================
@@ -117,13 +117,13 @@ impl SavitzkyGolaySmoother {
 }
 
 impl SignalSmoother for SavitzkyGolaySmoother {
-    fn smooth_time_intensity_pairs(&self, data: &[(f32, f64)]) -> Vec<(f32, f64)> {
-        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i).collect();
+    fn smooth_time_intensity_pairs(&self, data: &[(f32, f32)]) -> Vec<(f32, f32)> {
+        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i as f64).collect();
         let smoothed = self.smooth(&intensities);
 
         data.iter()
             .zip(smoothed.iter())
-            .map(|(&(rt, _), &smoothed_i)| (rt, smoothed_i))
+            .map(|(&(rt, _), &smoothed_i)| (rt, smoothed_i as f32))
             .collect()
     }
 }
@@ -205,8 +205,8 @@ impl PartialSavitzkyGolaySmoother {
 }
 
 impl SignalSmoother for PartialSavitzkyGolaySmoother {
-    fn smooth_time_intensity_pairs(&self, data: &[(f32, f64)]) -> Vec<(f32, f64)> {
-        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i).collect();
+    fn smooth_time_intensity_pairs(&self, data: &[(f32, f32)]) -> Vec<(f32, f32)> {
+        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i as f64).collect();
         let n = intensities.len();
 
         if n < 3 {
@@ -254,7 +254,7 @@ impl SignalSmoother for PartialSavitzkyGolaySmoother {
             let extended_start = start.saturating_sub(self.padding_offset);
             let extended_end = (end + self.padding_offset).min(n - 1);
 
-            let extended_region: Vec<(f32, f64)> =
+            let extended_region: Vec<(f32, f32)> =
                 data[extended_start..=extended_end].to_vec();
             let smoothed_region = self.sg_smoother.smooth_time_intensity_pairs(&extended_region);
 
@@ -292,12 +292,12 @@ impl BaselineRemover {
     /// Calculate the noise threshold for a signal
     ///
     /// Uses median absolute deviation (MAD) based estimation
-    pub fn calc_noise_threshold(&self, data: &[(f32, f64)]) -> f64 {
+    pub fn calc_noise_threshold(&self, data: &[(f32, f32)]) -> f32 {
         if data.is_empty() {
             return 0.0;
         }
 
-        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i).collect();
+        let intensities: Vec<f32> = data.iter().map(|&(_, i)| i).collect();
 
         // Calculate median
         let mut sorted = intensities.clone();
@@ -309,7 +309,7 @@ impl BaselineRemover {
         };
 
         // Calculate MAD
-        let mut deviations: Vec<f64> = intensities.iter().map(|&i| (i - median).abs()).collect();
+        let mut deviations: Vec<f32> = intensities.iter().map(|&i| (i - median).abs()).collect();
         deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mad = if deviations.len() % 2 == 0 {
             (deviations[deviations.len() / 2 - 1] + deviations[deviations.len() / 2]) / 2.0
@@ -326,8 +326,8 @@ impl BaselineRemover {
     /// Returns pairs of (start_index, end_index) for each detected peak group
     pub fn find_noise_free_peak_groups_indices(
         &self,
-        data: &[(f32, f64)],
-        threshold: f64,
+        data: &[(f32, f32)],
+        threshold: f32,
     ) -> Vec<(usize, usize)> {
         if data.is_empty() {
             return vec![];
@@ -448,7 +448,7 @@ impl XicBinner {
     }
 
     /// Calculate bins for the given data
-    pub fn calc_bins(&self, data: &[(f32, f64)]) -> Vec<ExtendedBin> {
+    pub fn calc_bins(&self, data: &[(f32, f32)]) -> Vec<ExtendedBin> {
         if data.is_empty() {
             return vec![];
         }
@@ -479,7 +479,7 @@ impl XicBinner {
         for &(rt, intensity) in data {
             let bin_idx = ((rt - min_rt) / bin_width) as usize;
             let bin_idx = bin_idx.min(bins.len() - 1);
-            bins[bin_idx].add(intensity);
+            bins[bin_idx].add(intensity as f64);
         }
 
         bins
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn test_sg_smoother_rt_pairs() {
         let smoother = SavitzkyGolaySmoother::new(2, 2, 1);
-        let data: Vec<(f32, f64)> = vec![
+        let data: Vec<(f32, f32)> = vec![
             (1.0, 100.0),
             (2.0, 200.0),
             (3.0, 500.0),
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn test_baseline_remover() {
         let remover = BaselineRemover::new(1);
-        let data: Vec<(f32, f64)> = vec![
+        let data: Vec<(f32, f32)> = vec![
             (1.0, 10.0),
             (2.0, 20.0),
             (3.0, 100.0),
@@ -557,7 +557,7 @@ mod tests {
         let binner = XicBinner::new(XicBinnerConfig {
             expected_bin_data_points_count: 2,
         });
-        let data: Vec<(f32, f64)> = vec![
+        let data: Vec<(f32, f32)> = vec![
             (1.0, 100.0),
             (2.0, 200.0),
             (3.0, 300.0),

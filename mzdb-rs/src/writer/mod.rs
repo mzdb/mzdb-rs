@@ -75,7 +75,6 @@ mod run_slice;
 mod metadata;
 mod spectrum_writer;
 pub mod xml_builder;
-pub mod dia_common;
 
 #[cfg(feature = "thermo2mzdb")]
 pub mod thermo;
@@ -92,11 +91,6 @@ pub use data_encoding::DataEncodingRegistry;
 pub use data_encoding::get_or_create_centroid_data_encoding;
 pub use run_slice::RunSliceFactory;
 pub use schema::{MZDB_SCHEMA, SPECTRUM_TABLE_SCHEMA};
-pub use dia_common::{
-    DiaWriteContext, DiaSpectrumParams, DIA_SPECTRUM_INSERT_SQL,
-    calculate_time_bounds, calculate_mz_bounds, calculate_mz_bounds_from_arrays,
-    find_base_peak,
-};
 
 pub use metadata::WriterMetadata;
 

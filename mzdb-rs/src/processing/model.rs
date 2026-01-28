@@ -272,7 +272,7 @@ impl LcContext {
 // ============================================================================
 
 /// A simple time-intensity pair for XIC data
-pub type RtIntensityPair = (f32, f64);
+pub type RtIntensityPair = (f32, f32);
 
 /// Collection of RT-intensity pairs
 pub type RtIntensityPairs = Vec<RtIntensityPair>;
@@ -426,11 +426,11 @@ impl Peakel {
     }
 
     /// Get RT-intensity pairs
-    pub fn elution_time_intensity_pairs(&self) -> Vec<(f32, f64)> {
+    pub fn elution_time_intensity_pairs(&self) -> Vec<(f32, f32)> {
         self.elution_times
             .iter()
             .zip(self.intensity_values.iter())
-            .map(|(&rt, &intensity)| (rt, intensity as f64))
+            .map(|(&rt, &intensity)| (rt, intensity))
             .collect()
     }
 }

@@ -24,7 +24,7 @@ pub trait PeakelFinder {
 
     /// Find peakels in the given data
     /// Returns pairs of (start_index, end_index) for each detected peakel
-    fn find_peakels_indices(&self, data: &[(f32, f64)]) -> Vec<(usize, usize)>;
+    fn find_peakels_indices(&self, data: &[(f32, f32)]) -> Vec<(usize, usize)>;
 }
 
 // ============================================================================
@@ -143,7 +143,7 @@ impl PeakelFinder for BasicPeakelFinder {
         self.min_peaks_count
     }
 
-    fn find_peakels_indices(&self, data: &[(f32, f64)]) -> Vec<(usize, usize)> {
+    fn find_peakels_indices(&self, data: &[(f32, f32)]) -> Vec<(usize, usize)> {
         if data.len() < self.min_peaks_count {
             return vec![];
         }
@@ -153,10 +153,10 @@ impl PeakelFinder for BasicPeakelFinder {
             smoother
                 .smooth_time_intensity_pairs(data)
                 .iter()
-                .map(|&(_, i)| i)
+                .map(|&(_, i)| i as f64)
                 .collect()
         } else {
-            data.iter().map(|&(_, i)| i).collect()
+            data.iter().map(|&(_, i)| i as f64).collect()
         };
 
         self.find_peakels_indices_from_smoothed(&intensities)
@@ -234,12 +234,12 @@ impl SmartPeakelFinder {
     }
 
     /// Calculate the oscillation factor of the signal
-    fn calc_oscillation_factor(&self, data: &[(f32, f64)]) -> f64 {
+    fn calc_oscillation_factor(&self, data: &[(f32, f32)]) -> f64 {
         if data.len() < 2 {
             return 0.0;
         }
 
-        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i).collect();
+        let intensities: Vec<f64> = data.iter().map(|&(_, i)| i as f64).collect();
         
         let (min_val, max_val) = match intensities.iter().cloned().minmax() {
             itertools::MinMaxResult::MinMax(min, max) => (min, max),
@@ -270,7 +270,7 @@ impl PeakelFinder for SmartPeakelFinder {
         self.config.min_peaks_count
     }
 
-    fn find_peakels_indices(&self, data: &[(f32, f64)]) -> Vec<(usize, usize)> {
+    fn find_peakels_indices(&self, data: &[(f32, f32)]) -> Vec<(usize, usize)> {
         let peaks_count = data.len();
         if peaks_count < self.config.min_peaks_count {
             return vec![];
@@ -287,7 +287,7 @@ impl PeakelFinder for SmartPeakelFinder {
         }
 
         // Apply smoothing
-        let smoothed_data: Vec<(f32, f64)> = if !self.config.use_smoothing {
+        let smoothed_data: Vec<(f32, f32)> = if !self.config.use_smoothing {
             data.to_vec()
         } else if self.config.use_partial_sg_smoother {
             let smoother =
@@ -310,7 +310,7 @@ impl PeakelFinder for SmartPeakelFinder {
             smoother.smooth_time_intensity_pairs(data)
         };
 
-        let smoothed_intensities: Vec<f64> = smoothed_data.iter().map(|&(_, i)| i).collect();
+        let smoothed_intensities: Vec<f64> = smoothed_data.iter().map(|&(_, i)| i as f64).collect();
 
         // Find significant minima and maxima
         let mini_maxi = find_significant_mini_maxi(
@@ -344,7 +344,7 @@ impl PeakelFinder for SmartPeakelFinder {
         tmp_peakels_indices
             .into_iter()
             .map(|(first_idx, last_idx)| {
-                let peakel_data: Vec<(f32, f64)> = data[first_idx..=last_idx].to_vec();
+                let peakel_data: Vec<(f32, f32)> = data[first_idx..=last_idx].to_vec();
                 let noise_threshold = self.baseline_remover.calc_noise_threshold(&peakel_data);
                 let noise_free_indices = self
                     .baseline_remover
@@ -407,7 +407,7 @@ impl PeakelFinder for HistogramBasedPeakelFinder {
         self.min_peaks_count
     }
 
-    fn find_peakels_indices(&self, data: &[(f32, f64)]) -> Vec<(usize, usize)> {
+    fn find_peakels_indices(&self, data: &[(f32, f32)]) -> Vec<(usize, usize)> {
         if data.len() < self.min_peaks_count {
             return vec![];
         }
@@ -426,10 +426,10 @@ impl PeakelFinder for HistogramBasedPeakelFinder {
         }
 
         // Create padded bins for smoothing
-        let mut padded_bins: Vec<(f32, f64)> = Vec::with_capacity(nb_bins + 2);
+        let mut padded_bins: Vec<(f32, f32)> = Vec::with_capacity(nb_bins + 2);
         padded_bins.push((bins[0].bin.center() as f32, data[0].1));
         for bin in &bins {
-            padded_bins.push((bin.bin.center() as f32, bin.sum));
+            padded_bins.push((bin.bin.center() as f32, bin.sum as f32));
         }
         padded_bins.push((bins[nb_bins - 1].bin.center() as f32, data[data.len() - 1].1));
 
@@ -437,7 +437,7 @@ impl PeakelFinder for HistogramBasedPeakelFinder {
         let nb_smoothing_points = (nb_bins as f64).sqrt() as usize;
         let smoother = SavitzkyGolaySmoother::new(nb_smoothing_points.max(3), 2, 1);
         let smoothed = smoother.smooth_time_intensity_pairs(&padded_bins);
-        let smoothed_intensities: Vec<f64> = smoothed.iter().map(|&(_, i)| i).collect();
+        let smoothed_intensities: Vec<f64> = smoothed.iter().map(|&(_, i)| i as f64).collect();
 
         // Make left to right analysis
         let left_to_right_indices =
@@ -477,7 +477,7 @@ impl PeakelFinder for HistogramBasedPeakelFinder {
         };
 
         // Convert bin indices back to data indices
-        let data_with_idx: Vec<(usize, f32, f64)> = data
+        let data_with_idx: Vec<(usize, f32, f32)> = data
             .iter()
             .enumerate()
             .map(|(i, &(rt, int))| (i, rt, int))
@@ -866,7 +866,7 @@ pub fn find_significant_mini_maxi(
 mod tests {
     use super::*;
 
-    fn create_test_data() -> Vec<(f32, f64)> {
+    fn create_test_data() -> Vec<(f32, f32)> {
         vec![
             (1.0, 10.0),
             (2.0, 20.0),
@@ -949,7 +949,7 @@ mod tests {
         let finder = SmartPeakelFinder::new();
 
         // Smooth signal should have low oscillation
-        let smooth_data: Vec<(f32, f64)> = vec![
+        let smooth_data: Vec<(f32, f32)> = vec![
             (1.0, 10.0),
             (2.0, 20.0),
             (3.0, 30.0),
@@ -959,7 +959,7 @@ mod tests {
         let smooth_factor = finder.calc_oscillation_factor(&smooth_data);
 
         // Noisy signal should have high oscillation
-        let noisy_data: Vec<(f32, f64)> = vec![
+        let noisy_data: Vec<(f32, f32)> = vec![
             (1.0, 10.0),
             (2.0, 50.0),
             (3.0, 5.0),
@@ -981,7 +981,7 @@ mod tests {
         // The actual splitting behavior depends on the smoothing and derivative analysis.
         // In the full peakel detection pipeline (walking approach), this XIC is correctly
         // split into 2 peakels matching Scala output (verified by integration tests).
-        let xic_data: Vec<(f32, f64)> = vec![
+        let xic_data: Vec<(f32, f32)> = vec![
             // Peakel 1
             (30.97, 7687.0),
             (36.61, 4399.0),

@@ -44,7 +44,7 @@
 //! use mzdb::processing::{SavitzkyGolaySmoother, SignalSmoother, SmartPeakelFinder, PeakelFinder};
 //!
 //! // Create time-intensity data
-//! let data: Vec<(f32, f64)> = vec![
+//! let data: Vec<(f32, f32)> = vec![
 //!     (1.0, 100.0), (2.0, 200.0), (3.0, 500.0),
 //!     (4.0, 400.0), (5.0, 100.0),
 //! ];
@@ -100,7 +100,7 @@ pub use conversion::{MgfWriter, MgfWriterWithStats, MgfExportOptions, MgfExportS
 pub use model::{
     AcquisitionMode, BBSizes, BoundingBox, BoundingBoxIndex, ByteOrder, DataEncoding,
     DataEncodingsCache, DataMode, DataPointProvider, DataPrecision, EntityCache, MzRange, PeakEncoding,
-    Spectrum, SpectrumData, SpectrumHeader, SpectrumSlice, XicMethod, XicPeak,
+    SimpleSpectrumData, Spectrum, SpectrumData, SpectrumHeader, SpectrumSlice, XicMethod, XicPeak,
     RunSlice, RunSliceHeader, RunSliceData,
 };
 
@@ -144,7 +144,7 @@ pub use xml::{
 pub use bounding_box::{SpectrumParseBuffer, read_spectrum_slice_into_buffer, read_spectrum_slice_data_at, merge_spectrum_slices};
 
 // Re-export queries types
-pub use queries::MzDbStats;
+pub use queries::{MzDbStats, get_simple_spectrum_data};
 
 // Re-export query utility functions
 pub use query_utils::{

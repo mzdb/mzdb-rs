@@ -80,9 +80,9 @@ fn test_savitzky_golay_on_tic() {
     let reader = MzDbReader::open(TEST_MZDB_PATH).unwrap();
     let headers = reader.get_spectrum_headers();
     
-    let tic: Vec<(f32, f64)> = headers.iter()
+    let tic: Vec<(f32, f32)> = headers.iter()
         .filter(|h| h.ms_level == 1)
-        .map(|h| (h.time, h.tic as f64))
+        .map(|h| (h.time, h.tic))
         .collect();
     
     assert!(!tic.is_empty(), "Should have TIC data");
@@ -97,8 +97,8 @@ fn test_savitzky_golay_on_tic() {
         assert_eq!(orig.0, smooth.0, "RT should be preserved");
     }
     
-    let orig_sum: f64 = tic.iter().map(|(_, i)| *i).sum();
-    let smooth_sum: f64 = smoothed.iter().map(|(_, i)| *i).sum();
+    let orig_sum: f64 = tic.iter().map(|(_, i)| *i as f64).sum();
+    let smooth_sum: f64 = smoothed.iter().map(|(_, i)| *i as f64).sum();
     let diff_pct = ((orig_sum - smooth_sum) / orig_sum).abs() * 100.0;
     println!("TIC sum: original={:.2e}, smoothed={:.2e}, diff={:.2}%", orig_sum, smooth_sum, diff_pct);
 }
@@ -108,9 +108,9 @@ fn test_baseline_remover_on_tic() {
     let reader = MzDbReader::open(TEST_MZDB_PATH).unwrap();
     let headers = reader.get_spectrum_headers();
     
-    let tic: Vec<(f32, f64)> = headers.iter()
+    let tic: Vec<(f32, f32)> = headers.iter()
         .filter(|h| h.ms_level == 1)
-        .map(|h| (h.time, h.tic as f64))
+        .map(|h| (h.time, h.tic))
         .collect();
     
     let remover = BaselineRemover::new(1);
@@ -128,9 +128,9 @@ fn test_basic_peakel_finder_on_tic() {
     let reader = MzDbReader::open(TEST_MZDB_PATH).unwrap();
     let headers = reader.get_spectrum_headers();
     
-    let tic: Vec<(f32, f64)> = headers.iter()
+    let tic: Vec<(f32, f32)> = headers.iter()
         .filter(|h| h.ms_level == 1)
-        .map(|h| (h.time, h.tic as f64))
+        .map(|h| (h.time, h.tic))
         .collect();
     
     let finder = BasicPeakelFinder::default_params();
@@ -140,7 +140,7 @@ fn test_basic_peakel_finder_on_tic() {
     
     for (i, (start, end)) in peakels.iter().take(5).enumerate() {
         let duration = tic[*end].0 - tic[*start].0;
-        let max_int = tic[*start..=*end].iter().map(|(_, i)| *i).fold(0.0f64, f64::max);
+        let max_int = tic[*start..=*end].iter().map(|(_, i)| *i).fold(0.0f32, f32::max);
         println!("Peakel {}: indices {}-{}, duration={:.2}s, max_int={:.2e}", i + 1, start, end, duration, max_int);
     }
 }
@@ -150,9 +150,9 @@ fn test_smart_peakel_finder_on_tic() {
     let reader = MzDbReader::open(TEST_MZDB_PATH).unwrap();
     let headers = reader.get_spectrum_headers();
     
-    let tic: Vec<(f32, f64)> = headers.iter()
+    let tic: Vec<(f32, f32)> = headers.iter()
         .filter(|h| h.ms_level == 1)
-        .map(|h| (h.time, h.tic as f64))
+        .map(|h| (h.time, h.tic))
         .collect();
     
     let finder = SmartPeakelFinder::new();
@@ -162,7 +162,7 @@ fn test_smart_peakel_finder_on_tic() {
     
     for (i, (start, end)) in peakels.iter().take(5).enumerate() {
         let duration = tic[*end].0 - tic[*start].0;
-        let max_int = tic[*start..=*end].iter().map(|(_, i)| *i).fold(0.0f64, f64::max);
+        let max_int = tic[*start..=*end].iter().map(|(_, i)| *i).fold(0.0f32, f32::max);
         println!("Peakel {}: indices {}-{}, duration={:.2}s, max_int={:.2e}", i + 1, start, end, duration, max_int);
     }
 }
@@ -463,8 +463,8 @@ fn test_walking_peakel_detection() {
         }
         
         // Convert to time-intensity pairs
-        let xic_pairs: Vec<(f32, f64)> = xic_peaks.iter()
-            .map(|(_, int, rt, _, _)| (*rt, *int as f64))
+        let xic_pairs: Vec<(f32, f32)> = xic_peaks.iter()
+            .map(|(_, int, rt, _, _)| (*rt, *int))
             .collect();
         
         // Detect peakels
