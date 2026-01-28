@@ -158,17 +158,17 @@ pub fn convert_raw_to_mzdb(
     }
     
     // Display sample info
-    let seq_row = raw.sequencer_row();
+    let seq_row = raw.sequence_row();
     println!("  Sample:");
-    println!("    ID: {}", seq_row.sample_id);
-    if !seq_row.comment.is_empty() {
-        println!("    Comment: {}", seq_row.comment);
+    println!("    ID: {}", seq_row.sample_id());
+    if !seq_row.comment().is_empty() {
+        println!("    Comment: {}", seq_row.comment());
     }
-    if seq_row.injection.injection_volume > 0.0 {
-        println!("    Injection volume: {:.2} µL", seq_row.injection.injection_volume);
+    if seq_row.injection().injection_volume > 0.0 {
+        println!("    Injection volume: {:.2} µL", seq_row.injection().injection_volume);
     }
-    if !seq_row.vial.is_empty() {
-        println!("    Vial: {}", seq_row.vial);
+    if !seq_row.position().is_empty() {
+        println!("    Vial: {}", seq_row.position());
     }
     
     // First pass: collect statistics from all scans
@@ -244,20 +244,12 @@ pub fn convert_raw_to_mzdb(
         // Convert to mzDB spectrum
         let spectrum = convert_scan_to_spectrum(scan_num, &scan, scan_event, current_cycle, &raw)?;
         
-        // Determine data encoding based on scan mode
-        let mode = if let Some(event) = scan_event {
-            match event.scan_mode {
-                thernio::raw::ScanMode::Centroid => DataMode::Centroid,
-                thernio::raw::ScanMode::Profile => DataMode::Profile,
-            }
-        } else {
-            DataMode::Centroid
-        };
-        
+        // Always use Centroid mode with LowRes encoding (32-bit m/z, 32-bit intensity)
+        // since we're always extracting centroid data from the RAW file
         let encoding = DataEncoding {
             id: 0, // Will be assigned by registry
-            mode,
-            peak_encoding: PeakEncoding::HighRes, // 64-bit m/z precision
+            mode: DataMode::Centroid,
+            peak_encoding: PeakEncoding::LowRes, // 32-bit m/z precision (8 bytes per peak)
             compression: "none".to_string(),
             byte_order: ByteOrder::LittleEndian,
         };
@@ -460,7 +452,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     let component_list = build_component_list(raw)?;
 
     // Now get the other data (immutable borrows)
-    let seq_row = raw.sequencer_row();
+    let seq_row = raw.sequence_row();
     let header = raw.header();
     let autosampler = raw.autosampler_info();
     let (low_mz, high_mz) = raw.mz_range();
@@ -471,11 +463,11 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
 
     // Pre-declare all formatted strings to ensure they live long enough
     let version_str = header.version.to_string();
-    let sample_type_str = format!("{:?}", seq_row.injection.sample_type);
-    let vol_str = format!("{:.2}", seq_row.injection.injection_volume);
-    let weight_str = format!("{:.3}", seq_row.injection.sample_weight);
-    let sample_vol_str = format!("{:.2}", seq_row.injection.sample_volume);
-    let dilution_str = format!("{:.3}", seq_row.injection.dilution_factor);
+    let sample_type_str = format!("{:?}", seq_row.injection().sample_type);
+    let vol_str = format!("{:.2}", seq_row.injection().injection_volume);
+    let weight_str = format!("{:.3}", seq_row.injection().sample_weight);
+    let sample_vol_str = format!("{:.2}", seq_row.injection().sample_volume);
+    let dilution_str = format!("{:.3}", seq_row.injection().dilution_factor);
     let tray_str = format!("{}:{}", autosampler.tray_index, autosampler.vial_index);
     let start_time_str = format!("{:.2}", raw.start_time());
     let _end_time_str = format!("{:.2}", raw.end_time());
@@ -522,8 +514,8 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     }
 
     // Add instrument method path if available
-    if !seq_row.instrument_method.is_empty() {
-        inst_params.push(("MS", "MS:1000004", "instrument method", &seq_row.instrument_method));
+    if !seq_row.instrument_method().is_empty() {
+        inst_params.push(("MS", "MS:1000004", "instrument method", seq_row.instrument_method()));
     }
 
     let inst_param_tree = build_param_tree_simple(&inst_params)?;
@@ -539,7 +531,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
 
     // Sample with comprehensive details
     let mut sample_params = vec![
-        ("MS", "MS:1000002", "sample name", seq_row.sample_id.as_str()),
+        ("MS", "MS:1000002", "sample name", seq_row.sample_id()),
     ];
 
     // Add sample type
@@ -548,33 +540,33 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     }
 
     // Add comment if available
-    if !seq_row.comment.is_empty() {
-        sample_params.push(("MS", "MS:1000003", "sample comment", &seq_row.comment));
+    if !seq_row.comment().is_empty() {
+        sample_params.push(("MS", "MS:1000003", "sample comment", seq_row.comment()));
     }
 
     // Add injection volume
-    if seq_row.injection.injection_volume > 0.0 {
+    if seq_row.injection().injection_volume > 0.0 {
         sample_params.push(("MS", "MS:1000005", "injection volume", vol_str.as_str()));
     }
 
     // Add sample weight
-    if seq_row.injection.sample_weight > 0.0 {
+    if seq_row.injection().sample_weight > 0.0 {
         sample_params.push(("MS", "MS:1000006", "sample weight", weight_str.as_str()));
     }
 
     // Add sample volume
-    if seq_row.injection.sample_volume > 0.0 {
+    if seq_row.injection().sample_volume > 0.0 {
         sample_params.push(("MS", "MS:1000007", "sample volume", sample_vol_str.as_str()));
     }
 
     // Add dilution factor
-    if seq_row.injection.dilution_factor > 0.0 && seq_row.injection.dilution_factor != 1.0 {
+    if seq_row.injection().dilution_factor > 0.0 && seq_row.injection().dilution_factor != 1.0 {
         sample_params.push(("MS", "MS:1000008", "dilution factor", dilution_str.as_str()));
     }
 
     // Add vial position
-    if !seq_row.vial.is_empty() {
-        sample_params.push(("MS", "MS:1000009", "vial position", &seq_row.vial));
+    if !seq_row.position().is_empty() {
+        sample_params.push(("MS", "MS:1000009", "vial position", seq_row.position()));
     }
 
     // Add autosampler tray info
@@ -590,7 +582,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
 
     let sample = Sample {
         id: 1,
-        name: seq_row.sample_id.clone(),
+        name: seq_row.sample_id().to_string(),
         param_tree: Some(sample_param_tree),
         shared_param_tree_id: None,
     };
@@ -606,8 +598,8 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     }
 
     // Add original path if available
-    if !seq_row.raw_file_path.is_empty() {
-        source_params.push(("MS", "MS:1000569", "file path", &seq_row.raw_file_path));
+    if !seq_row.raw_file_path().is_empty() {
+        source_params.push(("MS", "MS:1000569", "file path", seq_row.raw_file_path()));
     }
 
     let source_param_tree = build_param_tree_simple(&source_params)?;
@@ -615,7 +607,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     let source_file = SourceFile {
         id: 1,
         name: seq_row.raw_file_name().to_string(),
-        location: seq_row.raw_file_parent_dir.clone(),
+        location: seq_row.raw_file_parent_dir().to_string(),
         param_tree: source_param_tree,
         shared_param_tree_id: None,
     };
@@ -632,8 +624,8 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
     ];
 
     // Add processing method path if available
-    if !seq_row.processing_method.is_empty() {
-        proc_params.push(("MS", "MS:1000530", "processing method", &seq_row.processing_method));
+    if !seq_row.processing_method().is_empty() {
+        proc_params.push(("MS", "MS:1000530", "processing method", seq_row.processing_method()));
     }
 
     let processing_method = ProcessingMethod {
@@ -767,7 +759,7 @@ fn convert_scan_to_spectrum(
 
     // Get isolation width and offset from scan's reactions
     let (isolation_width, isolation_offset) = scan.reactions.first()
-        .map(|r| (Some(r.isolation_width), Some(r.isolation_offset)))
+        .map(|r| (Some(r.isolation_width), r.isolation_offset))
         .unwrap_or((None, None));
 
     // Build precursor list XML for MS2+
@@ -867,22 +859,24 @@ fn convert_scan_to_spectrum(
         "MS", "MS:1000131", "number of detector counts"
     ));
 
-    // Observed m/z range (lowest and highest observed m/z)
-    if !scan.spectrum.peaks.is_empty() {
-        let lowest_mz = scan.spectrum.peaks.first().map(|p| p.mz).unwrap_or(scan.low_mz);
-        let highest_mz = scan.spectrum.peaks.last().map(|p| p.mz).unwrap_or(scan.high_mz);
-        
-        let lowest_mz_str = format!("{:.6}", lowest_mz);
-        spec_params.push(CvParam::with_unit(
-            "MS", "MS:1000528", "lowest observed m/z", &lowest_mz_str,
-            "MS", "MS:1000040", "m/z"
-        ));
-        
-        let highest_mz_str = format!("{:.6}", highest_mz);
-        spec_params.push(CvParam::with_unit(
-            "MS", "MS:1000527", "highest observed m/z", &highest_mz_str,
-            "MS", "MS:1000040", "m/z"
-        ));
+    // Observed m/z range (lowest and highest observed m/z) from centroid stream
+    if let Some(centroids) = scan.centroids() {
+        if !centroids.is_empty() {
+            let lowest_mz = centroids.first().map(|p| p.mz as f64).unwrap_or(scan.low_mz);
+            let highest_mz = centroids.last().map(|p| p.mz as f64).unwrap_or(scan.high_mz);
+            
+            let lowest_mz_str = format!("{:.6}", lowest_mz);
+            spec_params.push(CvParam::with_unit(
+                "MS", "MS:1000528", "lowest observed m/z", &lowest_mz_str,
+                "MS", "MS:1000040", "m/z"
+            ));
+            
+            let highest_mz_str = format!("{:.6}", highest_mz);
+            spec_params.push(CvParam::with_unit(
+                "MS", "MS:1000527", "highest observed m/z", &highest_mz_str,
+                "MS", "MS:1000040", "m/z"
+            ));
+        }
     }
 
     let param_tree_str = build_param_tree(&spec_params)?;
@@ -893,6 +887,11 @@ fn convert_scan_to_spectrum(
     } else {
         None
     };
+
+    // Get centroid data directly - always use centroid mode
+    // The centroids() method returns Option<&[LabelPeak]> with f32 m/z and f32 intensity
+    let centroids = scan.centroids().unwrap_or(&[]);
+    let peaks_count = centroids.len();
 
     // Create spectrum header
     let header = SpectrumHeader {
@@ -908,7 +907,7 @@ fn convert_scan_to_spectrum(
         base_peak_intensity: scan.base_peak_intensity as f32,
         precursor_mz: scan.precursor_mzs.first().copied(),
         precursor_charge: charge_state,
-        peaks_count: scan.spectrum.len() as i64,
+        peaks_count: peaks_count as i64,
         param_tree_str: Some(param_tree_str),
         scan_list_str: Some(scan_list_str),
         precursor_list_str,
@@ -922,29 +921,20 @@ fn convert_scan_to_spectrum(
         bb_first_spectrum_id: 0, // Will be updated by writer
     };
 
-    // Convert peaks to arrays
-    let mut mz_array = Vec::with_capacity(scan.spectrum.len());
-    let mut intensity_array = Vec::with_capacity(scan.spectrum.len());
+    // Convert centroid peaks to arrays - LabelPeak already has f32 mz and f32 intensity
+    let mut mz_array: Vec<f32> = Vec::with_capacity(peaks_count);
+    let mut intensity_array: Vec<f32> = Vec::with_capacity(peaks_count);
 
-    for peak in &scan.spectrum.peaks {
+    for peak in centroids {
         mz_array.push(peak.mz);
         intensity_array.push(peak.intensity);
     }
 
-    // Create encoding - mode determined by caller based on scan_event
-    let mode = if let Some(event) = scan_event {
-        match event.scan_mode {
-            thernio::raw::ScanMode::Centroid => DataMode::Centroid,
-            thernio::raw::ScanMode::Profile => DataMode::Profile,
-        }
-    } else {
-        DataMode::Centroid
-    };
-
+    // Always use Centroid mode with LowRes encoding (32-bit m/z)
     let encoding = DataEncoding {
         id: 0,
-        mode,
-        peak_encoding: PeakEncoding::HighRes,
+        mode: DataMode::Centroid,
+        peak_encoding: PeakEncoding::LowRes, // 32-bit m/z, 32-bit intensity (8 bytes per peak)
         compression: "none".to_string(),
         byte_order: ByteOrder::LittleEndian,
     };

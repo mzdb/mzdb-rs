@@ -461,8 +461,8 @@ fn get_spectrum_slices_in_ranges(
                         &bb_index,
                         data_encoding,
                         spectrum_idx,
-                        Some(min_mz),
-                        Some(max_mz),
+                        Some(min_mz as f32),
+                        Some(max_mz as f32),
                     )?;
 
                     if spectrum_slice_data.peaks_count != 0 {
@@ -551,8 +551,8 @@ fn merge_spectrum_data_list(
 
 pub fn get_ms_xic(
     connection: &Connection,
-    mz: f64,
-    mz_tol_ppm: f64,
+    mz: f32,
+    mz_tol_ppm: f32,
     min_rt: Option<f32>,
     max_rt: Option<f32>,
     method: XicMethod,
@@ -569,8 +569,8 @@ pub fn get_ms_xic(
 
     let spectrum_slices = get_ms_spectrum_slices(
         connection,
-        mz - mz_tol_da,
-        mz + mz_tol_da,
+        (mz - mz_tol_da) as f64,
+        (mz + mz_tol_da) as f64,
         min_rt_for_rtree,
         max_rt_for_rtree,
         entity_cache,
@@ -583,8 +583,8 @@ pub fn get_ms_xic(
 fn get_msn_xic(
     connection: &Connection,
     parent_mz: f64,
-    fragment_mz: f64,
-    fragment_mz_tol_ppm: f64,
+    fragment_mz: f32,
+    fragment_mz_tol_ppm: f32,
     min_rt: Option<f32>,
     max_rt: Option<f32>,
     method: XicMethod,
@@ -602,8 +602,8 @@ fn get_msn_xic(
     let spectrum_slices = get_msn_spectrum_slices(
         connection,
         parent_mz,
-        fragment_mz - fragment_mz_tol_da,
-        fragment_mz + fragment_mz_tol_da,
+        (fragment_mz - fragment_mz_tol_da) as f64,
+        (fragment_mz + fragment_mz_tol_da) as f64,
         min_rt_for_rtree,
         max_rt_for_rtree,
         entity_cache,
@@ -619,8 +619,8 @@ fn get_msn_xic(
 
 fn spectrum_slices_to_xic(
     spectrum_slices: Vec<SpectrumSlice>,
-    searched_mz: f64,
-    mz_tol_ppm: f64,
+    searched_mz: f32,
+    mz_tol_ppm: f32,
     method: XicMethod,
 ) -> Vec<XicPeak> {
     if spectrum_slices.is_empty() {

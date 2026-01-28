@@ -17,7 +17,7 @@ use mzdb::processing::ms;
 const TEST_MZDB_PATH: &str = "data/OVEMB150205_12.mzDB";
 
 /// Standard m/z tolerance used across all tests (10 ppm)
-const MZ_TOLERANCE_PPM: f64 = 10.0;
+const MZ_TOLERANCE_PPM: f32 = 10.0;
 
 // ============================================================================
 // mzDB Reader Integration Tests
@@ -177,7 +177,7 @@ fn test_ppm_tolerance_calculations() {
     let spectrum = reader.get_spectrum(1).unwrap();
     
     if !spectrum.data.mz_array.is_empty() {
-        let test_mz = spectrum.data.mz_array[0];
+        let test_mz = spectrum.data.mz_array[0] as f64;
         let da = ms::ppm_to_da(test_mz, 10.0);
         let ppm = ms::da_to_ppm(test_mz, da);
         
@@ -196,7 +196,7 @@ fn test_isotope_pattern_generation() {
     let spectrum = reader.get_spectrum(1).unwrap();
     
     if !spectrum.data.mz_array.is_empty() {
-        let mono_mz = spectrum.data.mz_array[0];
+        let mono_mz = spectrum.data.mz_array[0] as f64;
         let pattern = ms::TheoreticalIsotopePattern::from_averagine(mono_mz, 2, 5);
         
         println!("Isotope pattern for m/z {:.4} @ +2:", mono_mz);
@@ -293,12 +293,12 @@ struct IndexedSpectrum {
     spectrum_idx: usize,
     spectrum_id: i64,
     time: f32,
-    peaks: Vec<(f64, f32, usize)>, // (mz, intensity, peak_idx) sorted by m/z
+    peaks: Vec<(f32, f32, usize)>, // (mz, intensity, peak_idx) sorted by m/z
 }
 
 impl IndexedSpectrum {
     /// Find the nearest peak within m/z tolerance using binary search
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64) -> Option<(f64, f32, usize)> {
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32) -> Option<(f32, f32, usize)> {
         if self.peaks.is_empty() {
             return None;
         }
@@ -314,7 +314,7 @@ impl IndexedSpectrum {
         }
         
         // Find the nearest peak within the m/z range
-        let mut best: Option<(f64, f32, usize)> = None;
+        let mut best: Option<(f32, f32, usize)> = None;
         let mut best_diff = mz_tol_da;
         
         for i in start..self.peaks.len() {
@@ -366,7 +366,7 @@ fn test_walking_peakel_detection() {
     
     for (idx, header) in ms1_headers.iter().enumerate() {
         let spectrum = reader.get_spectrum(header.id).unwrap();
-        let peaks: Vec<(f64, f32, usize)> = spectrum.data.mz_array.iter()
+        let peaks: Vec<(f32, f32, usize)> = spectrum.data.mz_array.iter()
             .zip(spectrum.data.intensity_array.iter())
             .enumerate()
             .filter(|&(_, (ref _mz, ref intensity))| **intensity >= MIN_INTENSITY)
@@ -382,7 +382,7 @@ fn test_walking_peakel_detection() {
     }
     
     // Collect all peaks: (mz, intensity, spectrum_idx, peak_idx)
-    let mut all_peaks: Vec<(f64, f32, usize, usize)> = Vec::new();
+    let mut all_peaks: Vec<(f32, f32, usize, usize)> = Vec::new();
     
     for (spec_idx, indexed_spec) in indexed_spectra.iter().enumerate() {
         for &(mz, intensity, peak_idx) in &indexed_spec.peaks {
@@ -411,10 +411,10 @@ fn test_walking_peakel_detection() {
         }
         
         let apex_rt = indexed_spectra[apex_spectrum_idx].time;
-        let mz_tol_da = apex_mz * MZ_TOLERANCE_PPM / 1_000_000.0;
+        let mz_tol_da = apex_mz * MZ_TOLERANCE_PPM / 1_000_000.0_f32;
         
         // Walk left and right to build XIC
-        let mut xic_peaks: Vec<(f64, f32, f32, usize, usize)> = Vec::new(); // (mz, int, rt, spec_idx, peak_idx)
+        let mut xic_peaks: Vec<(f32, f32, f32, usize, usize)> = Vec::new(); // (mz, int, rt, spec_idx, peak_idx)
         
         // Add apex
         xic_peaks.push((apex_mz, _apex_intensity, apex_rt, apex_spectrum_idx, apex_peak_idx));

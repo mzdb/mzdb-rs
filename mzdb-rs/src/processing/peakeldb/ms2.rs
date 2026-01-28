@@ -158,7 +158,7 @@ impl Ms2PeakelDbReader {
             let peaks_blob: Vec<u8> = row.get(9)?;
             Ok((
                 row.get::<_, i64>(0)?,    // id
-                row.get::<_, f64>(1)?,    // moz -> mz
+                row.get::<_, f64>(1)? as f32,    // moz -> mz (f64 in DB, f32 in memory)
                 row.get::<_, f32>(2)?,    // elution_time
                 row.get::<_, f32>(3)?,    // duration
                 row.get::<_, i32>(4)?,    // gap_count
@@ -171,7 +171,7 @@ impl Ms2PeakelDbReader {
                 row.get::<_, i64>(12)?,   // apex_spectrum_id
                 row.get::<_, i64>(13)?,   // last_spectrum_id
                 row.get::<_, i64>(14)?,   // isolation_window_id
-                row.get::<_, f64>(15)?,   // precursor_mz
+                row.get::<_, f64>(15)?,   // precursor_mz (keep f64 for precursor)
             ))
         })?;
 

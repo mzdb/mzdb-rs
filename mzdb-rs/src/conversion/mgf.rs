@@ -167,7 +167,7 @@ impl<W: Write> MgfWriter<W> {
         }
         
         // Filter peaks by intensity threshold
-        let mut filtered_peaks: Vec<(f64, f32)> = spectrum.data.mz_array
+        let mut filtered_peaks: Vec<(f32, f32)> = spectrum.data.mz_array
             .iter()
             .zip(spectrum.data.intensity_array.iter())
             .filter(|(_mz, intensity)| **intensity >= self.options.min_intensity)

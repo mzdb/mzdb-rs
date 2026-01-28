@@ -223,8 +223,8 @@ impl Ms1PeakelDbWriter {
             let amplitude = if min_intensity == 0.0 {0.0} else {apex_intensity / min_intensity};
 
             // Use Option for nullable HWHM values (null if not computed)
-            let left_hwhm_opt: Option<f32> = if left_hwhm_mean > 0.0 { Some(left_hwhm_mean as f32) } else { None };
-            let right_hwhm_opt: Option<f32> = if right_hwhm_mean > 0.0 { Some(right_hwhm_mean as f32) } else { None };
+            let left_hwhm_opt: Option<f32> = if left_hwhm_mean > 0.0 { Some(left_hwhm_mean) } else { None };
+            let right_hwhm_opt: Option<f32> = if right_hwhm_mean > 0.0 { Some(right_hwhm_mean) } else { None };
 
             peakel_stmt.execute(params![
                 peakel_id,
@@ -310,7 +310,7 @@ impl Ms1PeakelDbReader {
             let peaks_blob: Vec<u8> = row.get(9)?;
             Ok((
                 row.get::<_, i64>(0)?,    // id
-                row.get::<_, f64>(1)?,    // moz -> mz
+                row.get::<_, f64>(1)? as f32,    // moz -> mz (f64 in DB, f32 in memory)
                 row.get::<_, f32>(2)?,    // elution_time
                 row.get::<_, f32>(3)?,    // duration
                 row.get::<_, i32>(4)?,    // gap_count

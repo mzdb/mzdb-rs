@@ -49,8 +49,8 @@ pub trait HasPeakelData {
     fn spectrum_ids(&self) -> &[i64];
     /// Get elution times slice (seconds)
     fn elution_times(&self) -> &[f32];
-    /// Get m/z values slice
-    fn mz_values(&self) -> &[f64];
+    /// Get m/z values slice (32-bit for centroid data)
+    fn mz_values(&self) -> &[f32];
     /// Get intensity values slice
     fn intensities(&self) -> &[f32];
 
@@ -81,13 +81,13 @@ pub trait HasPeakelData {
     }
 
     /// Get min m/z value
-    fn min_mz(&self) -> f64 {
-        self.mz_values().iter().cloned().fold(f64::INFINITY, f64::min)
+    fn min_mz(&self) -> f32 {
+        self.mz_values().iter().cloned().fold(f32::INFINITY, f32::min)
     }
 
     /// Get max m/z value
-    fn max_mz(&self) -> f64 {
-        self.mz_values().iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    fn max_mz(&self) -> f32 {
+        self.mz_values().iter().cloned().fold(f32::NEG_INFINITY, f32::max)
     }
 
     /// Get min elution time
@@ -116,7 +116,7 @@ pub trait HasPeakelData {
     }
 
     /// Get apex m/z
-    fn apex_mz(&self) -> Option<f64> {
+    fn apex_mz(&self) -> Option<f32> {
         self.apex_index().map(|i| self.mz_values()[i])
     }
 
@@ -140,16 +140,16 @@ pub trait HasPeakelData {
     }
 
     /// Calculate weighted average m/z
-    fn calc_weighted_mz(&self) -> f64 {
-        let sum_intensity: f64 = self.intensities().iter().map(|&i| i as f64).sum();
+    fn calc_weighted_mz(&self) -> f32 {
+        let sum_intensity: f32 = self.intensities().iter().sum();
         if sum_intensity == 0.0 {
             return self.apex_mz().unwrap_or(0.0);
         }
         self.mz_values()
             .iter()
             .zip(self.intensities().iter())
-            .map(|(&mz, &intensity)| mz * intensity as f64)
-            .sum::<f64>()
+            .map(|(&mz, &intensity)| mz * intensity)
+            .sum::<f32>()
             / sum_intensity
     }
 
@@ -192,8 +192,8 @@ pub trait HasPeakelData {
 /// A single mass spectrometry peak with LC context
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Peak {
-    /// m/z value
-    pub mz: f64,
+    /// m/z value (32-bit for centroid data)
+    pub mz: f32,
     /// Intensity value
     pub intensity: f32,
     /// Left half-width at half-maximum
@@ -206,7 +206,7 @@ pub struct Peak {
 
 impl Peak {
     /// Create a new peak
-    pub fn new(mz: f64, intensity: f32) -> Self {
+    pub fn new(mz: f32, intensity: f32) -> Self {
         Self {
             mz,
             intensity,
@@ -218,7 +218,7 @@ impl Peak {
 
     /// Create a new peak with all fields
     pub fn with_hwhm(
-        mz: f64,
+        mz: f32,
         intensity: f32,
         left_hwhm: f32,
         right_hwhm: f32,
@@ -294,14 +294,14 @@ pub struct Peakel {
     pub spectrum_ids: SmallVec<[i64; 16]>,
     /// Elution times for each data point
     pub elution_times: SmallVec<[f32; 16]>,
-    /// m/z values for each data point
-    pub mz_values: SmallVec<[f64; 16]>,
+    /// m/z values for each data point (32-bit for centroid data)
+    pub mz_values: SmallVec<[f32; 16]>,
     /// Intensity values for each data point
     pub intensity_values: SmallVec<[f32; 16]>,
     /// Left HWHM values (optional)
-    pub left_hwhms: Option<SmallVec<[f64; 16]>>,
+    pub left_hwhms: Option<SmallVec<[f32; 16]>>,
     /// Right HWHM values (optional)
-    pub right_hwhms: Option<SmallVec<[f64; 16]>>,
+    pub right_hwhms: Option<SmallVec<[f32; 16]>>,
     /// Index of the apex (most intense point)
     apex_index: usize,
     /// Number of gaps (missing spectra) in the peakel
@@ -316,10 +316,10 @@ impl Peakel {
     pub fn new(
         spectrum_ids: SmallVec<[i64; 16]>,
         elution_times: SmallVec<[f32; 16]>,
-        mz_values: SmallVec<[f64; 16]>,
+        mz_values: SmallVec<[f32; 16]>,
         intensity_values: SmallVec<[f32; 16]>,
-        left_hwhms: Option<SmallVec<[f64; 16]>>,
-        right_hwhms: Option<SmallVec<[f64; 16]>>,
+        left_hwhms: Option<SmallVec<[f32; 16]>>,
+        right_hwhms: Option<SmallVec<[f32; 16]>>,
         gap_count: usize,
     ) -> Self {
         let apex_index = intensity_values
@@ -349,10 +349,10 @@ impl Peakel {
     pub fn from_vectors(
         spectrum_ids: Vec<i64>,
         elution_times: Vec<f32>,
-        mz_values: Vec<f64>,
+        mz_values: Vec<f32>,
         intensity_values: Vec<f32>,
-        left_hwhms: Option<Vec<f64>>,
-        right_hwhms: Option<Vec<f64>>,
+        left_hwhms: Option<Vec<f32>>,
+        right_hwhms: Option<Vec<f32>>,
         gap_count: usize,
     ) -> Self {
         let apex_index = intensity_values
@@ -383,24 +383,24 @@ impl Peakel {
 
     /// Calculate the weighted average m/z (alias for `calc_weighted_mz()`)
     #[inline]
-    pub fn calc_mz(&self) -> f64 {
+    pub fn calc_mz(&self) -> f32 {
         self.calc_weighted_mz()
     }
 
     /// Calculate the weighted average elution time
     pub fn calc_weighted_average_time(&self) -> f32 {
-        let sum_intensity: f64 = self.intensity_values.iter().map(|&i| i as f64).sum();
+        let sum_intensity: f32 = self.intensity_values.iter().sum();
         if sum_intensity == 0.0 {
             return self.apex_elution_time().unwrap_or(0.0);
         }
 
-        (self
+        self
             .elution_times
             .iter()
             .zip(self.intensity_values.iter())
-            .map(|(&rt, &intensity)| rt as f64 * intensity as f64)
-            .sum::<f64>()
-            / sum_intensity) as f32
+            .map(|(&rt, &intensity)| rt * intensity)
+            .sum::<f32>()
+            / sum_intensity
     }
 
     /// Calculate the peakel area (alias for `calc_area()`)
@@ -410,17 +410,17 @@ impl Peakel {
     }
 
     /// Get the mean left HWHM
-    pub fn left_hwhm_mean(&self) -> f64 {
+    pub fn left_hwhm_mean(&self) -> f32 {
         match &self.left_hwhms {
-            Some(hwhms) if !hwhms.is_empty() => hwhms.iter().sum::<f64>() / hwhms.len() as f64,
+            Some(hwhms) if !hwhms.is_empty() => hwhms.iter().sum::<f32>() / hwhms.len() as f32,
             _ => 0.0,
         }
     }
 
     /// Get the mean right HWHM
-    pub fn right_hwhm_mean(&self) -> f64 {
+    pub fn right_hwhm_mean(&self) -> f32 {
         match &self.right_hwhms {
-            Some(hwhms) if !hwhms.is_empty() => hwhms.iter().sum::<f64>() / hwhms.len() as f64,
+            Some(hwhms) if !hwhms.is_empty() => hwhms.iter().sum::<f32>() / hwhms.len() as f32,
             _ => 0.0,
         }
     }
@@ -444,7 +444,7 @@ impl HasPeakelData for Peakel {
         &self.elution_times
     }
 
-    fn mz_values(&self) -> &[f64] {
+    fn mz_values(&self) -> &[f32] {
         &self.mz_values
     }
 
@@ -469,7 +469,7 @@ impl HasPeakelData for Peakel {
         }
     }
 
-    fn apex_mz(&self) -> Option<f64> {
+    fn apex_mz(&self) -> Option<f32> {
         if self.mz_values.is_empty() {
             None
         } else {
@@ -506,10 +506,10 @@ impl HasPeakelData for Peakel {
 pub struct PeakelBuilder {
     spectrum_ids: SmallVec<[i64; 16]>,
     elution_times: SmallVec<[f32; 16]>,
-    mz_values: SmallVec<[f64; 16]>,
+    mz_values: SmallVec<[f32; 16]>,
     intensity_values: SmallVec<[f32; 16]>,
-    left_hwhms: SmallVec<[f64; 16]>,
-    right_hwhms: SmallVec<[f64; 16]>,
+    left_hwhms: SmallVec<[f32; 16]>,
+    right_hwhms: SmallVec<[f32; 16]>,
     gap_count: usize,
 }
 
@@ -563,8 +563,8 @@ impl PeakelBuilder {
         }
         self.mz_values.push(peak.mz);
         self.intensity_values.push(peak.intensity);
-        self.left_hwhms.push(peak.left_hwhm as f64);
-        self.right_hwhms.push(peak.right_hwhm as f64);
+        self.left_hwhms.push(peak.left_hwhm);
+        self.right_hwhms.push(peak.right_hwhm);
         self
     }
 
@@ -573,10 +573,10 @@ impl PeakelBuilder {
         &mut self,
         spectrum_id: i64,
         elution_time: f32,
-        mz: f64,
+        mz: f32,
         intensity: f32,
-        left_hwhm: f64,
-        right_hwhm: f64,
+        left_hwhm: f32,
+        right_hwhm: f32,
     ) -> &mut Self {
         self.spectrum_ids.push(spectrum_id);
         self.elution_times.push(elution_time);
@@ -680,25 +680,24 @@ impl Feature {
             return self.elution_time;
         }
 
-        let total_intensity: f64 = self
+        let total_intensity: f32 = self
             .peakels
             .iter()
             .flat_map(|p| p.intensity_values.iter())
-            .map(|&i| i as f64)
             .sum();
 
         if total_intensity == 0.0 {
             return self.elution_time;
         }
 
-        let weighted_sum: f64 = self
+        let weighted_sum: f32 = self
             .peakels
             .iter()
             .flat_map(|p| p.elution_times.iter().zip(p.intensity_values.iter()))
-            .map(|(&rt, &intensity)| rt as f64 * intensity as f64)
+            .map(|(&rt, &intensity)| rt * intensity)
             .sum();
 
-        (weighted_sum / total_intensity) as f32
+        weighted_sum / total_intensity
     }
 }
 

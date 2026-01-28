@@ -63,11 +63,11 @@ struct Args {
 
     /// m/z tolerance for peak merging in Da
     #[arg(long = "mz-tolerance", default_value = "0.1")]
-    mz_tolerance: f64,
+    mz_tolerance: f32,
 
     /// Precursor m/z tolerance in ppm
     #[arg(long = "precursor-tolerance", default_value = "10")]
-    precursor_tolerance: f64,
+    precursor_tolerance: f32,
 
     /// Enable verbose output
     #[arg(short, long)]

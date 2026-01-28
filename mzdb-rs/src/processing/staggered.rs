@@ -847,7 +847,8 @@ impl StaggeredPeakelMatcher {
                 }
 
                 // Skip if m/z is outside this unstaggered window
-                if peakel_a.mz < window.lower_mz || peakel_a.mz > window.upper_mz {
+                let mz_f64 = peakel_a.mz as f64;
+                if mz_f64 < window.lower_mz || mz_f64 > window.upper_mz {
                     continue;
                 }
 
@@ -911,7 +912,7 @@ impl StaggeredPeakelMatcher {
                 let potential_windows: Vec<i64> = stagger_info
                     .unstaggered_windows
                     .iter()
-                    .filter(|w| w.contains(peakel.mz))
+                    .filter(|w| w.contains(peakel.mz as f64))
                     .map(|w| w.id)
                     .collect();
 
@@ -933,7 +934,7 @@ impl StaggeredPeakelMatcher {
     /// Check if two peakels from different cycles represent the same analyte
     fn is_matching_peakel(&self, peakel_a: &ExtendedPeakel, peakel_b: &ExtendedPeakel) -> bool {
         // Check m/z match
-        let mz_tol = self.config.mz_tolerance.to_da(peakel_a.mz);
+        let mz_tol = self.config.mz_tolerance.to_da(peakel_a.mz as f64) as f32;
         let mz_diff = (peakel_a.mz - peakel_b.mz).abs();
         if mz_diff > mz_tol {
             return false;
@@ -1023,8 +1024,8 @@ pub struct MergeStats {
 pub struct MergedPeakel {
     /// New peakel ID
     pub id: i64,
-    /// Weighted average m/z
-    pub mz: f64,
+    /// Weighted average m/z (32-bit for centroid data)
+    pub mz: f32,
     /// Elution time at apex
     pub elution_time: f32,
     /// Duration
@@ -1095,8 +1096,8 @@ impl PeakelMerger {
             (None, false)
         };
 
-        // Collect all data points
-        let mut all_points: Vec<(i64, f32, f64, f32)> = Vec::new();
+        // Collect all data points (using f32 for mz)
+        let mut all_points: Vec<(i64, f32, f32, f32)> = Vec::new();
 
         // Add cycle A points
         for i in 0..peakel_a.data.peaks_count() {
@@ -1213,7 +1214,7 @@ mod tests {
         times: Vec<f32>,
         intensities: Vec<f32>,
     ) -> Peakel {
-        let mz_values: Vec<f64> = vec![500.0; spectrum_ids.len()];
+        let mz_values: Vec<f32> = vec![500.0; spectrum_ids.len()];
         Peakel::from_vectors(
             spectrum_ids,
             times,

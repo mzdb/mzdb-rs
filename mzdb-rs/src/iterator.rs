@@ -721,8 +721,8 @@ impl<'a> RunSliceIterator<'a> {
     pub fn new_with_mz_range(
         connection: &'a Connection,
         entity_cache: &'a EntityCache,
-        min_run_slice_mz: f64,
-        max_run_slice_mz: f64,
+        min_run_slice_mz: f32,
+        max_run_slice_mz: f32,
     ) -> Result<Self> {
         // Load run slice headers for MS1
         let run_slice_headers = list_run_slices_by_ms_level(connection, 1)?

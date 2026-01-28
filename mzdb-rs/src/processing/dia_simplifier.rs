@@ -52,7 +52,7 @@ pub struct DiaSimplifierConfig {
     /// Must be odd (1, 3, 5, etc.)
     pub points_per_peakel: usize,
     /// m/z merge tolerance - peaks within this distance are merged
-    pub mz_merge_tolerance: f64,
+    pub mz_merge_tolerance: f32,
 }
 
 impl Default for DiaSimplifierConfig {
@@ -91,8 +91,8 @@ impl DiaSimplifierConfig {
 struct PeakelDataPoint {
     /// The spectrum ID this data point belongs to
     spectrum_id: i64,
-    /// The m/z value at this data point
-    mz: f64,
+    /// The m/z value at this data point (32-bit for centroid data)
+    mz: f32,
     /// The intensity at this data point
     intensity: f32,
     /// The precursor/isolation window target m/z
@@ -117,8 +117,8 @@ pub struct SimplifiedSpectrum {
     pub isolation_lower: f64,
     /// Isolation window upper bound
     pub isolation_upper: f64,
-    /// m/z values (sorted)
-    pub mz_array: Vec<f64>,
+    /// m/z values (sorted) - 32-bit for centroid data
+    pub mz_array: Vec<f32>,
     /// Intensity values
     pub intensity_array: Vec<f32>,
 }
@@ -429,7 +429,7 @@ fn extract_peakel_data_points(
 fn group_into_spectra(
     data_points: Vec<PeakelDataPoint>,
     spectrum_info: &HashMap<i64, &SpectrumHeader>,
-    mz_merge_tolerance: f64,
+    mz_merge_tolerance: f32,
 ) -> Vec<SimplifiedSpectrum> {
     // Group by (spectrum_id, precursor_mz)
     let mut groups: BTreeMap<(i64, OrderedFloat<f64>), Vec<PeakelDataPoint>> =
@@ -448,14 +448,15 @@ fn group_into_spectra(
         points.sort_by(|a, b| a.mz.partial_cmp(&b.mz).unwrap());
 
         // Merge duplicate m/z values (sum intensities)
-        let mut merged_mz: Vec<f64> = Vec::new();
+        let mut merged_mz: Vec<f32> = Vec::new();
         let mut merged_intensity: Vec<f32> = Vec::new();
 
         for dp in &points {
+            let dp_mz_f32 = dp.mz as f32;
             if merged_mz.is_empty()
-                || (dp.mz - merged_mz.last().unwrap()).abs() > mz_merge_tolerance
+                || (dp_mz_f32 - merged_mz.last().unwrap()).abs() > mz_merge_tolerance
             {
-                merged_mz.push(dp.mz);
+                merged_mz.push(dp_mz_f32);
                 merged_intensity.push(dp.intensity);
             } else {
                 // Same m/z, sum intensities
@@ -615,7 +616,7 @@ fn convert_simplified_to_spectrum_simple(
     let (base_peak_mz, base_peak_intensity) = simplified.mz_array.iter()
         .zip(&simplified.intensity_array)
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(&mz, &intensity)| (mz, intensity))
+        .map(|(&mz, &intensity)| (mz as f64, intensity))
         .unwrap_or((0.0, 0.0));
 
     let precursor_list = generate_dia_precursor_list_xml_asymmetric(

@@ -56,7 +56,7 @@ use super::detection::{
 #[derive(Clone, Debug)]
 pub struct Ms1PeakelConfig {
     /// m/z tolerance in PPM for XIC extraction
-    pub mz_tol_ppm: f64,
+    pub mz_tol_ppm: f32,
     /// Minimum intensity threshold for peak detection
     pub min_intensity: f32,
     /// Minimum number of points per peakel
@@ -99,7 +99,7 @@ impl Default for Ms1PeakelConfig {
 // ============================================================================
 
 impl PeakelDetectionConfig for Ms1PeakelConfig {
-    #[inline] fn mz_tol_ppm(&self) -> f64 { self.mz_tol_ppm }
+    #[inline] fn mz_tol_ppm(&self) -> f32 { self.mz_tol_ppm }
     #[inline] fn min_intensity(&self) -> f32 { self.min_intensity }
     #[inline] fn min_peaks(&self) -> usize { self.min_peaks }
     #[inline] fn max_consecutive_gaps(&self) -> usize { self.max_consecutive_gaps }
@@ -144,17 +144,17 @@ struct PeakListRef {
     #[allow(dead_code)] // Kept for debugging and Scala compatibility
     spectrum_id: i64,
     time: f32,
-    /// m/z values (Arc-wrapped for efficient sharing across run slices)
-    mz_values: Arc<Vec<f64>>,
+    /// m/z values (Arc-wrapped for efficient sharing across run slices) - 32-bit for centroid data
+    mz_values: Arc<Vec<f32>>,
     /// Intensity values (Arc-wrapped)
     intensity_values: Arc<Vec<f32>>,
     /// Cached min/max m/z for fast range checks
-    min_mz: f64,
-    max_mz: f64,
+    min_mz: f32,
+    max_mz: f32,
 }
 
 impl PeakListRef {
-    fn new(spectrum_id: i64, time: f32, mz_values: Vec<f64>, intensity_values: Vec<f32>) -> Self {
+    fn new(spectrum_id: i64, time: f32, mz_values: Vec<f32>, intensity_values: Vec<f32>) -> Self {
         let min_mz = mz_values.first().copied().unwrap_or(0.0);
         let max_mz = mz_values.last().copied().unwrap_or(0.0);
         Self {
@@ -179,7 +179,7 @@ impl PeakListRef {
 
     /// Find nearest peak using binary search.
     /// Returns (mz, intensity, peak_idx) if found within tolerance.
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64) -> Option<(f64, f32, usize)> {
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32) -> Option<(f32, f32, usize)> {
         if self.is_empty() {
             return None;
         }
@@ -189,8 +189,8 @@ impl PeakListRef {
             return None;
         }
 
-        // Use common binary search implementation
-        find_nearest_peak_from_slices(&self.mz_values, &self.intensity_values, target_mz, mz_tol_da)
+        // Use common binary search implementation (deref Arc to get &[f32])
+        find_nearest_peak_from_slices(&self.mz_values[..], &self.intensity_values[..], target_mz, mz_tol_da)
     }
 }
 
@@ -215,9 +215,9 @@ impl PeakListTriplet {
     ///
     /// Optimized to search center first, then edges based on result (Scala optimization).
     /// Returns (mz, intensity, peaklist_idx, peak_idx) if found.
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64) -> Option<(f64, f32, usize, usize)> {
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32) -> Option<(f32, f32, usize, usize)> {
         let mut min_mz_diff = mz_tol_da;
-        let mut result: Option<(f64, f32, usize, usize)> = None;
+        let mut result: Option<(f32, f32, usize, usize)> = None;
 
         // Scala optimization: search center (index 1) first
         if let Some(ref pkl) = self.peak_lists[1] {
@@ -295,7 +295,7 @@ pub struct RunSlicePeakData {
     /// Peak coordinates from CURRENT slice
     peak_coords: Vec<PeakCoord>,
     /// Peak metadata: (mz, intensity, time)
-    peak_metadata: Vec<(f64, f32, f32)>,
+    peak_metadata: Vec<(f32, f32, f32)>,
     /// Indices sorted by descending intensity
     sorted_indices: Vec<usize>,
 }
@@ -307,7 +307,7 @@ pub struct RunSlicePeakData {
 impl SpectrumPeakLookup for SpectrumWithTriplet {
     type PeakKey = Ms1PeakKey;
     
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64, spectrum_idx: usize) -> Option<(f64, f32, Self::PeakKey)> {
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32, spectrum_idx: usize) -> Option<(f32, f32, Self::PeakKey)> {
         self.triplet.find_nearest_peak(target_mz, mz_tol_da)
             .map(|(mz, intensity, pkl_idx, peak_idx)| {
                 (mz, intensity, Ms1PeakKey::new(spectrum_idx, pkl_idx, peak_idx))
@@ -334,7 +334,7 @@ struct IndexedSpectrumWithTriplet<'a> {
 impl<'a> SpectrumPeakLookup for IndexedSpectrumWithTriplet<'a> {
     type PeakKey = Ms1PeakKey;
     
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64, _spectrum_idx: usize) -> Option<(f64, f32, Self::PeakKey)> {
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32, _spectrum_idx: usize) -> Option<(f32, f32, Self::PeakKey)> {
         self.spectrum.triplet.find_nearest_peak(target_mz, mz_tol_da)
             .map(|(mz, intensity, pkl_idx, peak_idx)| {
                 (mz, intensity, Ms1PeakKey::new(self.spectrum_idx, pkl_idx, peak_idx))
@@ -354,12 +354,12 @@ impl SortedPeaksProvider for RunSlicePeakData {
     type PeakKey = Ms1PeakKey;
     type SpectrumLookup = SpectrumWithTriplet;
     
-    fn sorted_peaks_iter(&self) -> impl Iterator<Item = (f64, f32, usize, Self::PeakKey)> {
+    fn sorted_peaks_iter(&self) -> impl Iterator<Item = (f32, f32, usize, Self::PeakKey)> {
         self.sorted_indices.iter().map(move |&original_idx| {
             let coord = self.peak_coords[original_idx];
             let (mz, intensity, _time) = self.peak_metadata[original_idx];
             let peak_key = Ms1PeakKey::new(coord.spectrum_idx, 1, coord.peak_idx); // pkl_idx=1 for current slice
-            (mz, intensity, coord.spectrum_idx, peak_key)
+            (mz as f32, intensity, coord.spectrum_idx, peak_key)
         })
     }
     
@@ -371,8 +371,9 @@ impl SortedPeaksProvider for RunSlicePeakData {
         self.spectra.len()
     }
     
-    fn is_apex_in_valid_mz_range(&self, apex_mz: f64) -> bool {
-        apex_mz >= self.current_rs_header.begin_mz && apex_mz <= self.current_rs_header.end_mz
+    fn is_apex_in_valid_mz_range(&self, apex_mz: f32) -> bool {
+        let apex_mz_f64 = apex_mz as f64;
+        apex_mz_f64 >= self.current_rs_header.begin_mz && apex_mz_f64 <= self.current_rs_header.end_mz
     }
     
     fn calc_intensity_threshold(&self, detector_config: &impl PeakelDetectionConfig) -> f32 {

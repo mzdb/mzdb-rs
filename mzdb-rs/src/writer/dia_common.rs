@@ -168,9 +168,9 @@ where
 ///
 /// # Returns
 /// Tuple of (min_mz, max_mz) as f64
-pub fn calculate_mz_bounds_from_arrays<'a, T, F>(items: &'a [T], get_mz_array: F) -> (f64, f64)
+pub fn calculate_mz_bounds_from_arrays<T, F>(items: &[T], get_mz_array: F) -> (f64, f64)
 where
-    F: Fn(&'a T) -> &'a [f64],
+    F: Fn(&T) -> &[f64],
 {
     let min_mz = items
         .iter()
@@ -191,12 +191,12 @@ where
 ///
 /// # Returns
 /// Tuple of (base_peak_mz, base_peak_intensity), or (0.0, 0.0) if empty
-pub fn find_base_peak(mz_array: &[f64], intensity_array: &[f32]) -> (f64, f32) {
+pub fn find_base_peak(mz_array: &[f32], intensity_array: &[f32]) -> (f64, f32) {
     mz_array
         .iter()
         .zip(intensity_array.iter())
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-        .map(|(&mz, &int)| (mz, int))
+        .map(|(&mz, &int)| (mz as f64, int))
         .unwrap_or((0.0, 0.0))
 }
 
@@ -232,7 +232,7 @@ pub struct DiaSpectrumParams {
     pub title: String,
     pub cycle: i32,
     pub time: f32,
-    pub tic: f64,
+    pub tic: f32,
     pub base_peak_mz: f64,
     pub base_peak_intensity: f32,
     pub precursor_mz: f64,

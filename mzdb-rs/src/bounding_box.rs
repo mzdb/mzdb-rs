@@ -131,8 +131,8 @@ pub fn index_bbox(bbox: &BoundingBox, cache: &DataEncodingsCache) -> Result<Boun
 #[allow(dead_code)] // Public API for library consumers
 #[derive(Clone, Debug, Default)]
 pub struct SpectrumParseBuffer {
-    /// Buffer for m/z values
-    pub mz_array: Vec<f64>,
+    /// Buffer for m/z values (32-bit for centroid data)
+    pub mz_array: Vec<f32>,
     /// Buffer for intensity values
     pub intensity_array: Vec<f32>,
     /// Buffer for left half-width at half-maximum (fitted mode only)
@@ -220,8 +220,8 @@ fn read_spectrum_slice_data(
     peaks_start_pos: usize,
     peaks_count: usize,
     de: &DataEncoding,
-    min_mz: Option<f64>,
-    max_mz: Option<f64>,
+    min_mz: Option<f32>,
+    max_mz: Option<f32>,
 ) -> Result<SpectrumData> {
     let data_mode = de.mode;
     let pe = de.peak_encoding;
@@ -259,15 +259,16 @@ fn read_spectrum_slice_data(
         filtered_peaks_count = peaks_count;
         filtered_peaks_start_idx = peaks_start_pos;
     } else {
-        let max_mz_threshold = max_mz.unwrap_or(f64::MAX);
+        let max_mz_threshold = max_mz.unwrap_or(f32::MAX);
 
         let mut i = 0;
         while i < peaks_count {
             let peak_start_pos: usize = peaks_start_pos + i * peak_size;
             let (mz, _offset) = bytes_to_double(peak_start_pos, pe == PeakEncoding::LowRes);
+            let mz_f32 = mz as f32;
 
             if let Some(min) = min_mz
-                && mz >= min && mz <= max_mz_threshold
+                && mz_f32 >= min && mz_f32 <= max_mz_threshold
             {
                 filtered_peaks_count += 1;
                 if filtered_peaks_start_idx == 0 {
@@ -278,7 +279,7 @@ fn read_spectrum_slice_data(
         }
     }
 
-    let mut mz_array: Vec<f64> = Vec::with_capacity(filtered_peaks_count);
+    let mut mz_array: Vec<f32> = Vec::with_capacity(filtered_peaks_count);
     let mut intensity_array: Vec<f32> = Vec::with_capacity(filtered_peaks_count);
     let mut lwhm_array: Vec<f32> = if data_mode == Fitted {
         Vec::with_capacity(filtered_peaks_count)
@@ -317,8 +318,9 @@ fn read_spectrum_slice_data(
     let mut peak_idx = 0;
     while peak_idx < filtered_peaks_count {
         let peak_bytes_index = filtered_peaks_start_idx + peak_idx * peak_size;
+        // Read m/z - convert to f32 regardless of source precision
         let (mz, offset) = bytes_to_double(peak_bytes_index, pe == PeakEncoding::LowRes);
-        mz_array.push(mz);
+        mz_array.push(mz as f32);
 
         let (intensity, _offset) =
             bytes_to_float(peak_bytes_index + offset, pe != PeakEncoding::NoLoss);
@@ -353,8 +355,8 @@ pub fn read_spectrum_slice_into_buffer(
     bbox_index: &BoundingBoxIndex,
     data_encoding: &DataEncoding,
     spectrum_slice_idx: usize,
-    min_mz: Option<f64>,
-    max_mz: Option<f64>,
+    min_mz: Option<f32>,
+    max_mz: Option<f32>,
     buffer: &mut SpectrumParseBuffer,
 ) -> Result<()> {
     buffer.clear();
@@ -410,16 +412,18 @@ pub fn read_spectrum_slice_into_buffer(
         let peak_start = peaks_start_pos + i * peak_size;
 
         let (mz, mz_size) = bytes_to_double(peak_start, is_low_res, &mut float_bytes, &mut double_bytes);
+        let mz_f32 = mz as f32;
 
         // Apply m/z filter
         if let Some(min) = min_mz {
-            if mz < min { continue; }
+            if mz_f32 < min { continue; }
         }
         if let Some(max) = max_mz {
-            if mz > max { continue; }
+            if mz_f32 > max { continue; }
         }
 
-        buffer.mz_array.push(mz);
+        // Store m/z as f32
+        buffer.mz_array.push(mz_f32);
 
         let intensity = bytes_to_float(peak_start + mz_size, &mut float_bytes);
         buffer.intensity_array.push(intensity);
@@ -441,8 +445,8 @@ pub fn read_spectrum_slice_data_at(
     bbox_index: &BoundingBoxIndex,
     data_encoding: &DataEncoding,
     spectrum_slice_idx: usize,
-    min_mz: Option<f64>,
-    max_mz: Option<f64>,
+    min_mz: Option<f32>,
+    max_mz: Option<f32>,
 ) -> Result<SpectrumData> {
     let peaks_count = bbox_index.peaks_counts[spectrum_slice_idx];
     let peaks_start_pos = bbox_index.slices_indexes[spectrum_slice_idx] + 8;
@@ -473,7 +477,7 @@ pub fn merge_spectrum_slices(
 
     let data_mode = data_encoding.mode;
 
-    let mut mz_array: Vec<f64> = Vec::with_capacity(peaks_count);
+    let mut mz_array: Vec<f32> = Vec::with_capacity(peaks_count);
     let mut intensity_array: Vec<f32> = Vec::with_capacity(peaks_count);
     let mut lwhm_array: Vec<f32> = if data_mode == Fitted {
         Vec::with_capacity(peaks_count)

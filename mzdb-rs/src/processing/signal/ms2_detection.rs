@@ -94,7 +94,7 @@ impl DiaMs2PeakelRecord {
     
     /// Get the fragment m/z at apex
     #[inline]
-    pub fn mz(&self) -> f64 {
+    pub fn mz(&self) -> f32 {
         self.data.calc_mz()
     }
     
@@ -168,7 +168,7 @@ impl HasPeakelData for DiaMs2PeakelRecord {
         self.data.elution_times()
     }
     
-    fn mz_values(&self) -> &[f64] {
+    fn mz_values(&self) -> &[f32] {
         self.data.mz_values()
     }
     
@@ -198,8 +198,8 @@ pub struct IndexedMs2Spectrum {
     spectrum_idx: usize,
     spectrum_id: i64,
     time: f32,
-    /// m/z values sorted by m/z (for binary search)
-    mz_values: Vec<f64>,
+    /// m/z values sorted by m/z (for binary search) - 32-bit for centroid data
+    mz_values: Vec<f32>,
     /// Intensity values (parallel to mz_values)
     intensity_values: Vec<f32>,
     /// Original peak indices in source spectrum (parallel to mz_values)
@@ -209,7 +209,7 @@ pub struct IndexedMs2Spectrum {
 impl IndexedMs2Spectrum {
     /// Find the nearest peak within m/z tolerance using binary search.
     /// Returns (mz, intensity, original_peak_idx) if found.
-    fn find_nearest_peak_internal(&self, target_mz: f64, mz_tol_da: f64) -> Option<(f64, f32, usize)> {
+    fn find_nearest_peak_internal(&self, target_mz: f32, mz_tol_da: f32) -> Option<(f32, f32, usize)> {
         if self.mz_values.is_empty() {
             return None;
         }
@@ -224,7 +224,7 @@ impl IndexedMs2Spectrum {
             return None;
         }
         
-        let mut best: Option<(f64, f32, usize)> = None;
+        let mut best: Option<(f32, f32, usize)> = None;
         let mut min_diff = mz_tol_da;
         
         for idx in start_idx..self.mz_values.len() {
@@ -252,7 +252,7 @@ impl IndexedMs2Spectrum {
 #[derive(Clone, Debug)]
 pub struct DiaMs2PeakelConfig {
     /// m/z tolerance in PPM for XIC extraction
-    pub mz_tol_ppm: f64,
+    pub mz_tol_ppm: f32,
     /// Minimum intensity threshold for peak detection (used during spectrum loading)
     pub min_intensity: f32,
     /// Minimum number of points per peakel
@@ -296,7 +296,7 @@ impl Default for DiaMs2PeakelConfig {
 // ============================================================================
 
 impl PeakelDetectionConfig for DiaMs2PeakelConfig {
-    #[inline] fn mz_tol_ppm(&self) -> f64 { self.mz_tol_ppm }
+    #[inline] fn mz_tol_ppm(&self) -> f32 { self.mz_tol_ppm }
     #[inline] fn min_intensity(&self) -> f32 { self.min_intensity }
     #[inline] fn min_peaks(&self) -> usize { self.min_peaks }
     #[inline] fn max_consecutive_gaps(&self) -> usize { self.max_consecutive_gaps }
@@ -325,7 +325,7 @@ impl Ms2PeakKey {
 impl SpectrumPeakLookup for IndexedMs2Spectrum {
     type PeakKey = Ms2PeakKey;
     
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64, spectrum_idx: usize) -> Option<(f64, f32, Self::PeakKey)> {
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32, spectrum_idx: usize) -> Option<(f32, f32, Self::PeakKey)> {
         self.find_nearest_peak_internal(target_mz, mz_tol_da)
             .map(|(mz, intensity, peak_idx)| {
                 (mz, intensity, Ms2PeakKey::new(spectrum_idx, peak_idx))
@@ -349,7 +349,7 @@ pub struct IsolationWindowPeakData {
     /// Indexed spectra sorted by time
     spectra: Vec<IndexedMs2Spectrum>,
     /// All peaks: (mz, intensity, spectrum_idx, peak_idx)
-    all_peaks: Vec<(f64, f32, usize, usize)>,
+    all_peaks: Vec<(f32, f32, usize, usize)>,
     /// Indices sorted by descending intensity
     sorted_indices: Vec<usize>,
 }
@@ -358,7 +358,7 @@ impl IsolationWindowPeakData {
     /// Create peak data from indexed spectra
     pub fn new(spectra: Vec<IndexedMs2Spectrum>) -> Self {
         // Collect all peaks from separate vectors
-        let mut all_peaks: Vec<(f64, f32, usize, usize)> = Vec::new();
+        let mut all_peaks: Vec<(f32, f32, usize, usize)> = Vec::new();
         for (spectrum_idx, spectrum) in spectra.iter().enumerate() {
             for (i, (&mz, &intensity)) in spectrum.mz_values.iter()
                 .zip(spectrum.intensity_values.iter())
@@ -387,7 +387,7 @@ impl SortedPeaksProvider for IsolationWindowPeakData {
     type PeakKey = Ms2PeakKey;
     type SpectrumLookup = IndexedMs2Spectrum;
     
-    fn sorted_peaks_iter(&self) -> impl Iterator<Item = (f64, f32, usize, Self::PeakKey)> {
+    fn sorted_peaks_iter(&self) -> impl Iterator<Item = (f32, f32, usize, Self::PeakKey)> {
         self.sorted_indices.iter().map(move |&idx| {
             let (mz, intensity, spectrum_idx, peak_idx) = self.all_peaks[idx];
             let peak_key = Ms2PeakKey::new(spectrum_idx, peak_idx);
@@ -403,7 +403,7 @@ impl SortedPeaksProvider for IsolationWindowPeakData {
         self.spectra.len()
     }
     
-    fn is_apex_in_valid_mz_range(&self, _apex_mz: f64) -> bool {
+    fn is_apex_in_valid_mz_range(&self, _apex_mz: f32) -> bool {
         // MS2: no m/z range filtering (all peaks in isolation window are valid)
         true
     }
@@ -557,7 +557,7 @@ impl DiaMs2PeakelDetector {
 
         for (idx, spectrum) in spectra.iter().enumerate() {
             // Collect peaks that pass intensity threshold into separate vectors
-            let mut mz_values: Vec<f64> = Vec::new();
+            let mut mz_values: Vec<f32> = Vec::new();
             let mut intensity_values: Vec<f32> = Vec::new();
             let mut peak_indices: Vec<usize> = Vec::new();
             

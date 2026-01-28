@@ -52,9 +52,9 @@ pub struct DiaConversionOptions {
     /// DIA window width in Da
     pub window_width: f64,
     /// m/z tolerance for peak merging in Da
-    pub mz_tolerance: f64,
+    pub mz_tolerance: f32,
     /// Precursor m/z tolerance in ppm for peakel matching
-    pub precursor_tolerance_ppm: f64,
+    pub precursor_tolerance_ppm: f32,
 }
 
 impl Default for DiaConversionOptions {
@@ -84,13 +84,13 @@ impl DiaConversionOptions {
     }
 
     /// Set m/z tolerance for peak merging
-    pub fn with_mz_tolerance(mut self, tolerance: f64) -> Self {
+    pub fn with_mz_tolerance(mut self, tolerance: f32) -> Self {
         self.mz_tolerance = tolerance;
         self
     }
 
     /// Set precursor m/z tolerance in ppm
-    pub fn with_precursor_tolerance_ppm(mut self, tolerance: f64) -> Self {
+    pub fn with_precursor_tolerance_ppm(mut self, tolerance: f32) -> Self {
         self.precursor_tolerance_ppm = tolerance;
         self
     }
@@ -103,8 +103,8 @@ impl DiaConversionOptions {
 /// Simplified spectrum data for conversion
 #[derive(Debug, Clone)]
 pub struct SimpleSpectrumData {
-    /// m/z values
-    pub mz_array: Vec<f64>,
+    /// m/z values (32-bit for centroid data)
+    pub mz_array: Vec<f32>,
     /// Intensity values
     pub intensity_array: Vec<f32>,
 }
@@ -138,7 +138,7 @@ impl Default for SimpleSpectrumData {
 }
 
 impl DataPointProvider for SimpleSpectrumData {
-    fn mz_array(&self) -> &[f64] {
+    fn mz_array(&self) -> &[f32] {
         &self.mz_array
     }
 
@@ -161,7 +161,7 @@ pub struct SimpleSpectrumHeader {
     pub time: f32,
     pub ms_level: i32,
     pub activation_type: Option<String>,
-    pub tic: f64,
+    pub tic: f32,
     pub base_peak_mz: f64,
     pub base_peak_intensity: f32,
     pub main_precursor_mz: Option<f64>,
@@ -283,8 +283,8 @@ pub fn group_spectra_by_cycle_and_window<'a>(
 /// Merge peaks from multiple spectra
 ///
 /// Peaks within `mz_tolerance` Da are merged by summing intensities.
-pub fn merge_peaks(spectra: &[&RescaledSpectrum], mz_tolerance: f64) -> SimpleSpectrumData {
-    let mut all_peaks: Vec<(f64, f32)> = Vec::new();
+pub fn merge_peaks(spectra: &[&RescaledSpectrum], mz_tolerance: f32) -> SimpleSpectrumData {
+    let mut all_peaks: Vec<(f32, f32)> = Vec::new();
 
     for spectrum in spectra {
         for (mz, intensity) in spectrum
@@ -311,8 +311,8 @@ pub fn merge_peaks(spectra: &[&RescaledSpectrum], mz_tolerance: f64) -> SimpleSp
     for &(mz, intensity) in all_peaks.iter().skip(1) {
         if mz - current_mz <= mz_tolerance {
             let total_intensity = current_intensity + intensity;
-            current_mz = (current_mz * current_intensity as f64 + mz * intensity as f64)
-                / total_intensity as f64;
+            // Weighted average for m/z
+            current_mz = (current_mz * current_intensity + mz * intensity) / total_intensity;
             current_intensity = total_intensity;
         } else {
             merged.mz_array.push(current_mz);
@@ -333,7 +333,7 @@ pub fn create_merged_dia_spectra(
     groups: &HashMap<(i32, OrderedFloat<f64>), Vec<&RescaledSpectrum>>,
     windows: &[DiaWindow],
     cycle_times: &HashMap<i32, f32>,
-    mz_tolerance: f64,
+    mz_tolerance: f32,
 ) -> Vec<MergedDiaSpectrum> {
     let mut merged_spectra = Vec::new();
 
@@ -650,6 +650,8 @@ fn parse_spectrum_from_bb(bb_data: &[u8], spectrum_id: i64) -> Result<SimpleSpec
                     break;
                 }
 
+                // Note: Reading f64 from existing mzDB files with HighRes encoding
+                // and converting to f32 for new centroid-only format
                 let mz = f64::from_le_bytes([
                     bb_data[offset],
                     bb_data[offset + 1],
@@ -670,7 +672,7 @@ fn parse_spectrum_from_bb(bb_data: &[u8], spectrum_id: i64) -> Result<SimpleSpec
                 ]);
                 offset += 4;
 
-                data.mz_array.push(mz);
+                data.mz_array.push(mz as f32);
                 data.intensity_array.push(intensity);
             }
             break;
@@ -688,7 +690,7 @@ fn process_ms2_spectra(
     ms2_headers: &[SimpleSpectrumHeader],
     peakels: &[ExtendedPeakel],
     peakel_index: &HashMap<i64, Vec<usize>>,
-    tolerance_ppm: f64,
+    tolerance_ppm: f32,
     spectrum_to_cycle: &HashMap<i64, i32>,
 ) -> Result<Vec<RescaledSpectrum>> {
     let mut rescaled_spectra = Vec::new();
@@ -711,7 +713,7 @@ fn process_ms2_spectra(
         for &peakel_idx in candidate_indices {
             let peakel = &peakels[peakel_idx];
 
-            if !peakel.contains_mz(precursor_mz, tolerance_ppm) {
+            if !peakel.contains_mz(precursor_mz as f32, tolerance_ppm) {
                 continue;
             }
 
@@ -789,7 +791,7 @@ fn process_ms2_spectra(
                 original_spectrum_id: header.id,
                 peakel_id: *peakel_id,
                 target_cycle,
-                precursor_mz: peakel.mz,
+                precursor_mz: peakel.mz as f64,
                 scale_factor,
                 data: scaled_data,
             });
@@ -922,11 +924,11 @@ fn write_dia_mzdb(
                 spectrum.cycle, spectrum.window_min_mz, spectrum.window_max_mz
             );
 
-            let tic: f64 = spectrum
+            let tic: f32 = spectrum
                 .data
                 .intensity_array
                 .iter()
-                .map(|&i| i as f64)
+                .map(|&i| i)
                 .sum();
 
             let (base_peak_mz, base_peak_intensity) = find_base_peak(

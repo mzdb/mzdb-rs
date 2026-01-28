@@ -375,8 +375,8 @@ impl MzDbReader {
     /// Get an extracted ion chromatogram (XIC)
     pub fn get_xic(
         &self,
-        mz: f64,
-        mz_tol_ppm: f64,
+        mz: f32,
+        mz_tol_ppm: f32,
         min_rt: Option<f32>,
         max_rt: Option<f32>,
         method: XicMethod,

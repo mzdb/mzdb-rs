@@ -79,7 +79,7 @@ fn insert_spectrum_impl(
         bb_first_spectrum_id = 0;
     } else {
         // Get first m/z value and round to BB boundary
-        let first_mz = sd.get_mz_at(0)?;
+        let first_mz = sd.get_mz_at(0)? as f64;
         
         // Calculate initial m/z bounds based on MS level and acquisition mode
         // 
@@ -130,7 +130,7 @@ fn insert_spectrum_impl(
         let mut current_bb = None;
         
         while i < peaks_count as usize {
-            let mz = sd.get_mz_at(i)?;
+            let mz = sd.get_mz_at(i)? as f64;
             
             if i == 0 {
                 let bb = get_bb_with_next_spectrum_slice(

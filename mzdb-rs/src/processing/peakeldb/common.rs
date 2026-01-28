@@ -56,10 +56,13 @@ impl PeakelSerializer {
     /// Creates a Peakel with gap_count=0 and no HWHM data.
     /// Note: gap_count and other metadata come from database columns, not the msgpack blob.
     pub fn from_msgpack(bytes: &[u8]) -> Result<Peakel> {
-        let (spectrum_ids, elution_times, mz_values, intensity_values): 
+        let (spectrum_ids, elution_times, mz_values_f64, intensity_values):
             (Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>) = 
             rmp_serde::from_slice(bytes)
                 .map_err(|e| anyhow_ext::anyhow!("msgpack deserialization error: {}", e))?;
+
+        // mz_values: f64 in peakelDB, f32 in memory
+        let mz_values: Vec<f32> = mz_values_f64.into_iter().map(|mz| mz as f32).collect();
         
         Ok(Peakel::from_vectors(
             spectrum_ids,
@@ -90,8 +93,8 @@ impl PeakelSerializer {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtendedPeakel {
     pub id: i64,
-    /// Weighted average m/z
-    pub mz: f64,
+    /// Weighted average m/z (32-bit for centroid data)
+    pub mz: f32,
     /// Elution time at apex (seconds)
     pub elution_time: f32,
     /// Total duration (seconds)
@@ -127,7 +130,7 @@ impl ExtendedPeakel {
     /// Create a new MS1 ExtendedPeakel
     pub fn new(
         id: i64,
-        mz: f64,
+        mz: f32,
         elution_time: f32,
         duration: f32,
         gap_count: i32,
@@ -162,7 +165,7 @@ impl ExtendedPeakel {
     /// Create an MS2 DIA peakel with isolation window info
     pub fn new_ms2_dia(
         id: i64,
-        mz: f64,
+        mz: f32,
         elution_time: f32,
         duration: f32,
         gap_count: i32,
@@ -208,7 +211,7 @@ impl ExtendedPeakel {
     }
 
     /// Check if peakel's m/z matches a given m/z within ppm tolerance
-    pub fn contains_mz(&self, mz: f64, tolerance_ppm: f64) -> bool {
+    pub fn contains_mz(&self, mz: f32, tolerance_ppm: f32) -> bool {
         let tolerance = self.mz * tolerance_ppm / 1_000_000.0;
         (self.mz - mz).abs() <= tolerance
     }
@@ -234,7 +237,7 @@ impl HasPeakelData for ExtendedPeakel {
         self.data.elution_times()
     }
 
-    fn mz_values(&self) -> &[f64] {
+    fn mz_values(&self) -> &[f32] {
         self.data.mz_values()
     }
 

@@ -24,7 +24,7 @@ use crate::model::DataMode::Fitted;
 /// `SimpleSpectrumData` can implement this trait.
 pub trait DataPointProvider {
     /// Get a reference to the m/z values array
-    fn mz_array(&self) -> &[f64];
+    fn mz_array(&self) -> &[f32];
     
     /// Get a reference to the intensity values array
     fn intensity_array(&self) -> &[f32];
@@ -118,8 +118,8 @@ pub struct FittedPeak {
 /// A peak in an extracted ion chromatogram (XIC)
 #[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct XicPeak {
-    /// m/z value
-    pub mz: f64,
+    /// m/z value (32-bit for centroid data)
+    pub mz: f32,
     /// Intensity value
     pub intensity: f32,
     /// Retention time
@@ -128,7 +128,7 @@ pub struct XicPeak {
 
 impl XicPeak {
     /// Create a new XIC peak
-    pub fn new(mz: f64, intensity: f32, rt: f32) -> Self {
+    pub fn new(mz: f32, intensity: f32, rt: f32) -> Self {
         Self { mz, intensity, rt }
     }
 }
@@ -247,8 +247,8 @@ pub struct SpectrumData {
     pub data_encoding: DataEncoding,
     /// Number of peaks
     pub peaks_count: usize,
-    /// m/z values array
-    pub mz_array: Vec<f64>,
+    /// m/z values array (32-bit for centroid data)
+    pub mz_array: Vec<f32>,
     /// Intensity values array
     pub intensity_array: Vec<f32>,
     /// Left half-width at half-maximum (for fitted peaks)
@@ -261,7 +261,7 @@ impl SpectrumData {
     /// Create new spectrum data
     pub fn new(
         data_encoding: DataEncoding,
-        mz_list: Vec<f64>,
+        mz_list: Vec<f32>,
         intensity_list: Vec<f32>,
         left_hwhm_list: Option<Vec<f32>>,
         right_hwhm_list: Option<Vec<f32>>,
@@ -277,14 +277,9 @@ impl SpectrumData {
         }
     }
 
-    /// Convert ppm tolerance to Daltons at a given m/z
-    fn ppm_to_da(&self, mz: f64, ppm: f64) -> f64 {
-        mz * ppm / 1_000_000.0
-    }
-
     /// Get m/z value at a specific index
     #[cfg(feature = "writer")]
-    pub fn get_mz_at(&self, index: usize) -> Result<f64, anyhow_ext::Error> {
+    pub fn get_mz_at(&self, index: usize) -> Result<f32, anyhow_ext::Error> {
         self.mz_array.get(index)
             .copied()
             .ok_or_else(|| anyhow!("Index {} out of bounds for m/z array", index))
@@ -311,12 +306,12 @@ impl SpectrumData {
     }
 
     /// Find the nearest peak to a given m/z within tolerance
-    pub fn get_nearest_peak(&self, mz: f64, mz_tol_ppm: f64, rt: f32) -> Option<XicPeak> {
+    pub fn get_nearest_peak(&self, mz: f32, mz_tol_ppm: f32, rt: f32) -> Option<XicPeak> {
         if self.peaks_count == 0 {
             return None;
         }
 
-        let mz_da = self.ppm_to_da(mz, mz_tol_ppm);
+        let mz_da = mz * mz_tol_ppm / 1_000_000.0;
         let idx = self
             .mz_array
             .binary_search_by(|&probe| probe.partial_cmp(&mz).unwrap_or(std::cmp::Ordering::Equal))
@@ -361,7 +356,7 @@ impl SpectrumData {
 }
 
 impl DataPointProvider for SpectrumData {
-    fn mz_array(&self) -> &[f64] {
+    fn mz_array(&self) -> &[f32] {
         &self.mz_array
     }
     

@@ -23,7 +23,7 @@ use crate::processing::Peakel;
 
 /// Common configuration for peakel detection algorithms.
 pub trait PeakelDetectionConfig: Clone + Send + Sync {
-    fn mz_tol_ppm(&self) -> f64;
+    fn mz_tol_ppm(&self) -> f32;
     fn min_intensity(&self) -> f32;
     fn min_peaks(&self) -> usize;
     fn max_consecutive_gaps(&self) -> usize;
@@ -59,7 +59,7 @@ pub trait SpectrumPeakLookup {
     
     /// Find the nearest peak within m/z tolerance.
     /// The `spectrum_idx` is provided by the caller so the returned PeakKey can include it.
-    fn find_nearest_peak(&self, target_mz: f64, mz_tol_da: f64, spectrum_idx: usize) -> Option<(f64, f32, Self::PeakKey)>;
+    fn find_nearest_peak(&self, target_mz: f32, mz_tol_da: f32, spectrum_idx: usize) -> Option<(f32, f32, Self::PeakKey)>;
     fn spectrum_id(&self) -> i64;
     fn time(&self) -> f32;
 }
@@ -73,10 +73,10 @@ pub trait SortedPeaksProvider {
     type PeakKey: Eq + Hash + Clone + Copy;
     type SpectrumLookup: SpectrumPeakLookup<PeakKey = Self::PeakKey>;
     
-    fn sorted_peaks_iter(&self) -> impl Iterator<Item = (f64, f32, usize, Self::PeakKey)>;
+    fn sorted_peaks_iter(&self) -> impl Iterator<Item = (f32, f32, usize, Self::PeakKey)>;
     fn get_spectrum_lookup(&self, idx: usize) -> &Self::SpectrumLookup;
     fn spectra_count(&self) -> usize;
-    fn is_apex_in_valid_mz_range(&self, apex_mz: f64) -> bool;
+    fn is_apex_in_valid_mz_range(&self, apex_mz: f32) -> bool;
     fn calc_intensity_threshold(&self, detector_config: &impl PeakelDetectionConfig) -> f32;
 }
 
@@ -150,7 +150,7 @@ pub trait PeakelDetector {
         // XIC vectors reused across iterations
         let mut xic_times: Vec<f32> = Vec::new();
         let mut xic_intensities: Vec<f32> = Vec::new();
-        let mut xic_mz_values: Vec<f64> = Vec::new();
+        let mut xic_mz_values: Vec<f32> = Vec::new();
         let mut xic_peak_keys: Vec<<Self::PeakData as SortedPeaksProvider>::PeakKey> = Vec::new();
         let mut xic_spectrum_indices: Vec<usize> = Vec::new();
         
@@ -291,7 +291,7 @@ pub trait PeakelDetector {
     fn validate_and_build_peakel<F>(
         xic_times: &[f32],
         xic_intensities: &[f32],
-        xic_mz_values: &[f64],
+        xic_mz_values: &[f32],
         spectrum_indices: &[usize],
         apex_index_in_peakel: usize,
         config: &Self::Config,
@@ -434,11 +434,11 @@ pub fn create_peakel_finder(algorithm: &str, min_peaks: usize) -> Box<dyn Peakel
 /// # Returns
 /// `Some((mz, intensity, index))` if a peak is found within tolerance, `None` otherwise
 pub fn find_nearest_peak_from_slices(
-    mz_values: &[f64],
+    mz_values: &[f32],
     intensity_values: &[f32],
-    target_mz: f64,
-    mz_tol_da: f64,
-) -> Option<(f64, f32, usize)> {
+    target_mz: f32,
+    mz_tol_da: f32,
+) -> Option<(f32, f32, usize)> {
     if mz_values.is_empty() {
         return None;
     }
@@ -449,7 +449,7 @@ pub fn find_nearest_peak_from_slices(
     // Binary search for start position
     let start = mz_values.partition_point(|&mz| mz < min_mz);
 
-    let mut best: Option<(f64, f32, usize)> = None;
+    let mut best: Option<(f32, f32, usize)> = None;
     let mut best_diff = mz_tol_da;
 
     for i in start..mz_values.len() {
@@ -477,7 +477,7 @@ pub fn find_nearest_peak_from_slices(
 /// with the [min_mz, max_mz] range. Used by MS1 detection to skip
 /// peak lists that cannot contain matching peaks.
 #[inline]
-pub fn is_target_mz_within_range(target_mz: f64, mz_tol_da: f64, min_mz: f64, max_mz: f64) -> bool {
+pub fn is_target_mz_within_range(target_mz: f32, mz_tol_da: f32, min_mz: f32, max_mz: f32) -> bool {
     let search_min = target_mz - mz_tol_da;
     let search_max = target_mz + mz_tol_da;
     search_max >= min_mz && search_min <= max_mz

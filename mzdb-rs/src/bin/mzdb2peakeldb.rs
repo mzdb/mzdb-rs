@@ -67,7 +67,7 @@ struct Args {
 
     /// m/z tolerance in PPM for XIC extraction
     #[arg(long = "mz-tol", default_value = "10.0")]
-    mz_tol_ppm: f64,
+    mz_tol_ppm: f32,
 
     /// Minimum intensity threshold for peak detection
     #[arg(long = "min-intensity", default_value = "0.0")]
@@ -470,11 +470,11 @@ fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<
 fn print_statistics(
     title: &str,
     count: usize,
-    total_area: f64,
+    total_area: f32,
     avg_duration: f32,
     avg_peaks: f32,
-    min_mz: f64,
-    max_mz: f64,
+    min_mz: f32,
+    max_mz: f32,
     min_rt: f32,
     max_rt: f32,
 ) {
@@ -498,11 +498,11 @@ fn print_ms1_statistics(peakels: &[Peakel]) {
     print_statistics(
         "MS1 Peakel Statistics",
         peakels.len(),
-        peakels.iter().map(|p| p.area() as f64).sum(),
+        peakels.iter().map(|p| p.area()).sum(),
         peakels.iter().map(|p| p.calc_duration()).sum::<f32>() / n,
         peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
-        peakels.iter().map(|p| p.calc_mz()).fold(f64::INFINITY, f64::min),
-        peakels.iter().map(|p| p.calc_mz()).fold(f64::NEG_INFINITY, f64::max),
+        peakels.iter().map(|p| p.calc_mz()).fold(f32::INFINITY, f32::min),
+        peakels.iter().map(|p| p.calc_mz()).fold(f32::NEG_INFINITY, f32::max),
         peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::INFINITY, f32::min),
         peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::NEG_INFINITY, f32::max),
     );
@@ -518,11 +518,11 @@ fn print_ms2_statistics(peakels: &[DiaMs2PeakelRecord]) {
     print_statistics(
         "MS2 DIA Peakel Statistics",
         peakels.len(),
-        peakels.iter().map(|p| p.area() as f64).sum(),
+        peakels.iter().map(|p| p.area()).sum(),
         peakels.iter().map(|p| p.duration()).sum::<f32>() / n,
         peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
-        peakels.iter().map(|p| p.mz()).fold(f64::INFINITY, f64::min),
-        peakels.iter().map(|p| p.mz()).fold(f64::NEG_INFINITY, f64::max),
+        peakels.iter().map(|p| p.mz()).fold(f32::INFINITY, f32::min),
+        peakels.iter().map(|p| p.mz()).fold(f32::NEG_INFINITY, f32::max),
         peakels.iter().map(|p| p.elution_time()).fold(f32::INFINITY, f32::min),
         peakels.iter().map(|p| p.elution_time()).fold(f32::NEG_INFINITY, f32::max),
     );
