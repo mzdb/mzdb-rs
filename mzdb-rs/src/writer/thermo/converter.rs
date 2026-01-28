@@ -53,7 +53,7 @@ impl ConversionStats {
         
         // Update precursor m/z range for MS2+
         if scan.ms_level > 1 {
-            for &mz in &scan.precursor_mzs {
+            for &mz in &scan.precursor_mz_values() {
                 if mz < self.min_precursor_mz {
                     self.min_precursor_mz = mz;
                 }
@@ -763,11 +763,11 @@ fn convert_scan_to_spectrum(
         .unwrap_or((None, None));
 
     // Build precursor list XML for MS2+
-    let precursor_list_str = if scan.ms_level > 1 && !scan.precursor_mzs.is_empty() {
+    let precursor_list_str = if scan.ms_level > 1 && !scan.precursor_mz_values().is_empty() {
         // Get activation type and collision energy from scan event if available
         let (activation_type, collision_energy) = if let Some(event) = scan_event {
             let act = activation_type_to_string(event.activation);
-            let ce = event.collision_energies.first().copied();
+            let ce = event.collision_energies().first().copied();
             (act, ce)
         } else {
             // Fallback: try to get collision energy from scan reactions
@@ -778,7 +778,7 @@ fn convert_scan_to_spectrum(
         // Only build precursor list if we have activation info
         if !activation_type.is_empty() {
             Some(build_precursor_list(
-                &scan.precursor_mzs,
+                &scan.precursor_mz_values(),
                 charge_state,
                 collision_energy,
                 activation_type,
@@ -788,7 +788,7 @@ fn convert_scan_to_spectrum(
         } else {
             // Build minimal precursor list without activation details
             Some(build_precursor_list(
-                &scan.precursor_mzs,
+                &scan.precursor_mz_values(),
                 charge_state,
                 scan.collision_energy(),
                 "",
@@ -905,7 +905,7 @@ fn convert_scan_to_spectrum(
         tic: scan.total_ion_current as f32,
         base_peak_mz: scan.base_peak_mz,
         base_peak_intensity: scan.base_peak_intensity as f32,
-        precursor_mz: scan.precursor_mzs.first().copied(),
+        precursor_mz: scan.precursor_mz_values().first().copied(),
         precursor_charge: charge_state,
         peaks_count: peaks_count as i64,
         param_tree_str: Some(param_tree_str),
