@@ -217,7 +217,6 @@ pub fn convert_raw_to_mzdb(
     
     // Convert all scans (scan_events already retrieved above)
     let mut current_cycle: i64 = 0;
-    let mut last_ms_level: u8 = 0;
     
     for scan_num in 1..=num_scans {
         if scan_num % 100 == 0 {
@@ -227,12 +226,10 @@ pub fn convert_raw_to_mzdb(
         let scan = raw.scan(scan_num)
             .with_context(|| format!("Failed to read scan {}", scan_num))?;
         
-        // Track cycle number: increment when we see an MS1 scan
-        // (a cycle is typically MS1 followed by all its MS2/MS3 scans)
-        if scan.ms_level == 1 && (last_ms_level != 1 || scan_num == 1) {
+        // Track cycle number: increment for every MS1 scan
+        if scan.ms_level == 1 {
             current_cycle += 1;
         }
-        last_ms_level = scan.ms_level;
         
         // Get scan event for this scan (0-indexed)
         let scan_event = if scan_num <= scan_events.len() {
@@ -730,11 +727,11 @@ fn convert_scan_to_spectrum(
     cycle: i64,
     raw: &thernio::raw::RawFile,
 ) -> Result<Spectrum> {
-    // Get filter string from trailer extra
-    let filter_string = raw.filter_string(scan_num - 1);
+    // Get filter string (1-based scan number)
+    let filter_string = raw.filter_string(scan_num);
     
-    // Get ion injection time from trailer extra
-    let ion_injection_time = raw.ion_injection_time(scan_num - 1);
+    // Get ion injection time from trailer extra (1-based scan number)
+    let ion_injection_time = raw.ion_injection_time(scan_num);
     
     // Determine instrument configuration reference based on MS level
     let instrument_config_ref = if scan.ms_level == 1 {
@@ -753,9 +750,23 @@ fn convert_scan_to_spectrum(
         Some(scan.high_mz),
     )?;
 
-    // Get charge state from trailer extra (0-based index for trailer_extra)
-    let charge_state = raw.charge_state(scan_num - 1)
-        .map(|c| c as i32);
+    // Get charge state from trailer extra (1-based scan number) - only for MS2+
+   let charge_state = if scan.ms_level > 1 {
+        raw.charge_state(scan_num).map(|c| c as i32)
+    } else {
+        None
+    };
+
+    // Get monoisotopic m/z from trailer extra (1-based scan number) - only for MS2+
+    // This is preferred over the selected ion m/z as it represents the true precursor mass
+    let monoisotopic_mz = if scan.ms_level > 1 {
+        raw.monoisotopic_mz(scan_num)
+    } else {
+        None
+    };
+
+    // Use monoisotopic m/z if available, otherwise fall back to selected ion m/z
+    let precursor_mz = monoisotopic_mz.or_else(|| scan.precursor_mz_values().first().copied());
 
     // Get isolation width and offset from scan's reactions
     let (isolation_width, isolation_offset) = scan.reactions.first()
@@ -764,6 +775,9 @@ fn convert_scan_to_spectrum(
 
     // Build precursor list XML for MS2+
     let precursor_list_str = if scan.ms_level > 1 && !scan.precursor_mz_values().is_empty() {
+        // Get the isolation target m/z (center of quadrupole selection window)
+        let isolation_target_mz = scan.precursor_mz_values().first().copied().unwrap_or(0.0);
+        
         // Get activation type and collision energy from scan event if available
         let (activation_type, collision_energy) = if let Some(event) = scan_event {
             let act = activation_type_to_string(event.activation);
@@ -778,7 +792,8 @@ fn convert_scan_to_spectrum(
         // Only build precursor list if we have activation info
         if !activation_type.is_empty() {
             Some(build_precursor_list(
-                &scan.precursor_mz_values(),
+                isolation_target_mz,
+                monoisotopic_mz,  // Selected ion m/z (monoisotopic when available)
                 charge_state,
                 collision_energy,
                 activation_type,
@@ -788,7 +803,8 @@ fn convert_scan_to_spectrum(
         } else {
             // Build minimal precursor list without activation details
             Some(build_precursor_list(
-                &scan.precursor_mz_values(),
+                isolation_target_mz,
+                monoisotopic_mz,
                 charge_state,
                 scan.collision_energy(),
                 "",
@@ -890,14 +906,22 @@ fn convert_scan_to_spectrum(
 
     // Get centroid data directly - always use centroid mode
     // The centroids() method returns Option<&[LabelPeak]> with f32 m/z and f32 intensity
+    // Note: Lock mass peaks (internal calibrants) are included - they are useful for
+    // mass recalibration and QC. The Thermo library filters them by default, but we keep them.
     let centroids = scan.centroids().unwrap_or(&[]);
     let peaks_count = centroids.len();
 
     // Create spectrum header
+    // Use filter string as title if available (contains analyzer, polarity, scan mode, mass range, etc.)
+    // Fall back to simple "Scan N" format if filter string not available
+    let title = filter_string
+        .clone()
+        .unwrap_or_else(|| format!("Scan {}", scan_num));
+
     let header = SpectrumHeader {
         id: scan_num as i64,
         initial_id: scan.index as i64,
-        title: format!("Scan {}", scan_num),
+        title,
         cycle,
         time: (scan.retention_time * 60.0) as f32, // Convert minutes to seconds
         ms_level: scan.ms_level as i64,
@@ -905,7 +929,7 @@ fn convert_scan_to_spectrum(
         tic: scan.total_ion_current as f32,
         base_peak_mz: scan.base_peak_mz,
         base_peak_intensity: scan.base_peak_intensity as f32,
-        precursor_mz: scan.precursor_mz_values().first().copied(),
+        precursor_mz,
         precursor_charge: charge_state,
         peaks_count: peaks_count as i64,
         param_tree_str: Some(param_tree_str),

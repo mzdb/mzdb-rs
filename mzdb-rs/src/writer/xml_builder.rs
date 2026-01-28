@@ -142,7 +142,8 @@ pub fn build_scan_list(
 /// * `isolation_width` - Optional isolation window width in Da
 /// * `isolation_offset` - Optional isolation window offset in Da
 pub fn build_precursor_list(
-    precursor_mzs: &[f64],
+    isolation_target_mz: f64,          // Center of isolation window (selected by quadrupole)
+    selected_ion_mz: Option<f64>,      // Monoisotopic m/z (for selectedIon, defaults to isolation_target_mz)
     precursor_charge: Option<i32>,
     collision_energy: Option<f64>,
     activation_type: &str,
@@ -154,83 +155,81 @@ pub fn build_precursor_list(
     
     let mut precursor = Element::new("precursor");
     
-    // Isolation window
+    // Isolation window - uses isolation_target_mz (center of quadrupole selection)
     let mut iso_window = Element::new("isolationWindow");
     
-    if let Some(&target_mz) = precursor_mzs.first() {
-        // Target m/z
-        let mut cv_target = Element::new("cvParam");
-        cv_target.attributes.insert("cvRef".to_string(), "MS".to_string());
-        cv_target.attributes.insert("accession".to_string(), "MS:1000827".to_string());
-        cv_target.attributes.insert("name".to_string(), "isolation window target m/z".to_string());
-        cv_target.attributes.insert("value".to_string(), format!("{:.6}", target_mz));
-        cv_target.attributes.insert("unitCvRef".to_string(), "MS".to_string());
-        cv_target.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
-        cv_target.attributes.insert("unitName".to_string(), "m/z".to_string());
-        iso_window.children.push(XMLNode::Element(cv_target));
+    // Target m/z (center of isolation window) - rounded to 1 decimal place
+    let mut cv_target = Element::new("cvParam");
+    cv_target.attributes.insert("cvRef".to_string(), "MS".to_string());
+    cv_target.attributes.insert("accession".to_string(), "MS:1000827".to_string());
+    cv_target.attributes.insert("name".to_string(), "isolation window target m/z".to_string());
+    cv_target.attributes.insert("value".to_string(), format!("{:.1}", isolation_target_mz));
+    cv_target.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+    cv_target.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+    cv_target.attributes.insert("unitName".to_string(), "m/z".to_string());
+    iso_window.children.push(XMLNode::Element(cv_target));
+    
+    // Add isolation window lower/upper offset if width is available
+    if let Some(width) = isolation_width {
+        let offset = isolation_offset.unwrap_or(0.0);
+        let half_width = width / 2.0;
         
-        // Add isolation window lower/upper offset if width is available
-        if let Some(width) = isolation_width {
-            let offset = isolation_offset.unwrap_or(0.0);
-            let half_width = width / 2.0;
-            
-            // Lower offset (MS:1000828)
-            let mut cv_lower = Element::new("cvParam");
-            cv_lower.attributes.insert("cvRef".to_string(), "MS".to_string());
-            cv_lower.attributes.insert("accession".to_string(), "MS:1000828".to_string());
-            cv_lower.attributes.insert("name".to_string(), "isolation window lower offset".to_string());
-            cv_lower.attributes.insert("value".to_string(), format!("{:.6}", half_width - offset));
-            cv_lower.attributes.insert("unitCvRef".to_string(), "MS".to_string());
-            cv_lower.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
-            cv_lower.attributes.insert("unitName".to_string(), "m/z".to_string());
-            iso_window.children.push(XMLNode::Element(cv_lower));
-            
-            // Upper offset (MS:1000829)
-            let mut cv_upper = Element::new("cvParam");
-            cv_upper.attributes.insert("cvRef".to_string(), "MS".to_string());
-            cv_upper.attributes.insert("accession".to_string(), "MS:1000829".to_string());
-            cv_upper.attributes.insert("name".to_string(), "isolation window upper offset".to_string());
-            cv_upper.attributes.insert("value".to_string(), format!("{:.6}", half_width + offset));
-            cv_upper.attributes.insert("unitCvRef".to_string(), "MS".to_string());
-            cv_upper.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
-            cv_upper.attributes.insert("unitName".to_string(), "m/z".to_string());
-            iso_window.children.push(XMLNode::Element(cv_upper));
-        }
+        // Lower offset (MS:1000828)
+        let mut cv_lower = Element::new("cvParam");
+        cv_lower.attributes.insert("cvRef".to_string(), "MS".to_string());
+        cv_lower.attributes.insert("accession".to_string(), "MS:1000828".to_string());
+        cv_lower.attributes.insert("name".to_string(), "isolation window lower offset".to_string());
+        cv_lower.attributes.insert("value".to_string(), format!("{:.6}", half_width - offset));
+        cv_lower.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+        cv_lower.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+        cv_lower.attributes.insert("unitName".to_string(), "m/z".to_string());
+        iso_window.children.push(XMLNode::Element(cv_lower));
+        
+        // Upper offset (MS:1000829)
+        let mut cv_upper = Element::new("cvParam");
+        cv_upper.attributes.insert("cvRef".to_string(), "MS".to_string());
+        cv_upper.attributes.insert("accession".to_string(), "MS:1000829".to_string());
+        cv_upper.attributes.insert("name".to_string(), "isolation window upper offset".to_string());
+        cv_upper.attributes.insert("value".to_string(), format!("{:.6}", half_width + offset));
+        cv_upper.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+        cv_upper.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+        cv_upper.attributes.insert("unitName".to_string(), "m/z".to_string());
+        iso_window.children.push(XMLNode::Element(cv_upper));
     }
     
     precursor.children.push(XMLNode::Element(iso_window));
     
-    // Selected ion list
-    if let Some(&selected_mz) = precursor_mzs.first() {
-        let mut selected_ion_list = Element::new("selectedIonList");
-        selected_ion_list.attributes.insert("count".to_string(), "1".to_string());
-        
-        let mut selected_ion = Element::new("selectedIon");
-        
-        // Selected ion m/z
-        let mut cv_sel_mz = Element::new("cvParam");
-        cv_sel_mz.attributes.insert("cvRef".to_string(), "MS".to_string());
-        cv_sel_mz.attributes.insert("accession".to_string(), "MS:1000744".to_string());
-        cv_sel_mz.attributes.insert("name".to_string(), "selected ion m/z".to_string());
-        cv_sel_mz.attributes.insert("value".to_string(), format!("{:.6}", selected_mz));
-        cv_sel_mz.attributes.insert("unitCvRef".to_string(), "MS".to_string());
-        cv_sel_mz.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
-        cv_sel_mz.attributes.insert("unitName".to_string(), "m/z".to_string());
-        selected_ion.children.push(XMLNode::Element(cv_sel_mz));
-        
-        // Charge state if available
-        if let Some(charge) = precursor_charge {
-            let mut cv_charge = Element::new("cvParam");
-            cv_charge.attributes.insert("cvRef".to_string(), "MS".to_string());
-            cv_charge.attributes.insert("accession".to_string(), "MS:1000041".to_string());
-            cv_charge.attributes.insert("name".to_string(), "charge state".to_string());
-            cv_charge.attributes.insert("value".to_string(), charge.to_string());
-            selected_ion.children.push(XMLNode::Element(cv_charge));
-        }
-        
-        selected_ion_list.children.push(XMLNode::Element(selected_ion));
-        precursor.children.push(XMLNode::Element(selected_ion_list));
+    // Selected ion list - uses monoisotopic m/z when available, otherwise isolation target
+    let selected_mz = selected_ion_mz.unwrap_or(isolation_target_mz);
+    
+    let mut selected_ion_list = Element::new("selectedIonList");
+    selected_ion_list.attributes.insert("count".to_string(), "1".to_string());
+    
+    let mut selected_ion = Element::new("selectedIon");
+    
+    // Selected ion m/z (monoisotopic when available)
+    let mut cv_sel_mz = Element::new("cvParam");
+    cv_sel_mz.attributes.insert("cvRef".to_string(), "MS".to_string());
+    cv_sel_mz.attributes.insert("accession".to_string(), "MS:1000744".to_string());
+    cv_sel_mz.attributes.insert("name".to_string(), "selected ion m/z".to_string());
+    cv_sel_mz.attributes.insert("value".to_string(), format!("{:.6}", selected_mz));
+    cv_sel_mz.attributes.insert("unitCvRef".to_string(), "MS".to_string());
+    cv_sel_mz.attributes.insert("unitAccession".to_string(), "MS:1000040".to_string());
+    cv_sel_mz.attributes.insert("unitName".to_string(), "m/z".to_string());
+    selected_ion.children.push(XMLNode::Element(cv_sel_mz));
+    
+    // Charge state if available
+    if let Some(charge) = precursor_charge {
+        let mut cv_charge = Element::new("cvParam");
+        cv_charge.attributes.insert("cvRef".to_string(), "MS".to_string());
+        cv_charge.attributes.insert("accession".to_string(), "MS:1000041".to_string());
+        cv_charge.attributes.insert("name".to_string(), "charge state".to_string());
+        cv_charge.attributes.insert("value".to_string(), charge.to_string());
+        selected_ion.children.push(XMLNode::Element(cv_charge));
     }
+    
+    selected_ion_list.children.push(XMLNode::Element(selected_ion));
+    precursor.children.push(XMLNode::Element(selected_ion_list));
     
     // Activation - only add if we have activation info
     if !activation_type.is_empty() {
