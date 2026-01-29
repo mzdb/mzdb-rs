@@ -725,13 +725,16 @@ fn convert_scan_to_spectrum(
     scan: &thernio::raw::Scan,
     scan_event: Option<&thernio::raw::ScanEvent>,
     cycle: i64,
-    raw: &thernio::raw::RawFile,
+    raw: &RawFile,
 ) -> Result<Spectrum> {
     // Get filter string (1-based scan number)
     let filter_string = raw.filter_string(scan_num);
-    
-    // Get ion injection time from trailer extra (1-based scan number)
-    let ion_injection_time = raw.ion_injection_time(scan_num);
+
+    // Get the trailer extra record
+    let trailer_record_opt = raw.trailer_extra_record(scan_num);
+
+    // Get ion injection time from trailer extra record
+    let ion_injection_time = trailer_record_opt.and_then(|r| r.ion_injection_time());
     
     // Determine instrument configuration reference based on MS level
     let instrument_config_ref = if scan.ms_level == 1 {
@@ -750,17 +753,17 @@ fn convert_scan_to_spectrum(
         Some(scan.high_mz),
     )?;
 
-    // Get charge state from trailer extra (1-based scan number) - only for MS2+
+    // Get charge state from trailer extra record - only for MS2+
    let charge_state = if scan.ms_level > 1 {
-        raw.charge_state(scan_num).map(|c| c as i32)
+        trailer_record_opt.and_then(|r| r.charge_state()).map(|c| c as i32)
     } else {
         None
     };
 
-    // Get monoisotopic m/z from trailer extra (1-based scan number) - only for MS2+
+    // Get monoisotopic m/z from trailer extra record - only for MS2+
     // This is preferred over the selected ion m/z as it represents the true precursor mass
     let monoisotopic_mz = if scan.ms_level > 1 {
-        raw.monoisotopic_mz(scan_num)
+        trailer_record_opt.and_then(|r| r.monoisotopic_mz())
     } else {
         None
     };
