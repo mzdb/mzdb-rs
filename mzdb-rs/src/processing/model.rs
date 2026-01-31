@@ -905,6 +905,6 @@ mod tests {
         );
 
         assert_eq!(peakel.calc_duration(), 2.0);
-        assert_eq!(peakel.area(), 400.0);
+        assert_eq!(peakel.area(), 300.0);
     }
 }

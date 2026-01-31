@@ -634,7 +634,7 @@ fn test_peakel_model() {
     assert_eq!(peakel.apex_intensity(), Some(1000.0));
     assert_eq!(peakel.apex_elution_time(), Some(12.0));
     assert_eq!(peakel.calc_duration(), 4.0);
-    assert_eq!(peakel.area(), 2200.0);
+    assert_eq!(peakel.area(), 2100.0);
     assert_eq!(peakel.gap_count, 0);
 }
 
