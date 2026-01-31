@@ -177,10 +177,11 @@ pub trait PeakelDetector {
             xic_spectrum_indices.clear();
             
             // Walk both directions: right (+1) then left (-1)
+            // Both directions start at offset 1 to skip the apex (which is inserted separately)
             for direction in [1i32, -1i32] {
                 let mut gap_count = 0usize;
                 let mut half_gaps_count = 0usize;
-                let mut offset = if direction > 0 { 1 } else { 0 };
+                let mut offset = 1;  // Always start at 1 to avoid visiting apex twice
                 
                 loop {
                     if half_gaps_count > half_of_max_total_gaps {

@@ -153,9 +153,28 @@ pub trait HasPeakelData {
             / sum_intensity
     }
 
-    /// Calculate area (sum of intensities)
+    /// Calculate area using trapezoidal integration.
+    /// 
+    /// This matches the Scala mzdb-processing implementation:
+    /// ```scala
+    /// computedArea += (intensity + prevPeakIntensity) * deltaTime / 2
+    /// ```
+    /// 
+    /// For peakels with fewer than 2 points, returns the sum of intensities.
     fn calc_area(&self) -> f32 {
-        self.intensities().iter().sum()
+        let times = self.elution_times();
+        let intensities = self.intensities();
+        
+        if times.len() < 2 {
+            return intensities.iter().sum();
+        }
+        
+        let mut area = 0.0f32;
+        for i in 1..times.len() {
+            let delta_time = times[i] - times[i - 1];
+            area += (intensities[i] + intensities[i - 1]) * delta_time / 2.0;
+        }
+        area
     }
     
     /// Calculate minimum positive intensity (filtering out zeros and NaN)

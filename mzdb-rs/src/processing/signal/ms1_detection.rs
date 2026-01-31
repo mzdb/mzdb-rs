@@ -755,8 +755,8 @@ fn build_run_slice_peak_data(
 
 /// Producer for parallel processing
 #[cfg(feature = "processing-parallel")]
-fn produce_run_slice_peak_data<'a>(
-    mut rs_iter: RunSliceIterator<'a>,
+fn produce_run_slice_peak_data(
+    mut rs_iter: RunSliceIterator,
     work_tx: crossbeam_channel::Sender<Option<RunSlicePeakData>>,
     ms1_headers: &HashMap<i64, SpectrumHeader>,
     num_consumers: usize,
