@@ -102,6 +102,12 @@ struct Args {
     #[arg(long = "algo", default_value = "smart")]
     algo: String,
 
+    /// Require apex to not be at peakel boundary (first or last peak).
+    /// By default this check is skipped (matching Scala reference implementation).
+    /// Use this flag to enable the check.
+    #[arg(long = "require-apex-boundary")]
+    require_apex_boundary: bool,
+
     /// Export format: 'sqlite' or 'tsv'
     #[arg(long = "format", default_value = "sqlite")]
     format: String,
@@ -235,13 +241,14 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
         min_peakel_amplitude: args.min_peakel_amplitude,
         min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
+        skip_apex_boundary_check: !args.require_apex_boundary,
     };
 
     println!("Detecting MS1 peakels using walking algorithm...");
     println!("  Config: mz_tol={} ppm, min_peaks={}, min_intensity={}, max_gaps={}",
              config.mz_tol_ppm, config.min_peaks, config.min_intensity, config.max_consecutive_gaps);
-    println!("  Validation: min_amplitude={}, min_duration={}s",
-             config.min_peakel_amplitude, config.min_peakel_duration);
+    println!("  Validation: min_amplitude={}, min_duration={}s, apex_boundary_check={}",
+             config.min_peakel_amplitude, config.min_peakel_duration, !config.skip_apex_boundary_check);
 
     // Create detector and run detection
     let detector = Ms1PeakelDetector::with_config(config);
@@ -311,13 +318,14 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         min_peakel_amplitude: args.min_peakel_amplitude,
         min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
+        skip_apex_boundary_check: !args.require_apex_boundary,
     };
 
-    let detector = DiaMs2PeakelDetector::with_config(config);
+    let detector = DiaMs2PeakelDetector::with_config(config.clone());
 
     println!("Detecting MS2 peakels (DIA mode)...");
-    println!("  Validation: min_amplitude={}, min_duration={}s",
-             args.min_peakel_amplitude, args.min_peakel_duration);
+    println!("  Validation: min_amplitude={}, min_duration={}s, apex_boundary_check={}",
+             args.min_peakel_amplitude, args.min_peakel_duration, !config.skip_apex_boundary_check);
     let (windows, peakels) = detector.detect_all_peakels_with_threads(reader, num_threads)?;
 
     println!();
@@ -447,11 +455,11 @@ fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<
             file,
             "{}\t{:.6}\t{:.4}\t{:.4}\t{:.2}\t{:.2}\t{}\t{}\t{}\t{}",
             idx + 1,
-            peakel.calc_mz(),
+            peakel.apex_mz().unwrap_or(f32::NAN),
             peakel.apex_elution_time().unwrap_or(0.0),
             peakel.calc_duration(),
             peakel.apex_intensity().unwrap_or(0.0),
-            peakel.area(),
+            peakel.calc_area(),
             peakel.peaks_count(),
             peakel.first_spectrum_id().unwrap_or(0),
             peakel.apex_spectrum_id().unwrap_or(0),
@@ -498,11 +506,11 @@ fn print_ms1_statistics(peakels: &[Peakel]) {
     print_statistics(
         "MS1 Peakel Statistics",
         peakels.len(),
-        peakels.iter().map(|p| p.area()).sum(),
+        peakels.iter().map(|p| p.calc_area()).sum(),
         peakels.iter().map(|p| p.calc_duration()).sum::<f32>() / n,
         peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
-        peakels.iter().map(|p| p.calc_mz()).fold(f32::INFINITY, f32::min),
-        peakels.iter().map(|p| p.calc_mz()).fold(f32::NEG_INFINITY, f32::max),
+        peakels.iter().flat_map(|p| p.apex_mz()).fold(f32::INFINITY, f32::min),
+        peakels.iter().flat_map(|p| p.apex_mz()).fold(f32::NEG_INFINITY, f32::max),
         peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::INFINITY, f32::min),
         peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::NEG_INFINITY, f32::max),
     );

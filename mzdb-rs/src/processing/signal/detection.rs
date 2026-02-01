@@ -34,6 +34,13 @@ pub trait PeakelDetectionConfig: Clone + Send + Sync {
     fn min_peakel_duration(&self) -> f32;
     fn algorithm(&self) -> &str;
     
+    /// Whether to skip the apex boundary check (apex must not be first or last peak).
+    /// Default is true to match Scala reference implementation behavior.
+    /// The Scala code has this check commented out.
+    fn skip_apex_boundary_check(&self) -> bool {
+        true
+    }
+    
     #[inline]
     fn half_of_max_total_gaps(&self) -> usize {
         1 + (self.max_total_gaps() / 2)
@@ -176,8 +183,19 @@ pub trait PeakelDetector {
             xic_peak_keys.clear();
             xic_spectrum_indices.clear();
             
+            // Add apex first - it will be in the correct position after walking
+            // Right direction appends after apex, left direction prepends before apex
+            xic_times.push(apex_time);
+            xic_intensities.push(apex_intensity);
+            xic_mz_values.push(apex_mz);
+            xic_peak_keys.push(apex_peak_key);
+            xic_spectrum_indices.push(apex_spectrum_idx);
+            
+            // Track apex position: after walking, apex_pos = number of elements prepended (left walk)
+            let mut left_count = 0usize;
+            
             // Walk both directions: right (+1) then left (-1)
-            // Both directions start at offset 1 to skip the apex (which is inserted separately)
+            // Both directions start at offset 1 to skip the apex (already added)
             for direction in [1i32, -1i32] {
                 let mut gap_count = 0usize;
                 let mut half_gaps_count = 0usize;
@@ -214,6 +232,7 @@ pub trait PeakelDetector {
                                 xic_mz_values.insert(0, mz);
                                 xic_peak_keys.insert(0, peak_key);
                                 xic_spectrum_indices.insert(0, target_idx);
+                                left_count += 1;
                             }
                             gap_count = 0;
                         } else {
@@ -233,13 +252,8 @@ pub trait PeakelDetector {
                 }
             }
             
-            // Insert apex at correct position
-            let apex_pos = xic_times.partition_point(|&t| t < apex_time);
-            xic_times.insert(apex_pos, apex_time);
-            xic_intensities.insert(apex_pos, apex_intensity);
-            xic_mz_values.insert(apex_pos, apex_mz);
-            xic_peak_keys.insert(apex_pos, apex_peak_key);
-            xic_spectrum_indices.insert(apex_pos, apex_spectrum_idx);
+            // Apex position in the XIC is the number of elements prepended during left walk
+            let apex_pos = left_count;
             
             if xic_times.len() < min_peaks {
                 continue;
@@ -307,9 +321,11 @@ pub trait PeakelDetector {
             return None;
         }
         
-        // Validation 1: apex must not be first or last peak
-        if apex_index_in_peakel == 0 || apex_index_in_peakel >= peakel_len - 1 {
-            return None;
+        // Validation 1: apex must not be first or last peak (optional - disabled by default to match Scala)
+        if !config.skip_apex_boundary_check() {
+            if apex_index_in_peakel == 0 || apex_index_in_peakel >= peakel_len - 1 {
+                return None;
+            }
         }
         
         // Validation 2: check amplitude (Scala: apex / intensityValues.filter(i => i > 0 && !i.isNaN).min)
@@ -349,16 +365,22 @@ pub trait PeakelDetector {
         let last_spectrum_idx = spectrum_indices.last().copied().unwrap_or(0);
         let spectrum_span = last_spectrum_idx.saturating_sub(first_spectrum_idx) + 1;
         let gap_count = spectrum_span.saturating_sub(peakel_len);
+
+        // This is important for consistency, as since we are detecting across three run slice
+        // we may hit a higher intensity in neighbor run slices
+        // while apex_index_in_peakel comes solely from the middle run slice (starting point)
+        let true_apex_index = Peakel::calc_apex_index(xic_intensities).unwrap_or(apex_index_in_peakel);
         
-        Some(Peakel::new(
-            SmallVec::from_iter(spectrum_ids.iter().copied()),
+        Peakel::new(
+            SmallVec::from_vec(spectrum_ids),
             SmallVec::from_iter(xic_times.iter().copied()),
             SmallVec::from_iter(xic_mz_values.iter().copied()),
             SmallVec::from_iter(xic_intensities.iter().copied()),
             None,
             None,
+            true_apex_index,
             gap_count,
-        ))
+        ).ok()
     }
 }
 

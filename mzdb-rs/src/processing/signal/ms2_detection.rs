@@ -26,9 +26,10 @@
 //! ```
 
 use std::collections::BTreeMap;
+use anyhow_ext::*;
 
 #[cfg(feature = "processing-parallel")]
-use anyhow_ext::anyhow;
+use std::sync::LockResult;
 
 use crate::MzDbReader;
 use crate::metadata::parse_isolation_window_offsets_from_xml;
@@ -95,7 +96,7 @@ impl DiaMs2PeakelRecord {
     /// Get the fragment m/z at apex
     #[inline]
     pub fn mz(&self) -> f32 {
-        self.data.calc_mz()
+        self.data.apex_mz().unwrap_or(f32::NAN)
     }
     
     /// Get the elution time at apex
@@ -172,8 +173,12 @@ impl HasPeakelData for DiaMs2PeakelRecord {
         self.data.mz_values()
     }
     
-    fn intensities(&self) -> &[f32] {
-        self.data.intensities()
+    fn intensity_values(&self) -> &[f32] {
+        self.data.intensity_values()
+    }
+
+    fn apex_index(&self) -> Option<usize> {
+        self.data.apex_index()
     }
 }
 
@@ -272,6 +277,9 @@ pub struct DiaMs2PeakelConfig {
     pub min_peakel_duration: f32,
     /// Algorithm to use: "basic" or "smart"
     pub algorithm: String,
+    /// Whether to skip the apex boundary check (apex must not be first or last peak).
+    /// Default is true to match Scala reference implementation behavior.
+    pub skip_apex_boundary_check: bool,
 }
 
 impl Default for DiaMs2PeakelConfig {
@@ -287,6 +295,7 @@ impl Default for DiaMs2PeakelConfig {
             min_peakel_amplitude: 1.5,
             min_peakel_duration: 0.0,
             algorithm: "smart".to_string(),
+            skip_apex_boundary_check: true,
         }
     }
 }
@@ -306,6 +315,7 @@ impl PeakelDetectionConfig for DiaMs2PeakelConfig {
     #[inline] fn min_peakel_amplitude(&self) -> f32 { self.min_peakel_amplitude }
     #[inline] fn min_peakel_duration(&self) -> f32 { self.min_peakel_duration }
     #[inline] fn algorithm(&self) -> &str { &self.algorithm }
+    #[inline] fn skip_apex_boundary_check(&self) -> bool { self.skip_apex_boundary_check }
 }
 
 /// Peak key for MS2 detection - simpler than MS1, no triplet
@@ -526,7 +536,7 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         window: &IsolationWindow,
-    ) -> anyhow_ext::Result<Vec<DiaMs2PeakelRecord>> {
+    ) -> Result<Vec<DiaMs2PeakelRecord>> {
         log::info!("Processing isolation window: {:.1} m/z ({} spectra)",
                    window.target_mz, window.spectrum_count);
 
@@ -620,7 +630,7 @@ impl DiaMs2PeakelDetector {
     pub fn detect_all_peakels(
         &self,
         reader: &MzDbReader,
-    ) -> anyhow_ext::Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
+    ) -> Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
         self.detect_all_peakels_with_threads(reader, 1)
     }
 
@@ -632,7 +642,7 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         num_threads: usize,
-    ) -> anyhow_ext::Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
+    ) -> Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
         // Discover isolation windows
         let windows = self.discover_isolation_windows(reader);
 
@@ -661,7 +671,7 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         windows: &[IsolationWindow],
-    ) -> anyhow_ext::Result<Vec<DiaMs2PeakelRecord>> {
+    ) -> Result<Vec<DiaMs2PeakelRecord>> {
         let mut all_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
 
         // Process each window
@@ -680,7 +690,7 @@ impl DiaMs2PeakelDetector {
         reader: &MzDbReader,
         windows: &[IsolationWindow],
         num_threads: usize,
-    ) -> anyhow_ext::Result<Vec<DiaMs2PeakelRecord>> {
+    ) -> Result<Vec<DiaMs2PeakelRecord>> {
         use crossbeam_channel::bounded;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Mutex;
@@ -718,7 +728,7 @@ impl DiaMs2PeakelDetector {
                     log::debug!("Consumer thread {} started", thread_id);
 
                     // Receive work items until channel is closed
-                    while let Ok((window, spectra)) = rx.recv() {
+                    while let Result::Ok((window, spectra)) = rx.recv() {
                         let process_start = Instant::now();
 
                         let peakels = self.detect_peakels_from_spectra(&window, &spectra);
@@ -735,7 +745,7 @@ impl DiaMs2PeakelDetector {
                     log::debug!("Consumer thread {} finished, processed {} items", thread_id, items_processed);
 
                     // Collect results
-                    if let Ok(mut guard) = results.lock() {
+                    if let LockResult::Ok(mut guard) = results.lock() {
                         guard.extend(thread_peakels);
                     }
                 });
@@ -852,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peakel_creation() {
+    fn test_peakel_creation() -> Result<()> {
         let peakel = Peakel::from_vectors(
             vec![1],
             vec![100.0],
@@ -861,9 +871,11 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
 
         assert_eq!(peakel.peaks_count(), 1);
         assert_eq!(peakel.apex_intensity(), Some(1000.0));
+
+        Ok(())
     }
 }

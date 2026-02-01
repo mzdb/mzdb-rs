@@ -966,8 +966,8 @@ impl StaggeredPeakelMatcher {
         // A more sophisticated implementation would interpolate both profiles
         // to common time points and compute proper Pearson correlation
 
-        let a_intensities = peakel_a.data.intensities();
-        let b_intensities = peakel_b.data.intensities();
+        let a_intensities = peakel_a.data.intensity_values();
+        let b_intensities = peakel_b.data.intensity_values();
 
         if a_intensities.is_empty() || b_intensities.is_empty() {
             return 0.0;
@@ -1136,10 +1136,10 @@ impl PeakelMerger {
             None,
             None,
             0,
-        );
+        )?;
 
         // Calculate summary statistics
-        let merged_mz = merged_data.calc_weighted_mz();
+        let apex_mz = merged_data.apex_mz().unwrap_or(f32::NAN);
         let apex_intensity = merged_data.apex_intensity().unwrap_or(0.0);
         let elution_time = merged_data.apex_elution_time().unwrap_or(0.0);
         let duration = merged_data.calc_duration();
@@ -1147,7 +1147,7 @@ impl PeakelMerger {
 
         Ok(MergedPeakel {
             id: generate_peakel_id(),
-            mz: merged_mz,
+            mz: apex_mz,
             elution_time,
             duration,
             apex_intensity,
@@ -1213,7 +1213,7 @@ mod tests {
         spectrum_ids: Vec<i64>,
         times: Vec<f32>,
         intensities: Vec<f32>,
-    ) -> Peakel {
+    ) -> Result<Peakel> {
         let mz_values: Vec<f32> = vec![500.0; spectrum_ids.len()];
         Peakel::from_vectors(
             spectrum_ids,
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peakel_matching() {
+    fn test_peakel_matching() -> Result<()> {
         let matcher = StaggeredPeakelMatcher::with_config(StaggeredPeakelConfig {
             mz_tolerance: MzTolerance::Da(0.01),
             min_correlation: 0.5,
@@ -1315,7 +1315,7 @@ mod tests {
             vec![1, 3, 5, 7, 9],
             vec![100.0, 101.0, 102.0, 103.0, 104.0],
             vec![1000.0, 2000.0, 5000.0, 2000.0, 1000.0],
-        );
+        )?;
         let peakel_a = ExtendedPeakel::new_ms2_dia(
             1, 500.0, 102.0, 4.0, 0, 5000.0, 11000.0, 5.0, 5,
             1, 5, 9, 1, 500.0, data_a,
@@ -1325,24 +1325,26 @@ mod tests {
             vec![2, 4, 6, 8, 10],
             vec![100.5, 101.5, 102.5, 103.5, 104.5],
             vec![1100.0, 2100.0, 5100.0, 2100.0, 1100.0],
-        );
+        )?;
         let peakel_b = ExtendedPeakel::new_ms2_dia(
             2, 500.005, 102.5, 4.0, 0, 5100.0, 11500.0, 5.0, 5,
             2, 6, 10, 2, 500.0, data_b,
         );
 
         assert!(matcher.is_matching_peakel(&peakel_a, &peakel_b));
+
+        Ok(())
     }
 
     #[test]
-    fn test_peakel_merging() {
+    fn test_peakel_merging() -> Result<()> {
         let merger = PeakelMerger::new();
 
         let data_a = create_test_peakel_data(
             vec![1, 3, 5],
             vec![100.0, 102.0, 104.0],
             vec![1000.0, 5000.0, 1000.0],
-        );
+        )?;
         let peakel_a = ExtendedPeakel::new_ms2_dia(
             1, 500.0, 102.0, 4.0, 0, 5000.0, 7000.0, 5.0, 3,
             1, 3, 5, 1, 500.0, data_a,
@@ -1352,7 +1354,7 @@ mod tests {
             vec![2, 4, 6],
             vec![101.0, 103.0, 105.0],
             vec![2000.0, 4000.0, 2000.0],
-        );
+        )?;
         let peakel_b = ExtendedPeakel::new_ms2_dia(
             2, 500.001, 103.0, 4.0, 0, 4000.0, 8000.0, 4.0, 3,
             2, 4, 6, 2, 500.0, data_b,
@@ -1365,7 +1367,7 @@ mod tests {
             correlation: 0.95,
         };
 
-        let merged = merger.merge_peakels(&matched_pair).unwrap();
+        let merged = merger.merge_peakels(&matched_pair)?;
 
         // Verify merged data is chronologically ordered
         for i in 1..merged.data.len() {
@@ -1376,5 +1378,7 @@ mod tests {
         assert_eq!(merged.data.len(), 6);
         assert_eq!(merged.merge_stats.cycle_a_points, 3);
         assert_eq!(merged.merge_stats.cycle_b_points, 3);
+
+        Ok(())
     }
 }

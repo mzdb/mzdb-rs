@@ -75,6 +75,9 @@ pub struct Ms1PeakelConfig {
     pub min_peakel_duration: f32,
     /// Algorithm to use: "basic" or "smart"
     pub algorithm: String,
+    /// Whether to skip the apex boundary check (apex must not be first or last peak).
+    /// Default is true to match Scala reference implementation behavior.
+    pub skip_apex_boundary_check: bool,
 }
 
 impl Default for Ms1PeakelConfig {
@@ -90,6 +93,7 @@ impl Default for Ms1PeakelConfig {
             min_peakel_amplitude: 1.5,
             min_peakel_duration: 0.0,
             algorithm: "smart".to_string(),
+            skip_apex_boundary_check: true,
         }
     }
 }
@@ -109,6 +113,7 @@ impl PeakelDetectionConfig for Ms1PeakelConfig {
     #[inline] fn min_peakel_amplitude(&self) -> f32 { self.min_peakel_amplitude }
     #[inline] fn min_peakel_duration(&self) -> f32 { self.min_peakel_duration }
     #[inline] fn algorithm(&self) -> &str { &self.algorithm }
+    #[inline] fn skip_apex_boundary_check(&self) -> bool { self.skip_apex_boundary_check }
 }
 
 /// Peak key for MS1 detection - includes peaklist index for triplet tracking.

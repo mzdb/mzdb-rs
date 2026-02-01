@@ -201,18 +201,18 @@ impl Ms1PeakelDbWriter {
         for (idx, peakel) in peakels.iter().enumerate() {
             let peakel_id = (idx + 1) as i64;
             
-            let mz = peakel.calc_mz();
+            let mz = peakel.apex_mz().unwrap_or(f32::NAN);
             let elution_time = peakel.apex_elution_time().unwrap_or(0.0);
             let duration = peakel.calc_duration();
             let apex_intensity = peakel.apex_intensity().unwrap_or(0.0);
-            let area = peakel.area();
+            let area = peakel.calc_area();
             let peak_count = peakel.peaks_count() as i32;
             
             let min_mz = peakel.min_mz();
             let max_mz = peakel.max_mz();
             let min_time = peakel.min_time();
             let max_time = peakel.max_time();
-            let min_intensity = peakel.calc_min_intensity().unwrap_or(0.0);
+            let min_intensity = peakel.calc_min_intensity();
 
             let peaks_blob = super::PeakelSerializer::to_msgpack(peakel)?;
             let left_hwhm_mean = peakel.left_hwhm_mean();
@@ -225,21 +225,24 @@ impl Ms1PeakelDbWriter {
             // Use Option for nullable HWHM values (null if not computed)
             let left_hwhm_opt: Option<f32> = if left_hwhm_mean > 0.0 { Some(left_hwhm_mean) } else { None };
             let right_hwhm_opt: Option<f32> = if right_hwhm_mean > 0.0 { Some(right_hwhm_mean) } else { None };
+            
+            // Calculate intensity coefficient of variation
+            let intensity_cv = peakel.calc_intensity_cv();
 
             peakel_stmt.execute(params![
                 peakel_id,
                 mz,
                 elution_time,
                 duration,
-                0, // gap_count
+                peakel.gap_count,
                 apex_intensity,
                 area,
                 amplitude,
-                0.0, // intensity_cv
+                intensity_cv,
                 left_hwhm_opt,
-                Option::<f32>::None, // left_hwhm_cv
+                Option::<f32>::None, // FIXME: calculate left_hwhm_cv
                 right_hwhm_opt,
-                Option::<f32>::None, // right_hwhm_cv
+                Option::<f32>::None, // FIXME: calculate right_hwhm_cv
                 false, // is_interfering
                 peak_count,
                 peaks_blob,

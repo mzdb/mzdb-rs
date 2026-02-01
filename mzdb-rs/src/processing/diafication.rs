@@ -580,7 +580,7 @@ fn process_ms2_spectra(
 
             // Use apex_data_index which finds the index by stored apex_spectrum_id
             let apex_idx = peakel
-                .apex_data_index()
+                .apex_index()
                 .unwrap_or(peakel.spectrum_ids().len() / 2);
 
             let closest_idx = peakel
@@ -625,7 +625,7 @@ fn process_ms2_spectra(
         let apex_intensity = peakel.apex_intensity;
 
         for (i, &target_spectrum_id) in peakel.spectrum_ids().iter().enumerate() {
-            let point_intensity = peakel.intensities()[i];
+            let point_intensity = peakel.intensity_values()[i];
             let target_cycle = spectrum_to_cycle
                 .get(&target_spectrum_id)
                 .copied()

@@ -45,7 +45,7 @@ impl PeakelSerializer {
             peakel.spectrum_ids(),
             peakel.elution_times(),
             peakel.mz_values(),
-            peakel.intensities(),
+            peakel.intensity_values(),
         );
         rmp_serde::to_vec(&data)
             .map_err(|e| anyhow_ext::anyhow!("msgpack serialization error: {}", e))
@@ -64,15 +64,15 @@ impl PeakelSerializer {
         // mz_values: f64 in peakelDB, f32 in memory
         let mz_values: Vec<f32> = mz_values_f64.into_iter().map(|mz| mz as f32).collect();
         
-        Ok(Peakel::from_vectors(
+        Peakel::from_vectors(
             spectrum_ids,
             elution_times,
             mz_values,
             intensity_values,
             None,
             None,
-            0,
-        ))
+            0, // FIXME: this is fragile and may create some inconsistencies
+        )
     }
 }
 
@@ -200,7 +200,7 @@ impl ExtendedPeakel {
     }
 
     /// Get the index of the apex spectrum in the peaks data (by stored apex_spectrum_id)
-    pub fn apex_data_index(&self) -> Option<usize> {
+    pub fn apex_index(&self) -> Option<usize> {
         self.data.find_spectrum_index(self.apex_spectrum_id)
     }
 
@@ -241,25 +241,29 @@ impl HasPeakelData for ExtendedPeakel {
         self.data.mz_values()
     }
 
-    fn intensities(&self) -> &[f32] {
-        self.data.intensities()
+    fn intensity_values(&self) -> &[f32] {
+        self.data.intensity_values()
+    }
+
+    fn apex_index(&self) -> Option<usize> {
+        self.data.apex_index()
     }
 }
 
 /// Convert from the core Peakel type to ExtendedPeakel
-impl From<&crate::processing::Peakel> for ExtendedPeakel {
-    fn from(peakel: &crate::processing::Peakel) -> Self {
+impl From<&Peakel> for ExtendedPeakel {
+    fn from(peakel: &Peakel) -> Self {
         let apex_intensity = peakel.apex_intensity().unwrap_or(0.0);
         let amplitude = peakel.calc_amplitude();
 
         Self {
             id: peakel.id,
-            mz: peakel.calc_mz(),
+            mz: peakel.apex_mz().unwrap_or(f32::NAN),
             elution_time: peakel.apex_elution_time().unwrap_or(0.0),
             duration: peakel.calc_duration(),
             gap_count: peakel.gap_count as i32,
             apex_intensity,
-            area: peakel.area(),
+            area: peakel.calc_area(),
             amplitude: if amplitude.is_nan() { 1.0 } else { amplitude },
             peaks_count: peakel.peaks_count() as i32,
             first_spectrum_id: peakel.spectrum_ids.first().copied().unwrap_or(0),
@@ -303,21 +307,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_peakel_new() {
-        let data = Peakel::from_vectors(
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            0,
-        );
-        assert_eq!(data.peaks_count(), 0);
-    }
-
-    #[test]
-    fn test_peakel_from_vecs() {
+    fn test_peakel_from_vecs() -> Result<()> {
         let data = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![10.0, 20.0, 30.0],
@@ -326,15 +316,17 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
         assert_eq!(data.peaks_count(), 3);
         assert_eq!(data.apex_index(), Some(1)); // index of 200.0
         assert_eq!(data.first_spectrum_id(), Some(1));
         assert_eq!(data.last_spectrum_id(), Some(3));
+
+        Ok(())
     }
 
     #[test]
-    fn test_peakel_min_max() {
+    fn test_peakel_min_max() -> Result<()> {
         let data = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![10.0, 20.0, 30.0],
@@ -343,15 +335,17 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
         assert_eq!(data.min_mz(), 500.0);
         assert_eq!(data.max_mz(), 500.5);
         assert_eq!(data.min_time(), 10.0);
         assert_eq!(data.max_time(), 30.0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_extended_peakel_is_ms2_dia() {
+    fn test_extended_peakel_is_ms2_dia() -> Result<()> {
         let data = Peakel::from_vectors(
             vec![1, 3, 5],
             vec![95.0, 100.0, 105.0],
@@ -360,7 +354,7 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
 
         let ms1 = ExtendedPeakel::new(
             1, 500.0, 100.0, 10.0, 0, 1000.0, 5000.0, 10.0, 5,
@@ -373,6 +367,8 @@ mod tests {
             1, 3, 5, 1, 400.0, data
         );
         assert!(ms2.is_ms2_dia());
+
+        Ok(())
     }
 
 }

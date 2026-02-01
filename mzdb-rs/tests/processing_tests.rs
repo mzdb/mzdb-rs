@@ -14,6 +14,8 @@ use mzdb::processing::signal::filtering::{SavitzkyGolaySmoother, SignalSmoother,
 use mzdb::processing::math;
 use mzdb::processing::ms;
 
+use anyhow_ext::*;
+
 const TEST_MZDB_PATH: &str = "data/OVEMB150205_12.mzDB";
 
 /// Standard m/z tolerance used across all tests (10 ppm)
@@ -343,7 +345,7 @@ impl IndexedSpectrum {
 /// 5. Stop walking when too many consecutive gaps or hitting a used peak
 /// 6. Run peakel detection on the extracted XIC
 #[test]
-fn test_walking_peakel_detection() {
+fn test_walking_peakel_detection() -> Result<()> {
     use std::collections::HashSet;
     
     let reader = MzDbReader::open(TEST_MZDB_PATH).unwrap();
@@ -488,10 +490,10 @@ fn test_walking_peakel_detection() {
                 used_peaks[spec_idx].insert(peak_idx);
             }
             
-            let peakel = builder.build();
+            let peakel = builder.build()?;
             
             // Filter by amplitude
-            let min_int = peakel.intensities().iter().cloned().fold(f32::INFINITY, f32::min);
+            let min_int = peakel.intensity_values().iter().cloned().fold(f32::INFINITY, f32::min);
             let max_int = peakel.apex_intensity().unwrap_or(0.0);
             let amplitude = if min_int > 0.0 { max_int / min_int } else { 2.0 };
             
@@ -535,8 +537,10 @@ fn test_walking_peakel_detection() {
     for peakel in &detected_peakels {
         assert!(peakel.peaks_count() >= MIN_PEAKS, "Peakel should have at least {} peaks", MIN_PEAKS);
         assert!(peakel.apex_intensity().unwrap_or(0.0) > 0.0, "Apex intensity should be positive");
-        assert!(peakel.area() > 0.0, "Area should be positive");
+        assert!(peakel.calc_area() > 0.0, "Area should be positive");
     }
+    
+    Ok(())
 }
 
 // ============================================================================
@@ -600,7 +604,7 @@ fn test_mass_conversions() {
 }
 
 #[test]
-fn test_peakel_model() {
+fn test_peakel_model() -> Result<()> {
     // Test Peakel creation and calculations
     let spectrum_ids = vec![1, 2, 3, 4, 5];
     let elution_times = vec![10.0f32, 11.0, 12.0, 13.0, 14.0];
@@ -615,7 +619,7 @@ fn test_peakel_model() {
         None,
         None,
         0,
-    );
+    )?;
     
     println!("Peakel properties:");
     println!("  Peaks count: {}", peakel.peaks_count());
@@ -623,10 +627,10 @@ fn test_peakel_model() {
     println!("  Apex m/z: {:.4}", peakel.apex_mz().unwrap_or(0.0));
     println!("  Apex RT: {:.2}s", peakel.apex_elution_time().unwrap_or(0.0));
     println!("  Apex intensity: {:.0}", peakel.apex_intensity().unwrap_or(0.0));
-    println!("  Weighted m/z: {:.4}", peakel.calc_mz());
+    println!("  Weighted m/z: {:.4}", peakel.calc_weighted_mz());
     println!("  Weighted RT: {:.2}s", peakel.calc_weighted_average_time());
     println!("  Duration: {:.2}s", peakel.calc_duration());
-    println!("  Area: {:.0}", peakel.area());
+    println!("  Area: {:.0}", peakel.calc_area());
     println!("  Gap count: {}", peakel.gap_count);
     
     assert_eq!(peakel.peaks_count(), 5);
@@ -634,12 +638,14 @@ fn test_peakel_model() {
     assert_eq!(peakel.apex_intensity(), Some(1000.0));
     assert_eq!(peakel.apex_elution_time(), Some(12.0));
     assert_eq!(peakel.calc_duration(), 4.0);
-    assert_eq!(peakel.area(), 2100.0);
+    assert_eq!(peakel.calc_area(), 2100.0);
     assert_eq!(peakel.gap_count, 0);
+    
+    Ok(())
 }
 
 #[test]
-fn test_peakel_builder() {
+fn test_peakel_builder() -> Result<()> {
     // Test PeakelBuilder for constructing peakels incrementally
     let mut builder = PeakelBuilder::new();
     
@@ -649,7 +655,7 @@ fn test_peakel_builder() {
     builder.add_point(4, 13.0, 500.01, 500.0, 0.01, 0.02);
     builder.add_point(5, 14.0, 500.0, 100.0, 0.01, 0.02);
     
-    let peakel = builder.build();
+    let peakel = builder.build()?;
     
     println!("Built peakel:");
     println!("  Peaks count: {}", peakel.peaks_count());
@@ -661,6 +667,8 @@ fn test_peakel_builder() {
     assert_eq!(peakel.apex_intensity(), Some(1000.0));
     assert!(peakel.left_hwhm_mean() > 0.0);
     assert!(peakel.right_hwhm_mean() > 0.0);
+    
+    Ok(())
 }
 
 #[test]

@@ -75,6 +75,7 @@ CREATE TABLE peakel (
     apex_intensity REAL NOT NULL,
     area REAL NOT NULL,
     amplitude REAL NOT NULL,
+    intensity_cv REAL NOT NULL,
     peak_count INTEGER NOT NULL,
     peaks BLOB NOT NULL,
     serialized_properties TEXT,
@@ -312,10 +313,10 @@ impl Ms2PeakelDbWriter {
         {
             let mut stmt = self.conn.prepare(
                 "INSERT INTO peakel (id, moz, elution_time, duration, gap_count, apex_intensity, area, 
-                 amplitude, peak_count, peaks, serialized_properties,
+                 amplitude, intensity_cv, peak_count, peaks, serialized_properties,
                  first_spectrum_id, apex_spectrum_id, last_spectrum_id, 
                  isolation_window_id, precursor_mz, map_id) 
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
             )?;
 
             let mut rtree_stmt = self.conn.prepare(
@@ -333,9 +334,10 @@ impl Ms2PeakelDbWriter {
                 let max_mz = peakel.max_mz();
                 let min_time = peakel.min_time();
                 let max_time = peakel.max_time();
-                let min_intensity = peakel.calc_min_intensity().unwrap_or(0.0);
+                let min_intensity = peakel.calc_min_intensity();
                 let apex_intensity = peakel.apex_intensity();
                 let amplitude = if min_intensity == 0.0 {0.0} else {apex_intensity / min_intensity};
+                let intensity_cv = peakel.calc_intensity_cv();
 
                 stmt.execute(params![
                     peakel.id(),
@@ -346,6 +348,7 @@ impl Ms2PeakelDbWriter {
                     apex_intensity,
                     peakel.area(),
                     amplitude,
+                    intensity_cv,
                     peakel.peaks_count(),
                     peaks_blob,
                     Option::<String>::None, // serialized_properties
@@ -384,7 +387,7 @@ mod tests {
     use crate::processing::Peakel;
 
     #[test]
-    fn test_extended_peakel_apex_index() {
+    fn test_extended_peakel_apex_index() -> Result<()> {
         let data = Peakel::from_vectors(
             vec![100, 101, 102, 103, 104],
             vec![98.0, 99.0, 100.0, 101.0, 102.0],
@@ -393,7 +396,7 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
 
         let peakel = ExtendedPeakel::new_ms2_dia(
             1,          // id
@@ -413,6 +416,8 @@ mod tests {
             data,
         );
 
-        assert_eq!(peakel.apex_data_index(), Some(2));
+        assert_eq!(peakel.apex_index(), Some(2));
+        
+        Ok(())
     }
 }

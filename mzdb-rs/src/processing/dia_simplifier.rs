@@ -395,7 +395,7 @@ fn extract_peakel_data_points(
 
         // Find apex index in the peakel's data arrays
         let spectrum_ids = peakel.data.spectrum_ids.as_slice();
-        let apex_idx = match peakel.apex_data_index() {
+        let apex_idx = match peakel.apex_index() {
             Some(idx) => idx,
             None => {
                 // Fallback: use middle of array

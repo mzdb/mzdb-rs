@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicI64, Ordering};
+use anyhow::Context;
+use anyhow_ext::*;
 
 // ============================================================================
 // ID Generation
@@ -52,7 +54,9 @@ pub trait HasPeakelData {
     /// Get m/z values slice (32-bit for centroid data)
     fn mz_values(&self) -> &[f32];
     /// Get intensity values slice
-    fn intensities(&self) -> &[f32];
+    fn intensity_values(&self) -> &[f32];
+    /// Get the index of the apex (highest intensity) data point
+    fn apex_index(&self) -> Option<usize>;
 
     /// Get the number of data points
     #[inline]
@@ -64,15 +68,6 @@ pub trait HasPeakelData {
     #[inline]
     fn is_empty(&self) -> bool {
         self.spectrum_ids().is_empty()
-    }
-
-    /// Get the index of the apex (highest intensity) data point
-    fn apex_index(&self) -> Option<usize> {
-        self.intensities()
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
     }
 
     /// Find the index of a specific spectrum ID (uses binary search)
@@ -92,12 +87,12 @@ pub trait HasPeakelData {
 
     /// Get min elution time
     fn min_time(&self) -> f32 {
-        self.elution_times().iter().cloned().fold(f32::INFINITY, f32::min)
+        self.elution_times().first().copied().unwrap_or(0f32)
     }
 
     /// Get max elution time
     fn max_time(&self) -> f32 {
-        self.elution_times().iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+        self.elution_times().last().copied().unwrap_or(f32::MAX)
     }
 
     /// Get first spectrum ID
@@ -112,7 +107,7 @@ pub trait HasPeakelData {
 
     /// Get apex intensity
     fn apex_intensity(&self) -> Option<f32> {
-        self.apex_index().map(|i| self.intensities()[i])
+        self.apex_index().map(|i| self.intensity_values()[i])
     }
 
     /// Get apex m/z
@@ -139,15 +134,37 @@ pub trait HasPeakelData {
         }
     }
 
+    /// Calculate the weighted average elution time
+    fn calc_weighted_average_time(&self) -> f32 {
+        let sum_intensity: f32 = self.intensity_values().iter().sum();
+        if sum_intensity == 0.0 {
+            return self.apex_elution_time().unwrap_or(0.0);
+        }
+
+        self
+            .elution_times()
+            .iter()
+            .zip(self.intensity_values().iter())
+            .map(|(&rt, &intensity)| rt * intensity)
+            .sum::<f32>()
+            / sum_intensity
+    }
+
+
     /// Calculate weighted average m/z
     fn calc_weighted_mz(&self) -> f32 {
-        let sum_intensity: f32 = self.intensities().iter().sum();
-        if sum_intensity == 0.0 {
-            return self.apex_mz().unwrap_or(0.0);
+        if self.is_empty() {
+            return f32::NAN;
         }
+
+        let sum_intensity: f32 = self.intensity_values().iter().sum();
+        if sum_intensity == 0.0 {
+            return self.apex_mz().unwrap_or(f32::NAN);
+        }
+
         self.mz_values()
             .iter()
-            .zip(self.intensities().iter())
+            .zip(self.intensity_values().iter())
             .map(|(&mz, &intensity)| mz * intensity)
             .sum::<f32>()
             / sum_intensity
@@ -163,7 +180,7 @@ pub trait HasPeakelData {
     /// For peakels with fewer than 2 points, returns the sum of intensities.
     fn calc_area(&self) -> f32 {
         let times = self.elution_times();
-        let intensities = self.intensities();
+        let intensities = self.intensity_values();
         
         if times.len() < 2 {
             return intensities.iter().sum();
@@ -174,22 +191,23 @@ pub trait HasPeakelData {
             let delta_time = times[i] - times[i - 1];
             area += (intensities[i] + intensities[i - 1]) * delta_time / 2.0;
         }
+
         area
     }
     
     /// Calculate minimum positive intensity (filtering out zeros and NaN)
     /// 
     /// Returns `None` if no valid positive intensities exist.
-    fn calc_min_intensity(&self) -> Option<f32> {
-        let min = self.intensities().iter()
+    fn calc_min_intensity(&self) -> f32 {
+        let min = self.intensity_values().iter()
             .cloned()
             .filter(|&i| i > 0.0 && !i.is_nan())
             .fold(f32::INFINITY, f32::min);
         
         if min > 0.0 && min < f32::INFINITY {
-            Some(min)
+            min
         } else {
-            None
+            0.0
         }
     }
     
@@ -198,8 +216,52 @@ pub trait HasPeakelData {
     /// Matches Scala: `getApexIntensity / intensityValues.filter(i => i > 0 && !i.isNaN).min`
     fn calc_amplitude(&self) -> f32 {
         match self.calc_min_intensity() {
-            Some(min_intensity) => self.apex_intensity().unwrap_or(0.0) / min_intensity,
-            None => f32::NAN,
+            0f32 => f32::NAN,
+            min_intensity => self.apex_intensity().unwrap_or(0.0) / min_intensity,
+        }
+    }
+    
+    /// Calculate intensity coefficient of variation (CV) as percentage.
+    /// 
+    /// CV = 100 * standard_deviation / mean
+    /// 
+    /// Matches Scala implementation:
+    /// ```scala
+    /// def calcCv(values: Array[Double], mean: Double): Float = {
+    ///     val variance = StatUtils.variance(values, mean)
+    ///     val sd = math.sqrt(variance)
+    ///     val cv = if (sd > 0) 100 * sd / mean else 0f
+    ///     cv.toFloat
+    /// }
+    /// ```
+    fn calc_intensity_cv(&self) -> f32 {
+        let intensities = self.intensity_values();
+        if intensities.is_empty() {
+            return 0.0;
+        }
+        
+        let n = intensities.len() as f32;
+        let mean: f32 = intensities.iter().sum::<f32>() / n;
+        
+        if mean == 0.0 {
+            return 0.0;
+        }
+        
+        // Calculate variance (population variance to match Apache Commons StatUtils.variance with known mean)
+        // Note: StatUtils.variance(values, mean) computes sum((x - mean)^2) / (n - 1) when mean is provided
+        let variance: f32 = intensities.iter()
+            .map(|&x| {
+                let diff = x - mean;
+                diff * diff
+            })
+            .sum::<f32>() / (n - 1.0).max(1.0);
+        
+        let sd = variance.sqrt();
+        
+        if sd > 0.0 {
+            100.0 * sd / mean
+        } else {
+            0.0
         }
     }
 }
@@ -339,16 +401,14 @@ impl Peakel {
         intensity_values: SmallVec<[f32; 16]>,
         left_hwhms: Option<SmallVec<[f32; 16]>>,
         right_hwhms: Option<SmallVec<[f32; 16]>>,
+        apex_index: usize,
         gap_count: usize,
-    ) -> Self {
-        let apex_index = intensity_values
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+    ) -> Result<Self> {
+        if spectrum_ids.is_empty() {
+            bail!("can't create a Peakel with empty spectrum_ids");
+        }
 
-        Self {
+        Ok(Self {
             id: generate_peakel_id(),
             spectrum_ids,
             elution_times,
@@ -358,13 +418,13 @@ impl Peakel {
             right_hwhms,
             apex_index,
             gap_count,
-        }
+        })
     }
 
     /// Create a new peakel from Vec data
     ///
-    /// The vectors are converted to SmallVec internally. Use this for
-    /// convenience when working with existing Vec data.
+    /// The vectors are converted to SmallVec internally.
+    /// Use this for convenience when working with existing Vec data.
     pub fn from_vectors(
         spectrum_ids: Vec<i64>,
         elution_times: Vec<f32>,
@@ -373,15 +433,14 @@ impl Peakel {
         left_hwhms: Option<Vec<f32>>,
         right_hwhms: Option<Vec<f32>>,
         gap_count: usize,
-    ) -> Self {
-        let apex_index = intensity_values
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+    ) -> Result<Self> {
+        if spectrum_ids.is_empty() {
+            bail!("can't create a Peakel with empty spectrum_ids");
+        }
 
-        Self {
+        let apex_index = Peakel::calc_apex_index(&intensity_values).context("undefined peakel apex index")?;
+
+        Ok(Self {
             id: generate_peakel_id(),
             spectrum_ids: SmallVec::from_vec(spectrum_ids),
             elution_times: SmallVec::from_vec(elution_times),
@@ -391,7 +450,16 @@ impl Peakel {
             right_hwhms: right_hwhms.map(SmallVec::from_vec),
             apex_index,
             gap_count,
-        }
+        })
+    }
+
+    /// Get the index of the apex (highest intensity) data point
+    pub fn calc_apex_index(intensities :&[f32]) -> Option<usize> {
+        intensities
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(i, _)| i)
     }
 
     /// Get the number of peaks in this peakel (alias for `len()`)
@@ -400,33 +468,11 @@ impl Peakel {
         self.len()
     }
 
-    /// Calculate the weighted average m/z (alias for `calc_weighted_mz()`)
-    #[inline]
-    pub fn calc_mz(&self) -> f32 {
-        self.calc_weighted_mz()
-    }
-
-    /// Calculate the weighted average elution time
-    pub fn calc_weighted_average_time(&self) -> f32 {
-        let sum_intensity: f32 = self.intensity_values.iter().sum();
-        if sum_intensity == 0.0 {
-            return self.apex_elution_time().unwrap_or(0.0);
-        }
-
-        self
-            .elution_times
-            .iter()
-            .zip(self.intensity_values.iter())
-            .map(|(&rt, &intensity)| rt * intensity)
-            .sum::<f32>()
-            / sum_intensity
-    }
-
-    /// Calculate the peakel area (alias for `calc_area()`)
+/*    /// Calculate the peakel area (alias for `calc_area()`)
     #[inline]
     pub fn area(&self) -> f32 {
         self.calc_area()
-    }
+    }*/
 
     /// Get the mean left HWHM
     pub fn left_hwhm_mean(&self) -> f32 {
@@ -467,7 +513,7 @@ impl HasPeakelData for Peakel {
         &self.mz_values
     }
 
-    fn intensities(&self) -> &[f32] {
+    fn intensity_values(&self) -> &[f32] {
         &self.intensity_values
     }
 
@@ -612,9 +658,11 @@ impl PeakelBuilder {
     }
 
     /// Build the peakel
-    pub fn build(self) -> Peakel {
+    pub fn build(self) -> Result<Peakel> {
         let has_hwhms = self.left_hwhms.iter().any(|&h| h > 0.0)
             || self.right_hwhms.iter().any(|&h| h > 0.0);
+
+        let apex_index = Peakel::calc_apex_index(&self.intensity_values).context("undefined peakel apex index")?;
 
         Peakel::new(
             self.spectrum_ids,
@@ -631,6 +679,7 @@ impl PeakelBuilder {
             } else {
                 None
             },
+            apex_index,
             self.gap_count,
         )
     }
@@ -811,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peakel_creation() {
+    fn test_peakel_creation() -> Result<()>{
         let peakel = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![1.0, 2.0, 3.0],
@@ -820,17 +869,19 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
 
         assert_eq!(peakel.peaks_count(), 3);
         assert_eq!(peakel.apex_index(), Some(1));
         assert_eq!(peakel.apex_intensity(), Some(200.0));
         assert_eq!(peakel.apex_elution_time(), Some(2.0));
         assert_eq!(peakel.gap_count, 0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_peakel_with_gaps() {
+    fn test_peakel_with_gaps() -> Result<()> {
         let peakel = Peakel::from_vectors(
             vec![1, 3, 5],  // spectrum IDs with gaps (2 and 4 missing)
             vec![1.0, 3.0, 5.0],
@@ -839,14 +890,16 @@ mod tests {
             None,
             None,
             2,  // 2 gaps
-        );
+        )?;
 
         assert_eq!(peakel.peaks_count(), 3);
         assert_eq!(peakel.gap_count, 2);
+
+        Ok(())
     }
 
     #[test]
-    fn test_peakel_builder() {
+    fn test_peakel_builder() -> Result<()> {
         let mut builder = PeakelBuilder::new();
         builder.add(&Peak::with_hwhm(
             500.0,
@@ -870,14 +923,16 @@ mod tests {
             Some(LcContext::new(3, 3.0)),
         ));
 
-        let peakel = builder.build();
+        let peakel = builder.build()?;
         assert_eq!(peakel.peaks_count(), 3);
         assert_eq!(peakel.apex_intensity(), Some(200.0));
         assert_eq!(peakel.gap_count, 0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_peakel_builder_with_gaps() {
+    fn test_peakel_builder_with_gaps() -> Result<()> {
         let mut builder = PeakelBuilder::new();
         builder.set_gap_count(3);
         builder.add(&Peak::with_hwhm(
@@ -888,12 +943,14 @@ mod tests {
             Some(LcContext::new(1, 1.0)),
         ));
 
-        let peakel = builder.build();
+        let peakel = builder.build()?;
         assert_eq!(peakel.gap_count, 3);
+
+        Ok(())
     }
 
     #[test]
-    fn test_peakel_calculations() {
+    fn test_peakel_calculations() -> Result<()> {
         let peakel = Peakel::from_vectors(
             vec![1, 2, 3],
             vec![1.0, 2.0, 3.0],
@@ -902,9 +959,47 @@ mod tests {
             None,
             None,
             0,
-        );
+        )?;
 
         assert_eq!(peakel.calc_duration(), 2.0);
-        assert_eq!(peakel.area(), 300.0);
+        assert_eq!(peakel.calc_area(), 300.0);
+
+        Ok(())
+    }
+    
+    #[test]
+    fn test_intensity_cv() -> Result<()> {
+        // Test with known values
+        // Values: [100, 200, 300] -> mean = 200, variance = 10000, sd = 100, cv = 50%
+        let peakel = Peakel::from_vectors(
+            vec![1, 2, 3],
+            vec![1.0, 2.0, 3.0],
+            vec![500.0, 500.0, 500.0],
+            vec![100.0, 200.0, 300.0],
+            None,
+            None,
+            0,
+        )?;
+        
+        let cv = peakel.calc_intensity_cv();
+        // With sample variance (n-1): variance = ((100-200)^2 + (200-200)^2 + (300-200)^2) / 2 = 10000
+        // sd = 100, mean = 200, cv = 100 * 100 / 200 = 50%
+        assert!((cv - 50.0).abs() < 0.01, "Expected CV ~50%, got {}", cv);
+        
+        // Test with uniform values (CV should be 0)
+        let uniform_peakel = Peakel::from_vectors(
+            vec![1, 2, 3],
+            vec![1.0, 2.0, 3.0],
+            vec![500.0, 500.0, 500.0],
+            vec![100.0, 100.0, 100.0],
+            None,
+            None,
+            0,
+        )?;
+        
+        let uniform_cv = uniform_peakel.calc_intensity_cv();
+        assert_eq!(uniform_cv, 0.0, "Expected CV 0% for uniform values, got {}", uniform_cv);
+
+        Ok(())
     }
 }
