@@ -460,6 +460,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
 
     // Pre-declare all formatted strings to ensure they live long enough
     let version_str = header.version.to_string();
+    let raw_file_path = seq_row.raw_file_path();
     let sample_type_str = format!("{:?}", seq_row.injection().sample_type);
     let vol_str = format!("{:.2}", seq_row.injection().injection_volume);
     let weight_str = format!("{:.3}", seq_row.injection().sample_weight);
@@ -590,13 +591,13 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
         ("MS", "MS:1000563", "Thermo RAW format", ""),
     ];
 
-    if !creation_date.is_empty() {
-        source_params.push(("MS", "MS:1000747", "creation date", &creation_date));
+    // Add original path if available
+    if !raw_file_path.is_empty() {
+        source_params.push(("MS", "MS:1000569", "file path", &raw_file_path));
     }
 
-    // Add original path if available
-    if !seq_row.raw_file_path().is_empty() {
-        source_params.push(("MS", "MS:1000569", "file path", seq_row.raw_file_path()));
+    if !creation_date.is_empty() {
+        source_params.push(("MS", "MS:1000747", "creation date", &creation_date));
     }
 
     let source_param_tree = build_param_tree_simple(&source_params)?;
