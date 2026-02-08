@@ -271,6 +271,9 @@ pub struct SpectrumIterator<'a> {
     dia_param: Option<f64>,
     /// Pre-computed spectrum IDs matching the DIA filter (sorted for binary search)
     dia_spectrum_ids: Option<Vec<i64>>,
+    /// Fast path: when msn_bb_time_width == 0, each BB has exactly 1 spectrum.
+    /// We can decode directly from rows without buffering.
+    dia_single_spectrum_mode: bool,
 }
 
 impl<'a> SpectrumIterator<'a> {
@@ -301,6 +304,7 @@ impl<'a> SpectrumIterator<'a> {
             finished: false,
             dia_param: None,
             dia_spectrum_ids: None,
+            dia_single_spectrum_mode: false,
         })
     }
 
@@ -331,39 +335,35 @@ impl<'a> SpectrumIterator<'a> {
         precursor_mz_tol: Option<f64>,
     ) -> Result<Self> {
         let precursor_mz_tol = precursor_mz_tol.unwrap_or(0.1);
+        let msn_bb_time_width = entity_cache.msn_bb_time_width;
 
-        // Pre-compute spectrum IDs matching this isolation window
-        // Use tolerance-based matching instead of exact equality
-        let mut dia_spectrum_ids: Vec<i64> = entity_cache
-            .spectrum_headers
-            .iter()
-            .filter(|h| {
-                h.ms_level == 2 &&
-                h.precursor_mz
-                    .map(|mz| (mz - main_precursor_mz).abs() <= precursor_mz_tol)
-                    .unwrap_or(false)
-            })
-            .map(|h| h.id)
-            .collect();
+        let is_single_spectrum_bbs = msn_bb_time_width == Some(0.0);
 
-        // Ensure sorted for efficient binary search during filtering
-        dia_spectrum_ids.sort_unstable();
-
-        // Check msn_bb_time_width to determine optimal query strategy
-        let msn_bb_time_width = {
-            use crate::metadata::{get_mzdb_metadata, parse_msn_bb_time_width};
-            get_mzdb_metadata(db)
-                .ok()
-                .flatten()
-                .and_then(|metadata| parse_msn_bb_time_width(&metadata.param_tree))
+        // Only pre-compute dia_spectrum_ids when BBs contain multiple spectra
+        // (when msn_bb_time_width > 0). For single-spectrum BBs, SQL already filters.
+        let dia_spectrum_ids = if is_single_spectrum_bbs {
+            None
+        } else {
+            let mut ids: Vec<i64> = entity_cache
+                .spectrum_headers
+                .iter()
+                .filter(|h| {
+                    h.ms_level == 2 &&
+                    h.precursor_mz
+                        .map(|mz| (mz - main_precursor_mz).abs() <= precursor_mz_tol)
+                        .unwrap_or(false)
+                })
+                .map(|h| h.id)
+                .collect();
+            ids.sort_unstable();
+            Some(ids)
         };
 
         // Choose SQL query based on msn_bb_time_width:
         // - If 0: Each BB contains single spectrum, can filter by first_spectrum_id's precursor_mz
         // - If > 0: Multiple spectra per BB, must use run_slice join to filter by ms_level only
-        let stmt = if msn_bb_time_width == Some(0.0) {
+        let stmt = if is_single_spectrum_bbs {
             // Optimization: BBs contain single spectra, filter by precursor_mz
-            // Embed values directly in SQL to avoid storing them in struct
             let min_precursor_mz = main_precursor_mz - precursor_mz_tol;
             let max_precursor_mz = main_precursor_mz + precursor_mz_tol;
 
@@ -389,14 +389,15 @@ impl<'a> SpectrumIterator<'a> {
         Ok(Self {
             stmt,
             entity_cache,
-            bb_row_buffer: Vec::with_capacity(100),
-            spectrum_buffer: Vec::with_capacity(100),
+            bb_row_buffer: Vec::with_capacity(if is_single_spectrum_bbs { 0 } else { 100 }),
+            spectrum_buffer: Vec::with_capacity(if is_single_spectrum_bbs { 1 } else { 100 }),
             spectrum_buffer_idx: 0,
             prev_first_spectrum_id: None,
             rows: None,
             finished: false,
             dia_param: Some(main_precursor_mz),
-            dia_spectrum_ids: Some(dia_spectrum_ids),
+            dia_spectrum_ids,
+            dia_single_spectrum_mode: is_single_spectrum_bbs,
         })
     }
 
@@ -509,6 +510,54 @@ impl<'a> SpectrumIterator<'a> {
         self.finished = true;
         Ok(!self.spectrum_buffer.is_empty())
     }
+
+    /// Fast path: decode a single-spectrum bounding box directly into a Spectrum.
+    ///
+    /// When `msn_bb_time_width == 0`, each BB contains exactly one spectrum.
+    /// We can skip the entire index/buffer/merge pipeline and decode directly.
+    fn decode_single_spectrum_bb(&self, bb: &BoundingBox) -> Result<Spectrum> {
+        let spectrum_id = bb.first_spectrum_id;
+
+        let spectrum_header = self.entity_cache
+            .get_spectrum_header(spectrum_id)
+            .ok_or_else(|| anyhow!("spectrum header not found for ID {}", spectrum_id))?
+            .clone();
+
+        let de_cache = &self.entity_cache.data_encodings_cache;
+        let data_encoding = de_cache
+            .get_data_encoding_by_spectrum_id(&spectrum_id)
+            .ok_or_else(|| anyhow!("can't retrieve data encoding for spectrum ID={}", spectrum_id))?;
+
+        // For single-spectrum BBs: blob layout is [spectrum_id:4bytes][peaks_count:4bytes][peak_data...]
+        // The peaks start at offset 8
+        let blob = &bb.blob_data;
+        let peaks_count = if blob.len() >= 8 {
+            i32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize
+        } else {
+            0
+        };
+
+        let spectrum_data = crate::bounding_box::read_spectrum_slice_data_at(
+            bb,
+            // Create a minimal index for the single spectrum
+            &BoundingBoxIndex {
+                bb_id: bb.id,
+                spectrum_slices_count: 1,
+                spectra_ids: smallvec::smallvec![spectrum_id],
+                slices_indexes: smallvec::smallvec![0],
+                peaks_counts: smallvec::smallvec![peaks_count],
+            },
+            data_encoding,
+            0,
+            None,
+            None,
+        ).dot()?;
+
+        Ok(Spectrum {
+            header: spectrum_header,
+            data: spectrum_data,
+        })
+    }
 }
 
 impl<'a> FallibleIterator for SpectrumIterator<'a> {
@@ -516,32 +565,53 @@ impl<'a> FallibleIterator for SpectrumIterator<'a> {
     type Error = anyhow_ext::Error;
 
     fn next(&mut self) -> Result<Option<Self::Item>> {
-        // Return buffered spectra first
-        if self.spectrum_buffer_idx < self.spectrum_buffer.len() {
-            let spectrum = self.spectrum_buffer[self.spectrum_buffer_idx].clone();
-            self.spectrum_buffer_idx += 1;
-            return Ok(Some(spectrum));
-        }
+        // Fast path for DIA with single-spectrum BBs (msn_bb_time_width == 0):
+        // Decode each BB directly as it's read from SQLite — true one-at-a-time streaming.
+        if self.dia_single_spectrum_mode {
+            if self.finished {
+                return Ok(None);
+            }
 
-        // If we've exhausted the buffer and we're finished, return None
-        if self.finished {
-            return Ok(None);
-        }
-
-        // Fill the buffer with the next batch of spectra
-        let has_spectra = self.fill_spectrum_buffer()?;
-
-        if !has_spectra {
-            return Ok(None);
-        }
-
-        // Return the first spectrum from the newly filled buffer
-        if !self.spectrum_buffer.is_empty() {
-            let spectrum = self.spectrum_buffer[0].clone();
-            self.spectrum_buffer_idx = 1;
-            Ok(Some(spectrum))
+            match self.read_next_bb()? {
+                Some(bb) => {
+                    let spectrum = self.decode_single_spectrum_bb(&bb)?;
+                    Ok(Some(spectrum))
+                }
+                None => {
+                    self.finished = true;
+                    Ok(None)
+                }
+            }
         } else {
-            Ok(None)
+            // Standard path: buffer-based iteration for mixed MS1/MS2 or multi-spectrum BBs
+
+            // Return buffered spectra first
+            if self.spectrum_buffer_idx < self.spectrum_buffer.len() {
+                let spectrum = self.spectrum_buffer[self.spectrum_buffer_idx].clone();
+                self.spectrum_buffer_idx += 1;
+                return Ok(Some(spectrum));
+            }
+
+            // If we've exhausted the buffer and we're finished, return None
+            if self.finished {
+                return Ok(None);
+            }
+
+            // Fill the buffer with the next batch of spectra
+            let has_spectra = self.fill_spectrum_buffer()?;
+
+            if !has_spectra {
+                return Ok(None);
+            }
+
+            // Return the first spectrum from the newly filled buffer
+            if !self.spectrum_buffer.is_empty() {
+                let spectrum = self.spectrum_buffer[0].clone();
+                self.spectrum_buffer_idx = 1;
+                Ok(Some(spectrum))
+            } else {
+                Ok(None)
+            }
         }
     }
 }

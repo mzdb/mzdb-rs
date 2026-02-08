@@ -626,6 +626,8 @@ pub struct EntityCache {
     pub spectrum_headers: Vec<SpectrumHeader>,
     /// Map from spectrum ID to index in spectrum_headers vec
     pub spectrum_id_to_index: HashMap<i64, usize>,
+    /// Cached msn_bb_time_width from mzDB metadata (None if not found)
+    pub msn_bb_time_width: Option<f64>,
 }
 
 impl EntityCache {

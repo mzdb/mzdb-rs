@@ -12,6 +12,7 @@ use rusqlite::{Connection, Statement};
 
 use crate::model::{BBSizes, DataEncoding, DataEncodingsCache, EntityCache};
 use crate::queries::{get_param_tree_mzdb, list_data_encodings, get_spectrum_headers};
+use crate::metadata::parse_msn_bb_time_width;
 
 /// SQL queries that are frequently used and benefit from caching
 pub mod sql {
@@ -137,6 +138,7 @@ mod tests {
 pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
     let param_tree = get_param_tree_mzdb(db).dot()?.unwrap_or_default();
     let bb_sizes = BBSizes::from_xml(&param_tree)?;
+    let msn_bb_time_width = parse_msn_bb_time_width(&param_tree);
 
     let data_encodings = list_data_encodings(db)?;
 
@@ -174,6 +176,7 @@ pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
         data_encodings_cache: de_cache,
         spectrum_headers,
         spectrum_id_to_index,
+        msn_bb_time_width,
     })
 }
 

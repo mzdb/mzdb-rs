@@ -611,11 +611,12 @@ impl Ms1PeakelDetector {
         let queue_size = num_threads * 2;
         log::info!("Parallel detection: {} threads (queue size: {})", num_threads, queue_size);
 
-        // Work items carry begin_mz from the run slice header for deterministic ordering
-        let (work_tx, work_rx) = bounded::<RunSlicePeakData>(queue_size);
+        // Work items carry (batch_index, peak_data) for ordered emission
+        let (work_tx, work_rx) = bounded::<(usize, RunSlicePeakData)>(queue_size);
 
-        // Shared results: (begin_mz, peakels) for post-hoc ordering
-        let results: Mutex<Vec<(f64, Vec<Peakel>)>> = Mutex::new(Vec::new());
+        // Results channel: consumers -> main thread
+        let (result_tx, result_rx) = bounded::<(usize, Vec<Peakel>)>(queue_size);
+
         // Producer error propagation
         let producer_error: Mutex<Option<anyhow_ext::Error>> = Mutex::new(None);
         let start_time = Instant::now();
@@ -625,33 +626,32 @@ impl Ms1PeakelDetector {
             // Spawn consumer threads (borrow &self directly, no Arc/clone needed)
             for thread_id in 0..num_threads {
                 let work_rx = work_rx.clone();
-                let results = &results;
+                let result_tx = result_tx.clone();
 
                 scope.spawn(move || {
-                    let mut thread_results: Vec<(f64, Vec<Peakel>)> = Vec::new();
                     let mut items_processed = 0usize;
 
                     log::debug!("Consumer thread {} started", thread_id);
 
                     // Channel closure (from drop(work_tx)) signals end of work
-                    while let Ok(peak_data) = work_rx.recv() {
-                        let begin_mz = peak_data.current_rs_header.begin_mz;
+                    while let Ok((batch_index, peak_data)) = work_rx.recv() {
                         let peakels = self.run_walking_algorithm(&peak_data);
-                        thread_results.push((begin_mz, peakels));
+
+                        if result_tx.send((batch_index, peakels)).is_err() {
+                            log::warn!("Result channel closed, stopping consumer {}", thread_id);
+                            break;
+                        }
                         items_processed += 1;
                     }
 
                     log::debug!("Consumer thread {} finished, processed {} items", thread_id, items_processed);
-
-                    // Collect results
-                    results.lock()
-                        .expect("results mutex poisoned")
-                        .extend(thread_results);
+                    // result_tx clone is dropped here
                 });
             }
 
-            // Drop extra receiver clone so consumers can exit when producer drops sender
+            // Drop extra clones so channels close properly
             drop(work_rx);
+            drop(result_tx);
 
             // Producer: runs on a scoped thread with its own DB connection
             let producer_error = &producer_error;
@@ -670,11 +670,29 @@ impl Ms1PeakelDetector {
                 // work_tx is dropped here, closing the channel and unblocking consumers
             });
 
+            // Main thread: receive results and emit batches as they arrive
+            let mut total_peakels = 0usize;
+            let mut batches_emitted = 0usize;
+
+            for (batch_index, peakels) in result_rx {
+                total_peakels += peakels.len();
+
+                if let Err(e) = on_batch(PeakelBatch {
+                    peakels,
+                    batch_index,
+                    total_batches: 0, // not known upfront for MS1 (streaming iterator)
+                }) {
+                    log::error!("on_batch error at batch {}: {:?}", batch_index, e);
+                    break;
+                }
+                batches_emitted += 1;
+            }
+
+            log::info!("Parallel detection complete in {:?}: {} peakels in {} batches",
+                       start_time.elapsed(), total_peakels, batches_emitted);
+
             // All threads are automatically joined when scope exits
         });
-
-        let total_time = start_time.elapsed();
-        log::info!("All processing completed in {:?}", total_time);
 
         // Check for producer errors
         if let Some(e) = producer_error.into_inner()
@@ -683,24 +701,6 @@ impl Ms1PeakelDetector {
             return Err(e);
         }
 
-        // Extract and sort results by begin_mz for deterministic ordering
-        let mut collected_results = results.into_inner()
-            .map_err(|e| anyhow_ext::anyhow!("Failed to collect results: {:?}", e))?;
-
-        collected_results.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        let total_batches = collected_results.len();
-        let mut total_peakels = 0usize;
-        for (batch_index, (_begin_mz, peakels)) in collected_results.into_iter().enumerate() {
-            total_peakels += peakels.len();
-            on_batch(PeakelBatch {
-                peakels,
-                batch_index,
-                total_batches,
-            })?;
-        }
-
-        log::info!("Parallel detection complete: {} peakels in {} batches", total_peakels, total_batches);
         Ok(())
     }
 }
@@ -838,7 +838,7 @@ fn build_run_slice_peak_data(
 #[cfg(feature = "processing-parallel")]
 fn produce_run_slice_peak_data(
     mut rs_iter: RunSliceIterator,
-    work_tx: crossbeam_channel::Sender<RunSlicePeakData>,
+    work_tx: crossbeam_channel::Sender<(usize, RunSlicePeakData)>,
     ms1_headers: &HashMap<i64, SpectrumHeader>,
 ) -> Result<()> {
     use fallible_iterator::FallibleIterator;
@@ -847,6 +847,7 @@ fn produce_run_slice_peak_data(
     let mut prev_rs_number = 0i64;
     let mut current_rs_opt = rs_iter.next()?;
     let mut rs_count = 0;
+    let mut batch_index = 0usize;
 
     while current_rs_opt.is_some() {
         let current_rs = current_rs_opt.take().unwrap();
@@ -880,11 +881,12 @@ fn produce_run_slice_peak_data(
             &peak_lists_cache, &current_peak_lists, ms1_headers,
         )?;
 
-        if work_tx.send(peak_data).is_err() {
+        if work_tx.send((batch_index, peak_data)).is_err() {
             log::warn!("Work channel closed early, stopping producer");
             break;
         }
 
+        batch_index += 1;
         prev_rs_number = rs_number;
         current_rs_opt = next_rs_opt;
     }

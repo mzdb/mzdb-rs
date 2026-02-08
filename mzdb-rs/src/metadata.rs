@@ -39,7 +39,7 @@ pub struct MzDbMetadata {
 /// Query complete mzDB file metadata
 pub fn get_mzdb_metadata(db: &Connection) -> Result<Option<MzDbMetadata>> {
     let mut stmt = db
-        .prepare("SELECT version, creation_timestamp, file_content, contact, param_tree FROM mzdb LIMIT 1")
+        .prepare("SELECT version, creation_timestamp, file_content, contacts, param_tree FROM mzdb LIMIT 1")
         .dot()?;
 
     stmt.query_row([], |row| {

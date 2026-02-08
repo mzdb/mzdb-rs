@@ -370,12 +370,12 @@ impl MzDbWriter {
         conn.execute_batch(
             "CREATE UNIQUE INDEX spectrum_initial_id_idx ON spectrum (initial_id ASC,run_id ASC);
              CREATE INDEX spectrum_ms_level_idx ON spectrum (ms_level ASC,run_id ASC);
-             CREATE UNIQUE INDEX run_name_idx ON run (name);
-             CREATE UNIQUE INDEX run_slice_mz_range_idx ON run_slice (begin_mz ASC,end_mz ASC,ms_level ASC,run_id ASC);
+             CREATE INDEX spectrum_precursor_mz_idx ON spectrum (ms_level ASC, main_precursor_mz ASC);
+             CREATE INDEX spectrum_bb_first_spectrum_id_idx ON spectrum (bb_first_spectrum_id ASC);
              CREATE INDEX bounding_box_run_slice_idx ON bounding_box (run_slice_id ASC);
              CREATE INDEX bounding_box_first_spectrum_idx ON bounding_box (first_spectrum_id ASC);
-             CREATE UNIQUE INDEX controlled_vocabulary_full_name_idx ON cv (full_name);
-             CREATE INDEX controlled_vocabulary_uri_idx ON cv (uri);
+             CREATE UNIQUE INDEX run_slice_mz_range_idx ON run_slice (begin_mz ASC,end_mz ASC,ms_level ASC,run_id ASC);
+             CREATE UNIQUE INDEX run_name_idx ON run (name);
              CREATE UNIQUE INDEX source_file_name_idx ON source_file (name);
              CREATE UNIQUE INDEX sample_name_idx ON sample (name);
              CREATE UNIQUE INDEX software_name_idx ON software (name);
@@ -383,10 +383,11 @@ impl MzDbWriter {
              CREATE UNIQUE INDEX processing_method_number_idx ON processing_method (number ASC);
              CREATE UNIQUE INDEX data_processing_name_idx ON data_processing (name);
              CREATE UNIQUE INDEX chromatogram_name_idx ON chromatogram (name);
+             CREATE UNIQUE INDEX controlled_vocabulary_full_name_idx ON cv (full_name);
+             CREATE INDEX controlled_vocabulary_uri_idx ON cv (uri);
              CREATE UNIQUE INDEX cv_term_name_idx ON cv_term (name ASC);
              CREATE UNIQUE INDEX user_term_name_idx ON user_term (name ASC);
-             CREATE UNIQUE INDEX cv_unit_name_idx ON cv_unit (name ASC);
-             CREATE INDEX spectrum_bb_first_spectrum_id_idx ON spectrum (bb_first_spectrum_id ASC);"
+             CREATE UNIQUE INDEX cv_unit_name_idx ON cv_unit (name ASC);"
         ).context("Failed to create indexes")?;
 
         Ok(())

@@ -695,7 +695,10 @@ impl DiaMs2PeakelDetector {
         if num_threads > 1 {
             #[cfg(feature = "processing-parallel")]
             {
-                self.detect_parallel_in_batches(reader, windows, num_threads, on_batch)?;
+                let db_path = reader.connection().path()
+                    .ok_or_else(|| anyhow!("Cannot get database path"))?
+                    .to_string();
+                self.detect_parallel_in_batches(&db_path, windows, num_threads, on_batch)?;
             }
             #[cfg(not(feature = "processing-parallel"))]
             {
@@ -730,18 +733,25 @@ impl DiaMs2PeakelDetector {
         Ok(())
     }
 
-    /// Parallel processing of isolation windows using producer-consumer pattern,
-    /// emitting batches via callback after sorting by target m/z.
+    /// Parallel processing of isolation windows using producer-consumer pattern
+    /// with streaming ordered emission via BinaryHeap.
+    ///
+    /// Architecture:
+    /// - Producer thread: loads spectra with its own DB connection, sends through bounded work channel
+    /// - N consumer threads: run detection, send (window_index, peakels) through bounded results channel
+    /// - Main thread: receives results, reorders via BinaryHeap, calls on_batch in window order
+    ///
+    /// This ensures on_batch is called progressively (not deferred to the end),
+    /// allowing the writer to work in parallel with detection.
     #[cfg(feature = "processing-parallel")]
     fn detect_parallel_in_batches(
         &self,
-        reader: &MzDbReader,
+        db_path: &str,
         windows: &[IsolationWindow],
         num_threads: usize,
         mut on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
     ) -> Result<()> {
         use crossbeam_channel::bounded;
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Instant;
 
         let total_windows = windows.len();
@@ -750,100 +760,112 @@ impl DiaMs2PeakelDetector {
         log::info!("Processing {} isolation windows with {} consumer threads (queue size: {})",
                    total_windows, num_threads, queue_size);
 
-        // Create bounded channel - limits memory usage
-        type WorkItem = (IsolationWindow, Vec<crate::model::Spectrum>);
-        let (tx, rx) = bounded::<WorkItem>(queue_size);
+        // Work channel: producer -> consumers (spectra to process)
+        type WorkItem = (usize, IsolationWindow, Vec<crate::model::Spectrum>);
+        let (work_tx, work_rx) = bounded::<WorkItem>(queue_size);
 
-        // Shared results: (target_mz, peakels) for post-hoc ordering
-        let results: Mutex<Vec<(f64, Vec<DiaMs2PeakelRecord>)>> = Mutex::new(Vec::new());
+        // Results channel: consumers -> main thread (detected peakels with window index)
+        let (result_tx, result_rx) = bounded::<(usize, Vec<DiaMs2PeakelRecord>)>(queue_size);
+
         // Producer error propagation
         let producer_error: Mutex<Option<anyhow_ext::Error>> = Mutex::new(None);
-        let windows_processed = AtomicUsize::new(0);
-        let windows_loaded = AtomicUsize::new(0);
-
         let start_time = Instant::now();
 
-        // Use std::thread::scope for scoped threads
         std::thread::scope(|scope| {
             // Spawn consumer threads
             for thread_id in 0..num_threads {
-                let rx = rx.clone();
-                let results = &results;
-                let windows_processed = &windows_processed;
+                let work_rx = work_rx.clone();
+                let result_tx = result_tx.clone();
 
                 scope.spawn(move || {
-                    let mut thread_results: Vec<(f64, Vec<DiaMs2PeakelRecord>)> = Vec::new();
                     let mut items_processed = 0usize;
-
                     log::debug!("Consumer thread {} started", thread_id);
 
-                    // Receive work items until channel is closed
-                    while let Result::Ok((window, spectra)) = rx.recv() {
-                        let process_start = Instant::now();
-
+                    while let std::result::Result::Ok((window_idx, window, spectra)) = work_rx.recv() {
                         let peakels = self.detect_from_spectra(&window, &spectra);
-                        thread_results.push((window.target_mz, peakels));
+
+                        log::debug!("Thread {} processed window {}/{}: {:.1} m/z ({} spectra, {} peakels)",
+                                   thread_id, window_idx + 1, total_windows,
+                                   window.target_mz, spectra.len(), peakels.len());
+
+                        // Send result to main thread for ordered emission
+                        // This blocks if main thread is slow (backpressure)
+                        if result_tx.send((window_idx, peakels)).is_err() {
+                            log::warn!("Result channel closed, stopping consumer {}", thread_id);
+                            break;
+                        }
                         items_processed += 1;
-
-                        let count = windows_processed.fetch_add(1, Ordering::Relaxed) + 1;
-                        let process_time = process_start.elapsed();
-
-                        log::debug!("Thread {} processed window {:.1} m/z ({} spectra) in {:?} [{}/{}]",
-                                   thread_id, window.target_mz, spectra.len(), process_time, count, total_windows);
                     }
 
                     log::debug!("Consumer thread {} finished, processed {} items", thread_id, items_processed);
-
-                    // Collect results
-                    results.lock()
-                        .expect("results mutex poisoned")
-                        .extend(thread_results);
+                    // result_tx clone is dropped here
                 });
             }
 
-            // Drop extra receiver clone so consumers can exit when producer is done
-            drop(rx);
+            // Drop extra clones so channels close properly when all producers/consumers finish
+            drop(work_rx);
+            drop(result_tx);
 
-            // Producer: load spectra using efficient SQL filtering and send to queue
+            // Producer: runs on a scoped thread with its own DB connection
             let producer_error = &producer_error;
-            log::info!("Producer starting to load spectra (using efficient SQL filtering)...");
-            for window in windows {
-                let load_start = Instant::now();
+            scope.spawn(move || {
+                let result: Result<()> = (|| {
+                    let producer_reader = MzDbReader::builder(db_path)
+                        .read_only()
+                        .build()?;
 
-                // Use efficient method that filters by main_precursor_mz in SQL
-                let tolerance = (window.upper_mz - window.lower_mz) / 2.0;
-                let spectra = match reader.get_dia_spectra_for_window(window.target_mz, Some(tolerance)) {
-                    std::result::Result::Ok(s) => s,
-                    std::result::Result::Err(e) => {
-                        log::error!("Failed to load spectra for window {:.1} m/z: {:?}", window.target_mz, e);
-                        *producer_error.lock().expect("producer_error mutex poisoned") = Some(e);
-                        break;
+                    log::info!("Producer starting to load spectra...");
+
+                    for (idx, window) in windows.iter().enumerate() {
+                        let tolerance = (window.upper_mz - window.lower_mz) / 2.0;
+                        let spectra = producer_reader.get_dia_spectra_for_window(
+                            window.target_mz, Some(tolerance)
+                        )?;
+
+                        log::debug!("Producer loaded window {}/{}: {:.1} m/z ({} spectra)",
+                                   idx + 1, total_windows, window.target_mz, spectra.len());
+
+                        if work_tx.send((idx, window.clone(), spectra)).is_err() {
+                            log::warn!("Work channel closed early, stopping producer");
+                            break;
+                        }
                     }
-                };
 
-                let load_time = load_start.elapsed();
-                let loaded = windows_loaded.fetch_add(1, Ordering::Relaxed) + 1;
+                    log::debug!("Producer finished: {} windows", total_windows);
+                    Ok(())
+                })();
 
-                log::debug!("Producer loaded window {}/{}: {:.1} m/z ({} spectra) in {:?}",
-                           loaded, total_windows, window.target_mz, spectra.len(), load_time);
+                if let Err(e) = result {
+                    log::error!("Producer error: {:?}", e);
+                    *producer_error.lock().expect("producer_error mutex poisoned") = Some(e);
+                }
+                // work_tx is dropped here, closing the work channel
+            });
 
-                // This will block if queue is full (bounded backpressure)
-                if tx.send((window.clone(), spectra)).is_err() {
-                    log::error!("Failed to send work item to queue");
+            // Main thread: receive results and emit batches as they arrive.
+            // No ordering needed — the peakeldb writer is order-independent.
+            let mut total_peakels = 0usize;
+            let mut batches_emitted = 0usize;
+
+            for (window_idx, peakels) in result_rx {
+                total_peakels += peakels.len();
+
+                if let Err(e) = on_batch(PeakelBatch {
+                    peakels,
+                    batch_index: window_idx,
+                    total_batches: total_windows,
+                }) {
+                    log::error!("on_batch error at window {}: {:?}", window_idx, e);
                     break;
                 }
+                batches_emitted += 1;
             }
 
-            log::info!("Producer finished loading all {} windows", total_windows);
+            log::info!("Parallel detection complete in {:?}: {} peakels in {} batches",
+                       start_time.elapsed(), total_peakels, batches_emitted);
 
-            // Drop sender to signal consumers that no more work is coming
-            drop(tx);
-
-            // Threads are automatically joined when scope exits
+            // All threads are automatically joined when scope exits
         });
-
-        let total_time = start_time.elapsed();
-        log::info!("All processing completed in {:?}", total_time);
 
         // Check for producer errors
         if let Some(e) = producer_error.into_inner()
@@ -852,24 +874,6 @@ impl DiaMs2PeakelDetector {
             return Err(e);
         }
 
-        // Extract and sort results by target_mz for deterministic ordering
-        let mut collected_results = results.into_inner()
-            .map_err(|e| anyhow!("Failed to collect results: {:?}", e))?;
-
-        collected_results.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-        let total_batches = collected_results.len();
-        let mut total_peakels = 0usize;
-        for (batch_index, (_target_mz, peakels)) in collected_results.into_iter().enumerate() {
-            total_peakels += peakels.len();
-            on_batch(PeakelBatch {
-                peakels,
-                batch_index,
-                total_batches,
-            })?;
-        }
-
-        log::info!("Parallel detection complete: {} peakels in {} batches", total_peakels, total_batches);
         Ok(())
     }
 
