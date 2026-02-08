@@ -36,11 +36,10 @@
 //!
 //! # Module Organization
 //!
-//! - [`signal`]: Signal processing algorithms (filtering and detection)
+//! - [`signal`]: Signal processing algorithms (filtering, detection, MS1/MS2 peakel detection)
 //! - [`math`]: Mathematical utilities (derivatives, histograms, statistics)
 //! - [`ms`]: Mass spectrometry utilities (m/z conversions, isotope patterns)
 //! - [`model`]: Core data structures (Peak, Peakel, Feature, etc.)
-//! - [`dia`]: DIA (Data Independent Acquisition) MS2 peakel detection
 //! - [`dia_simplifier`]: DIA file simplification (requires `shrinkdia` feature)
 //! - [`staggered`]: Staggered DIA detection and unstaggering support
 
@@ -48,7 +47,6 @@ pub mod signal;
 pub mod math;
 pub mod ms;
 pub mod model;
-pub mod dia;
 pub mod peakeldb;
 pub mod staggered;
 
@@ -80,6 +78,7 @@ pub use signal::detection::{
     find_nearest_peak_from_slices,
     sort_indices_by_descending_f32_value, is_target_mz_within_range,
     create_peakel_finder,
+    PeakelBatch,
 };
 
 // Re-export MS1 detection types
@@ -87,7 +86,7 @@ pub use signal::ms1_detection::{
     Ms1PeakelDetector, Ms1PeakelConfig,
 };
 
-// Re-export MS2 detection types (also available via dia module)
+// Re-export MS2 detection types
 pub use signal::ms2_detection::{
     IsolationWindow, DiaMs2PeakelRecord, DiaMs2PeakelConfig,
     DiaMs2PeakelDetector,
@@ -106,12 +105,9 @@ pub use math::{
     median, mad, robust_noise_threshold,
 };
 
-// Re-export DIA types (for backward compatibility, these come from signal::ms2_detection)
-pub use dia::write_dia_peakeldb;
-
 // Re-export peakeldb types
 pub use peakeldb::{
-    ExtendedPeakel, PeakelSerializer,
+    ExtendedPeakel, PeakelSerializer, PeakelWriterStats, PeakelDbWriter,
     chrono_lite_timestamp,
     Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,

@@ -30,7 +30,7 @@
 //!
 //! let reader = MzDbReader::open("file.mzDB").unwrap();
 //! let detector = Ms1PeakelDetector::new();
-//! let peakels = detector.detect_peakels_with_threads(&reader, 4).unwrap();
+//! let peakels = detector.detect_all_peakels_with_threads(&reader, 4).unwrap();
 //! println!("Detected {} MS1 peakels", peakels.len());
 //! ```
 
@@ -45,7 +45,7 @@ use crate::processing::Peakel;
 use crate::iterator::RunSliceIterator;
 use super::detection::{
     find_nearest_peak_from_slices, is_target_mz_within_range, sort_indices_by_descending_f32_value,
-    PeakelDetectionConfig, SpectrumPeakLookup, SortedPeaksProvider, PeakelDetector,
+    PeakelBatch, PeakelDetectionConfig, SpectrumPeakLookup, SortedPeaksProvider, PeakelDetector,
 };
 
 // ============================================================================
@@ -427,26 +427,48 @@ impl Ms1PeakelDetector {
         Self { config }
     }
 
-    /// Detect peakels with single thread
-    pub fn detect_peakels(&self, reader: &MzDbReader) -> Result<Vec<Peakel>> {
-        self.detect_peakels_with_threads(reader, 1)
+    /// Detect all peakels with single thread
+    pub fn detect_all_peakels(&self, reader: &MzDbReader) -> Result<Vec<Peakel>> {
+        self.detect_all_peakels_with_threads(reader, 1)
     }
 
-    /// Detect peakels with configurable parallelism
-    pub fn detect_peakels_with_threads(
+    /// Detect all peakels with configurable parallelism
+    pub fn detect_all_peakels_with_threads(
         &self,
         reader: &MzDbReader,
         num_threads: usize,
     ) -> Result<Vec<Peakel>> {
-        self.detect_peakels_impl(reader, num_threads)
+        let mut all_peakels = Vec::new();
+        self.detect_peakels_in_batches_with_threads(reader, num_threads, |batch| {
+            all_peakels.extend(batch.peakels);
+            Ok(())
+        })?;
+        Ok(all_peakels)
     }
 
-    /// Main detection implementation
-    fn detect_peakels_impl(
+    /// Detect peakels in batches (one batch per run slice), single-threaded.
+    ///
+    /// The callback receives a `PeakelBatch<Peakel>` for each run slice,
+    /// allowing streaming writes without accumulating all peakels in memory.
+    pub fn detect_peakels_in_batches(
+        &self,
+        reader: &MzDbReader,
+        on_batch: impl FnMut(PeakelBatch<Peakel>) -> Result<()>,
+    ) -> Result<()> {
+        self.detect_peakels_in_batches_with_threads(reader, 1, on_batch)
+    }
+
+    /// Detect peakels in batches with configurable parallelism.
+    ///
+    /// The callback receives a `PeakelBatch<Peakel>` for each run slice.
+    /// In parallel mode, batches are sorted by run slice begin_mz before
+    /// being emitted to the callback, ensuring deterministic ordering.
+    pub fn detect_peakels_in_batches_with_threads(
         &self,
         reader: &MzDbReader,
         num_threads: usize,
-    ) -> Result<Vec<Peakel>> {
+        on_batch: impl FnMut(PeakelBatch<Peakel>) -> Result<()>,
+    ) -> Result<()> {
         use crate::cache::create_entity_cache;
 
         log::info!("Starting MS1 peakel detection");
@@ -464,7 +486,7 @@ impl Ms1PeakelDetector {
         log::info!("Found {} MS1 spectra", ms1_headers.len());
 
         if ms1_headers.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         if num_threads > 1 {
@@ -473,35 +495,35 @@ impl Ms1PeakelDetector {
                 let db_path = reader.connection().path()
                     .ok_or_else(|| anyhow_ext::anyhow!("Cannot get database path"))?
                     .to_string();
-                self.detect_parallel(&db_path, &ms1_headers, num_threads)
+                self.detect_parallel_in_batches(&db_path, &ms1_headers, num_threads, on_batch)
             }
             #[cfg(not(feature = "processing-parallel"))]
             {
                 log::warn!("Parallel processing not enabled, using sequential");
                 let rs_iter = RunSliceIterator::new(connection, &entity_cache)?;
-                self.detect_sequential(rs_iter, &ms1_headers)
+                self.detect_sequential_in_batches(rs_iter, &ms1_headers, on_batch)
             }
         } else {
             let rs_iter = RunSliceIterator::new(connection, &entity_cache)?;
-            self.detect_sequential(rs_iter, &ms1_headers)
+            self.detect_sequential_in_batches(rs_iter, &ms1_headers, on_batch)
         }
     }
 
-    /// Sequential detection
-    fn detect_sequential<'a>(
+    /// Sequential detection, emitting batches via callback
+    fn detect_sequential_in_batches<'a>(
         &self,
         mut rs_iter: RunSliceIterator<'a>,
         ms1_headers: &HashMap<i64, SpectrumHeader>,
-    ) -> Result<Vec<Peakel>> {
+        mut on_batch: impl FnMut(PeakelBatch<Peakel>) -> Result<()>,
+    ) -> Result<()> {
         use fallible_iterator::FallibleIterator;
 
-        let mut all_peakels = Vec::new();
-
-        // Sliding window cache
-        let mut peak_lists_cache: HashMap<i64, HashMap<i64, PeakListRef>> = HashMap::new();
+        // Sliding window cache (Arc avoids cloning inner HashMaps)
+        let mut peak_lists_cache: HashMap<i64, Arc<HashMap<i64, PeakListRef>>> = HashMap::new();
         let mut prev_rs_number = 0i64;
         let mut current_rs_opt = rs_iter.next()?;
         let mut rs_count = 0;
+        let mut total_peakels = 0usize;
 
         while current_rs_opt.is_some() {
             let current_rs = current_rs_opt.take().unwrap();
@@ -530,11 +552,11 @@ impl Ms1PeakelDetector {
                 rsn == prev_rs_number || rsn == rs_number || rsn == next_rs_number
             });
 
-            peak_lists_cache.insert(rs_number, current_peak_lists.clone());
+            peak_lists_cache.insert(rs_number, Arc::new(current_peak_lists.clone()));
 
             if let Some(ref next_rs) = next_rs_opt {
                 let next_peak_lists = extract_peak_lists(next_rs, ms1_headers);
-                peak_lists_cache.insert(next_rs_number, next_peak_lists);
+                peak_lists_cache.insert(next_rs_number, Arc::new(next_peak_lists));
             }
 
             let peak_data = build_run_slice_peak_data(
@@ -547,89 +569,139 @@ impl Ms1PeakelDetector {
                 ms1_headers,
             )?;
 
-            let mut peakels = self.detect_from_peak_data(&peak_data);
+            let peakels = self.run_walking_algorithm(&peak_data);
 
             log::debug!("Run slice {}: detected {} peakels", rs_number, peakels.len());
-            all_peakels.append(&mut peakels);
+            total_peakels += peakels.len();
+
+            on_batch(PeakelBatch {
+                peakels,
+                batch_index: rs_count - 1,
+                total_batches: 0, // unknown in sequential mode
+            })?;
 
             prev_rs_number = rs_number;
             current_rs_opt = next_rs_opt;
         }
 
-        log::info!("Detection complete: {} run slices, {} peakels", rs_count, all_peakels.len());
-        Ok(all_peakels)
+        log::info!("Detection complete: {} run slices, {} peakels", rs_count, total_peakels);
+        Ok(())
     }
 
-    /// Parallel detection
+    /// Parallel detection using scoped threads, emitting batches via callback.
+    ///
+    /// Uses `std::thread::scope` for safe borrowing without `Arc` overhead,
+    /// and channel-drop shutdown (no sentinel values needed).
+    /// Results are sorted by run slice begin_mz for deterministic output ordering,
+    /// then emitted to the callback in order.
     #[cfg(feature = "processing-parallel")]
-    fn detect_parallel(
+    fn detect_parallel_in_batches(
         &self,
         db_path: &str,
         ms1_headers: &HashMap<i64, SpectrumHeader>,
         num_threads: usize,
-    ) -> Result<Vec<Peakel>> {
-        use crossbeam_channel::{bounded, unbounded};
+        mut on_batch: impl FnMut(PeakelBatch<Peakel>) -> Result<()>,
+    ) -> Result<()> {
+        use crossbeam_channel::bounded;
         use rusqlite::Connection;
+        use std::sync::Mutex;
+        use std::time::Instant;
         use crate::cache::create_entity_cache;
 
         let queue_size = num_threads * 2;
-        log::info!("Parallel detection: {} threads", num_threads);
+        log::info!("Parallel detection: {} threads (queue size: {})", num_threads, queue_size);
 
-        let (work_tx, work_rx) = bounded::<Option<RunSlicePeakData>>(queue_size);
-        let (results_tx, results_rx) = unbounded::<Vec<Peakel>>();
+        // Work items carry begin_mz from the run slice header for deterministic ordering
+        let (work_tx, work_rx) = bounded::<RunSlicePeakData>(queue_size);
 
-        let config = self.config.clone();
-        let ms1_headers = Arc::new(ms1_headers.clone());
-        let db_path = db_path.to_string();
+        // Shared results: (begin_mz, peakels) for post-hoc ordering
+        let results: Mutex<Vec<(f64, Vec<Peakel>)>> = Mutex::new(Vec::new());
+        // Producer error propagation
+        let producer_error: Mutex<Option<anyhow_ext::Error>> = Mutex::new(None);
+        let start_time = Instant::now();
 
-        // Producer thread
-        let ms1_headers_producer = Arc::clone(&ms1_headers);
-        let producer_handle = std::thread::spawn(move || -> Result<()> {
-            let connection = Connection::open(&db_path)?;
-            let entity_cache = create_entity_cache(&connection)?;
-            let rs_iter = RunSliceIterator::new(&connection, &entity_cache)?;
-            produce_run_slice_peak_data(rs_iter, work_tx, &ms1_headers_producer, num_threads)
+        // Use std::thread::scope for safe borrowing
+        std::thread::scope(|scope| {
+            // Spawn consumer threads (borrow &self directly, no Arc/clone needed)
+            for thread_id in 0..num_threads {
+                let work_rx = work_rx.clone();
+                let results = &results;
+
+                scope.spawn(move || {
+                    let mut thread_results: Vec<(f64, Vec<Peakel>)> = Vec::new();
+                    let mut items_processed = 0usize;
+
+                    log::debug!("Consumer thread {} started", thread_id);
+
+                    // Channel closure (from drop(work_tx)) signals end of work
+                    while let Ok(peak_data) = work_rx.recv() {
+                        let begin_mz = peak_data.current_rs_header.begin_mz;
+                        let peakels = self.run_walking_algorithm(&peak_data);
+                        thread_results.push((begin_mz, peakels));
+                        items_processed += 1;
+                    }
+
+                    log::debug!("Consumer thread {} finished, processed {} items", thread_id, items_processed);
+
+                    // Collect results
+                    results.lock()
+                        .expect("results mutex poisoned")
+                        .extend(thread_results);
+                });
+            }
+
+            // Drop extra receiver clone so consumers can exit when producer drops sender
+            drop(work_rx);
+
+            // Producer: runs on a scoped thread with its own DB connection
+            let producer_error = &producer_error;
+            scope.spawn(move || {
+                let result: Result<()> = (|| {
+                    let connection = Connection::open(db_path)?;
+                    let entity_cache = create_entity_cache(&connection)?;
+                    let rs_iter = RunSliceIterator::new(&connection, &entity_cache)?;
+                    produce_run_slice_peak_data(rs_iter, work_tx, ms1_headers)
+                })();
+
+                if let Err(e) = result {
+                    log::error!("Producer error: {:?}", e);
+                    *producer_error.lock().expect("producer_error mutex poisoned") = Some(e);
+                }
+                // work_tx is dropped here, closing the channel and unblocking consumers
+            });
+
+            // All threads are automatically joined when scope exits
         });
 
-        // Consumer threads
-        let mut consumer_handles = Vec::new();
-        for thread_id in 0..num_threads {
-            let work_rx = work_rx.clone();
-            let results_tx = results_tx.clone();
-            let config = config.clone();
+        let total_time = start_time.elapsed();
+        log::info!("All processing completed in {:?}", total_time);
 
-            let handle = std::thread::spawn(move || -> Result<()> {
-                let detector = Ms1PeakelDetector { config };
-                while let Ok(Some(peak_data)) = work_rx.recv() {
-                    let peakels = detector.detect_from_peak_data(&peak_data);
-                    results_tx.send(peakels).ok();
-                }
-                log::debug!("Consumer {} finished", thread_id);
-                Ok(())
-            });
-            consumer_handles.push(handle);
+        // Check for producer errors
+        if let Some(e) = producer_error.into_inner()
+            .map_err(|e| anyhow_ext::anyhow!("Failed to check producer error: {:?}", e))?
+        {
+            return Err(e);
         }
 
-        drop(work_rx);
-        drop(results_tx);
+        // Extract and sort results by begin_mz for deterministic ordering
+        let mut collected_results = results.into_inner()
+            .map_err(|e| anyhow_ext::anyhow!("Failed to collect results: {:?}", e))?;
 
-        let mut all_peakels = Vec::new();
-        while let Ok(peakels) = results_rx.recv() {
-            all_peakels.extend(peakels);
+        collected_results.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let total_batches = collected_results.len();
+        let mut total_peakels = 0usize;
+        for (batch_index, (_begin_mz, peakels)) in collected_results.into_iter().enumerate() {
+            total_peakels += peakels.len();
+            on_batch(PeakelBatch {
+                peakels,
+                batch_index,
+                total_batches,
+            })?;
         }
 
-        if let Err(e) = producer_handle.join() {
-            log::error!("Producer panicked: {:?}", e);
-        }
-
-        for handle in consumer_handles {
-            if let Err(e) = handle.join() {
-                log::error!("Consumer panicked: {:?}", e);
-            }
-        }
-
-        log::info!("Parallel detection complete: {} peakels", all_peakels.len());
-        Ok(all_peakels)
+        log::info!("Parallel detection complete: {} peakels in {} batches", total_peakels, total_batches);
+        Ok(())
     }
 }
 
@@ -676,7 +748,7 @@ fn build_run_slice_peak_data(
     prev_rs_number: i64,
     current_rs_number: i64,
     next_rs_number: i64,
-    peak_lists_cache: &HashMap<i64, HashMap<i64, PeakListRef>>,
+    peak_lists_cache: &HashMap<i64, Arc<HashMap<i64, PeakListRef>>>,
     current_peak_lists: &HashMap<i64, PeakListRef>,
     ms1_headers: &HashMap<i64, SpectrumHeader>,
 ) -> Result<RunSlicePeakData> {
@@ -718,8 +790,8 @@ fn build_run_slice_peak_data(
         }
     }
 
-    // Sort by time
-    spectra.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by time (total_cmp handles NaN deterministically)
+    spectra.sort_by(|a, b| a.time.total_cmp(&b.time));
 
     // Rebuild index
     spectrum_idx_map.clear();
@@ -758,17 +830,20 @@ fn build_run_slice_peak_data(
     })
 }
 
-/// Producer for parallel processing
+/// Producer for parallel processing.
+///
+/// Iterates run slices with a sliding window [prev, current, next],
+/// builds peak data, and sends it to the work channel.
+/// Channel closure (via drop of the Sender) signals consumers to stop.
 #[cfg(feature = "processing-parallel")]
 fn produce_run_slice_peak_data(
     mut rs_iter: RunSliceIterator,
-    work_tx: crossbeam_channel::Sender<Option<RunSlicePeakData>>,
+    work_tx: crossbeam_channel::Sender<RunSlicePeakData>,
     ms1_headers: &HashMap<i64, SpectrumHeader>,
-    num_consumers: usize,
 ) -> Result<()> {
     use fallible_iterator::FallibleIterator;
 
-    let mut peak_lists_cache: HashMap<i64, HashMap<i64, PeakListRef>> = HashMap::new();
+    let mut peak_lists_cache: HashMap<i64, Arc<HashMap<i64, PeakListRef>>> = HashMap::new();
     let mut prev_rs_number = 0i64;
     let mut current_rs_opt = rs_iter.next()?;
     let mut rs_count = 0;
@@ -794,10 +869,10 @@ fn produce_run_slice_peak_data(
             rsn == prev_rs_number || rsn == rs_number || rsn == next_rs_number
         });
 
-        peak_lists_cache.insert(rs_number, current_peak_lists.clone());
+        peak_lists_cache.insert(rs_number, Arc::new(current_peak_lists.clone()));
 
         if let Some(ref next_rs) = next_rs_opt {
-            peak_lists_cache.insert(next_rs_number, extract_peak_lists(next_rs, ms1_headers));
+            peak_lists_cache.insert(next_rs_number, Arc::new(extract_peak_lists(next_rs, ms1_headers)));
         }
 
         let peak_data = build_run_slice_peak_data(
@@ -805,7 +880,8 @@ fn produce_run_slice_peak_data(
             &peak_lists_cache, &current_peak_lists, ms1_headers,
         )?;
 
-        if work_tx.send(Some(peak_data)).is_err() {
+        if work_tx.send(peak_data).is_err() {
+            log::warn!("Work channel closed early, stopping producer");
             break;
         }
 
@@ -813,10 +889,7 @@ fn produce_run_slice_peak_data(
         current_rs_opt = next_rs_opt;
     }
 
-    for _ in 0..num_consumers {
-        work_tx.send(None).ok();
-    }
-
+    // work_tx is dropped when this function returns, closing the channel
     log::debug!("Producer finished: {} run slices", rs_count);
     Ok(())
 }

@@ -34,7 +34,7 @@ use anyhow_ext::Result;
 use roxmltree::Document;
 use rusqlite::Connection;
 
-use crate::processing::dia::IsolationWindow;
+use crate::processing::signal::ms2_detection::IsolationWindow;
 use crate::processing::peakeldb::ExtendedPeakel;
 use crate::processing::model::{HasPeakelData, generate_peakel_id};
 use crate::processing::Peakel;

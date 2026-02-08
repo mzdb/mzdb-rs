@@ -33,7 +33,7 @@ pub mod ms2;
 
 // Re-export common types
 pub use common::{
-    ExtendedPeakel, PeakelSerializer,
+    ExtendedPeakel, PeakelSerializer, PeakelWriterStats, PeakelDbWriter,
     chrono_lite_timestamp,
 };
 

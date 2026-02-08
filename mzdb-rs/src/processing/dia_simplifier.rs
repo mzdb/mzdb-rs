@@ -33,7 +33,7 @@ use anyhow_ext::{bail, Context, Result};
 use ordered_float::OrderedFloat;
 use rusqlite::Connection;
 
-use crate::processing::dia::IsolationWindow;
+use crate::processing::signal::ms2_detection::IsolationWindow;
 use crate::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel};
 use crate::processing::staggered::{StaggeredDiaDetector, StaggeredDiaInfo};
 use crate::model::{SpectrumHeader as ModelSpectrumHeader, Spectrum, SpectrumData, DataEncoding};

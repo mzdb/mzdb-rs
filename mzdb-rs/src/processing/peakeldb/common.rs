@@ -3,12 +3,164 @@
 //! This module provides shared types and functions for peakelDB operations:
 //! - `PeakelSerializer`: Static methods for MessagePack serialization/deserialization of peakel data
 //! - `ExtendedPeakel`: Complete peakel with summary fields + raw data (for DB read/write)
+//! - `PeakelWriterStats`: Running statistics accumulated during batch writes
+//! - `PeakelDbWriter`: Trait shared by MS1 and MS2 peakelDB writers
 //! - Timestamp generation
 
 use anyhow_ext::Result;
+use rusqlite::Connection;
 
 use crate::processing::model::HasPeakelData;
 use crate::processing::Peakel;
+
+// ============================================================================
+// PeakelDbWriter trait
+// ============================================================================
+
+/// Trait shared by MS1 and MS2 peakelDB writers.
+///
+/// Provides a common interface for batch writing, finalization, and statistics access.
+pub trait PeakelDbWriter {
+    /// The peakel record type written by this writer.
+    type Record;
+
+    fn connection(&mut self) -> &Connection;
+
+    /// Finalize a peakelDB: update the peakel count in lcms_map and commit the transaction.
+    fn finalize_peakeldb(&mut self) -> Result<i64> {
+        let peakel_count = self.stats().peakel_count();
+        self.connection().execute(
+            "UPDATE lcms_map SET peakel_count = ? WHERE id = 1",
+            rusqlite::params![peakel_count as i32],
+        )?;
+        self.connection().execute("COMMIT", [])?;
+
+        Ok(peakel_count)
+    }
+
+    /// Write a batch of peakels to the database.
+    fn write_peakels_batch(&mut self, peakels: &[Self::Record]) -> Result<()>;
+
+    /// Convenience method to write all peakels in a single batch.
+    fn write_all_peakels(&mut self, peakels: &[Self::Record]) -> Result<()> {
+        self.write_peakels_batch(peakels)
+    }
+
+    /// Finalize the database: update peakel count and commit the transaction.
+    ///
+    /// Users should call this explicitly. If not called, `Drop` will attempt
+    /// to finalize but cannot propagate errors.
+    fn close(&mut self) -> Result<()>;
+
+    /// Get the running statistics accumulated during writes.
+    fn stats(&self) -> &PeakelWriterStats;
+}
+
+// ============================================================================
+// PeakelWriterStats - Running statistics
+// ============================================================================
+
+/// Running statistics accumulated during peakelDB batch writes.
+///
+/// Updated incrementally as peakels are written, so statistics are available
+/// without keeping all peakels in memory.
+///
+/// # Example
+/// ```ignore
+/// let writer = Ms1PeakelDbWriter::create("output.peakelDB", "input.mzDB", false)?;
+/// // ... write batches ...
+/// writer.stats().print_summary("MS1 Peakel Statistics");
+/// ```
+#[derive(Debug, Clone)]
+pub struct PeakelWriterStats {
+    count: i64,
+    total_area: f64,
+    sum_duration: f64,
+    sum_peaks: i64,
+    min_mz: f32,
+    max_mz: f32,
+    min_rt: f32,
+    max_rt: f32,
+}
+
+impl Default for PeakelWriterStats {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            total_area: 0.0,
+            sum_duration: 0.0,
+            sum_peaks: 0,
+            min_mz: f32::INFINITY,
+            max_mz: f32::NEG_INFINITY,
+            min_rt: f32::INFINITY,
+            max_rt: f32::NEG_INFINITY,
+        }
+    }
+}
+
+impl PeakelWriterStats {
+    /// Create a new empty stats accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Update stats from a single peakel implementing `HasPeakelData`.
+    pub fn add_peakel<T: HasPeakelData>(&mut self, peakel: &T) {
+        self.count += 1;
+        self.total_area += peakel.calc_area() as f64;
+        self.sum_duration += peakel.calc_duration() as f64;
+        self.sum_peaks += peakel.len() as i64;
+
+        let mz = peakel.apex_mz().unwrap_or(f32::NAN);
+        if !mz.is_nan() {
+            self.min_mz = self.min_mz.min(mz);
+            self.max_mz = self.max_mz.max(mz);
+        }
+
+        let rt = peakel.apex_elution_time().unwrap_or(f32::NAN);
+        if !rt.is_nan() {
+            self.min_rt = self.min_rt.min(rt);
+            self.max_rt = self.max_rt.max(rt);
+        }
+    }
+
+    /// Update stats from a batch of peakels.
+    pub fn add_peakels<T: HasPeakelData>(&mut self, peakels: &[T]) {
+        for peakel in peakels {
+            self.add_peakel(peakel);
+        }
+    }
+
+    /// Total number of peakels written.
+    pub fn peakel_count(&self) -> i64 {
+        self.count
+    }
+
+    /// Total integrated area across all peakels.
+    pub fn total_area(&self) -> f64 {
+        self.total_area
+    }
+
+    /// Average peakel duration in seconds.
+    pub fn avg_duration(&self) -> f64 {
+        if self.count > 0 { self.sum_duration / self.count as f64 } else { 0.0 }
+    }
+
+    /// Average number of peaks per peakel.
+    pub fn avg_peaks(&self) -> f64 {
+        if self.count > 0 { self.sum_peaks as f64 / self.count as f64 } else { 0.0 }
+    }
+
+    /// M/z range as (min, max). Returns (NaN, NaN) if no peakels.
+    pub fn mz_range(&self) -> (f32, f32) {
+        (self.min_mz, self.max_mz)
+    }
+
+    /// Retention time range in seconds as (min, max). Returns (NaN, NaN) if no peakels.
+    pub fn rt_range(&self) -> (f32, f32) {
+        (self.min_rt, self.max_rt)
+    }
+}
 
 // ============================================================================
 // PeakelSerializer - MessagePack serialization/deserialization

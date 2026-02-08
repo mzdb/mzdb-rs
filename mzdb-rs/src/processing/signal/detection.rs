@@ -88,6 +88,24 @@ pub trait SortedPeaksProvider {
 }
 
 // ============================================================================
+// Peakel Batch
+// ============================================================================
+
+/// A batch of peakels detected from a single processing unit
+/// (one run slice for MS1, one isolation window for MS2).
+///
+/// Used by `detect_peakels_in_batches` to stream results without
+/// accumulating all peakels in memory.
+pub struct PeakelBatch<T> {
+    /// The detected peakels in this batch
+    pub peakels: Vec<T>,
+    /// Batch index (0-based, in processing order)
+    pub batch_index: usize,
+    /// Total number of batches expected (0 if unknown)
+    pub total_batches: usize,
+}
+
+// ============================================================================
 // Peakel Detector Trait
 // ============================================================================
 
@@ -114,7 +132,7 @@ pub trait SortedPeaksProvider {
 /// }
 /// 
 /// // Use the default walking algorithm
-/// let peakels = detector.detect_from_peak_data(&peak_data);
+/// let peakels = detector.run_walking_algorithm(&peak_data);
 /// ```
 pub trait PeakelDetector {
     /// Configuration type for detection parameters
@@ -137,7 +155,7 @@ pub trait PeakelDetector {
     /// 4. Validates and builds peakels
     /// 
     /// Override this method only if you need completely custom detection logic.
-    fn detect_from_peak_data(&self, peak_data: &Self::PeakData) -> Vec<Peakel>
+    fn run_walking_algorithm(&self, peak_data: &Self::PeakData) -> Vec<Peakel>
     where
         <Self::PeakData as SortedPeaksProvider>::SpectrumLookup: 
             SpectrumPeakLookup<PeakKey = <Self::PeakData as SortedPeaksProvider>::PeakKey>,

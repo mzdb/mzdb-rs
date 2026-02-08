@@ -31,20 +31,18 @@ use clap::Parser;
 use mzdb::MzDbReader;
 
 use mzdb::processing::{
-    Peakel,
+    Peakel, HasPeakelData,
     // MS1 detection (walking algorithm)
     Ms1PeakelDetector, Ms1PeakelConfig,
     // DIA types
-    DiaMs2PeakelDetector, DiaMs2PeakelConfig, IsolationWindow,
+    DiaMs2PeakelDetector, DiaMs2PeakelConfig,
     DiaMs2PeakelRecord,
     // PeakelDB types
-    Ms1PeakelDbWriter, Ms2PeakelDbWriter,
-    // Trait for peakel statistics
-    HasPeakelData,
+    PeakelDbWriter, Ms1PeakelDbWriter, Ms2PeakelDbWriter,
 };
 
 /// Detect peakels from mzDB files and export to peakelDB
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     name = "mzdb2peakeldb",
     author,
@@ -250,20 +248,11 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
     println!("  Validation: min_amplitude={}, min_duration={}s, apex_boundary_check={}",
              config.min_peakel_amplitude, config.min_peakel_duration, !config.skip_apex_boundary_check);
 
-    // Create detector and run detection
+    // Create detector
     let detector = Ms1PeakelDetector::with_config(config);
-    let peakels = detector.detect_peakels_with_threads(reader, num_threads)?;
-
-    if peakels.is_empty() {
-        println!("No peakels detected. Check if the file contains MS1 data.");
-        return Ok(());
-    }
-
-    println!("Detected {} MS1 peakels", peakels.len());
 
     // Check if mzDB file is DIA
     let is_dia = reader.is_dia().unwrap_or(false);
-    println!("DIA experiment: {}", is_dia);
 
     // Get input filename for metadata
     let input_filename = args.mzdb_file_path
@@ -271,34 +260,63 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
         .and_then(|n| n.to_str())
         .unwrap_or("unknown.mzDB");
 
-    // Write output
     match args.format.as_str() {
         "sqlite" => {
-            println!("Writing SQLite peakelDB...");
-            write_ms1_peakeldb(&args.output_file_path, input_filename, is_dia, &peakels)?;
+            // Streaming mode: detect and write batches directly to SQLite
+            let mut writer = Ms1PeakelDbWriter::create(&args.output_file_path, input_filename, is_dia)?;
+
+            detector.detect_peakels_in_batches_with_threads(reader, num_threads, |batch| {
+                let batch_count = batch.peakels.len();
+                writer.write_peakels_batch(&batch.peakels)?;
+
+                if batch.total_batches > 0 {
+                    println!("  Batch {}/{}: {} peakels (total so far: {})",
+                             batch.batch_index + 1, batch.total_batches,
+                             batch_count, writer.stats().peakel_count());
+                } else {
+                    println!("  Batch {}: {} peakels (total so far: {})",
+                             batch.batch_index + 1, batch_count, writer.stats().peakel_count());
+                }
+
+                Ok(())
+            })?;
+
+            let total = writer.stats().peakel_count();
+            writer.close()?;
+
+            if total == 0 {
+                println!("No peakels detected. Check if the file contains MS1 data.");
+            } else {
+                println!("Detected {} MS1 peakels", total);
+                print_statistics("MS1 Peakel Statistics", writer.stats());
+            }
         }
         "tsv" => {
+            // TSV mode: collect all peakels then write
+            // (streaming TSV would be possible but statistics need all peakels)
+            let peakels = detector.detect_all_peakels_with_threads(reader, num_threads)?;
+
+            if peakels.is_empty() {
+                println!("No peakels detected. Check if the file contains MS1 data.");
+                return Ok(());
+            }
+
+            println!("Detected {} MS1 peakels", peakels.len());
             println!("Writing TSV file...");
             write_ms1_peakels_tsv(&args.output_file_path, &peakels)?;
+            print_peakel_stats("MS1 Peakel Statistics", &peakels);
         }
         _ => {
             eprintln!("Warning: Unknown format '{}', defaulting to SQLite", args.format);
-            write_ms1_peakeldb(&args.output_file_path, input_filename, is_dia, &peakels)?;
+            // Recurse with sqlite format (avoid code duplication)
+            let mut patched_args = args.clone();
+            patched_args.format = "sqlite".to_string();
+            return run_ms1_detection(&patched_args, reader, num_threads);
         }
     }
 
     println!("Output written to: {:?}", args.output_file_path);
 
-    // Print statistics
-    print_ms1_statistics(&peakels);
-
-    Ok(())
-}
-
-fn write_ms1_peakeldb<P: AsRef<Path>>(path: P, mzdb_filename: &str, is_dia: bool, peakels: &[Peakel]) -> Result<()> {
-    let writer = Ms1PeakelDbWriter::create(&path)?;
-    writer.write_peakels(mzdb_filename, is_dia, peakels)?;
-    println!("SQLite peakelDB created with {} peakels", peakels.len());
     Ok(())
 }
 
@@ -321,42 +339,13 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         skip_apex_boundary_check: !args.require_apex_boundary,
     };
 
-    let detector = DiaMs2PeakelDetector::with_config(config.clone());
+    let detector = DiaMs2PeakelDetector::with_config(config.clone(), reader);
+    let windows = detector.isolation_windows();
 
     println!("Detecting MS2 peakels (DIA mode)...");
     println!("  Validation: min_amplitude={}, min_duration={}s, apex_boundary_check={}",
              args.min_peakel_amplitude, args.min_peakel_duration, !config.skip_apex_boundary_check);
-    let (windows, peakels) = detector.detect_all_peakels_with_threads(reader, num_threads)?;
-
-    println!();
-    println!("=== DIA MS2 Peakel Detection Results ===");
-    println!("Isolation windows: {}", windows.len());
-    println!("Total MS2 peakels: {}", peakels.len());
-
-    // Print per-window statistics
-    println!();
-    println!("Peakels per isolation window:");
-    for window in &windows {
-        let window_peakel_count = peakels.iter()
-            .filter(|p| p.isolation_window_id == window.id)
-            .count();
-        println!("  {:.1} m/z: {} peakels ({} spectra)",
-                 window.target_mz, window_peakel_count, window.spectrum_count);
-    }
-
-    // Top peakels by intensity
-    let mut sorted_peakels = peakels.clone();
-    sorted_peakels.sort_by(|a, b|
-        b.apex_intensity().partial_cmp(&a.apex_intensity()).unwrap_or(std::cmp::Ordering::Equal)
-    );
-
-    println!();
-    println!("Top 10 MS2 peakels by intensity:");
-    for (i, peakel) in sorted_peakels.iter().take(10).enumerate() {
-        println!("  {:2}: fragment m/z={:.4}, precursor={:.1}, RT={:.2}s, int={:.2e}, peaks={}",
-            i + 1, peakel.mz(), peakel.precursor_mz, peakel.elution_time(),
-            peakel.apex_intensity(), peakel.peaks_count());
-    }
+    println!("Found {} isolation windows", windows.len());
 
     // Get input filename for metadata
     let input_filename = args.mzdb_file_path
@@ -364,41 +353,59 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         .and_then(|n| n.to_str())
         .unwrap_or("unknown.mzDB");
 
-    // Write output
-    println!();
     match args.format.as_str() {
         "sqlite" => {
-            println!("Writing SQLite peakelDB (MS2/DIA format)...");
-            write_ms2_dia_peakeldb(&args.output_file_path, input_filename, &windows, &peakels)?;
+            // Create writer with windows metadata
+            let mut writer = Ms2PeakelDbWriter::create(
+                &args.output_file_path, input_filename, windows
+            )?;
+
+            // Stream peakel batches directly to SQLite
+            detector.detect_peakels_in_batches_with_threads(reader, num_threads, |batch| {
+                let batch_count = batch.peakels.len();
+                writer.write_peakels_batch(&batch.peakels)?;
+
+                if batch.total_batches > 0 {
+                    println!("  Window {}/{}: {} peakels (total so far: {})",
+                             batch.batch_index + 1, batch.total_batches,
+                             batch_count, writer.stats().peakel_count());
+                } else {
+                    println!("  Batch {}: {} peakels (total so far: {})",
+                             batch.batch_index + 1, batch_count, writer.stats().peakel_count());
+                }
+
+                Ok(())
+            })?;
+
+            println!();
+            println!("=== DIA MS2 Peakel Detection Results ===");
+            println!("Isolation windows: {}", windows.len());
+            print_statistics("MS2 DIA Peakel Statistics", writer.stats());
+            writer.close()?;
         }
         "tsv" => {
+            // TSV mode: collect all peakels then write
+            let peakels = detector.detect_all_peakels_with_threads(reader, num_threads)?;
+
+            println!();
+            println!("=== DIA MS2 Peakel Detection Results ===");
+            println!("Isolation windows: {}", windows.len());
+            println!("Total MS2 peakels: {}", peakels.len());
+
             println!("Writing TSV file...");
             write_ms2_peakels_tsv(&args.output_file_path, &peakels)?;
+            print_peakel_stats("MS2 DIA Peakel Statistics", &peakels);
         }
         _ => {
             eprintln!("Warning: Unknown format '{}', defaulting to SQLite", args.format);
-            write_ms2_dia_peakeldb(&args.output_file_path, input_filename, &windows, &peakels)?;
+            let mut patched_args = args.clone();
+            patched_args.format = "sqlite".to_string();
+            return run_ms2_dia_detection(&patched_args, reader, num_threads);
         }
     }
 
     println!("Output written to: {:?}", args.output_file_path);
 
-    // Print statistics
-    print_ms2_statistics(&peakels);
-
-    Ok(())
-}
-
-fn write_ms2_dia_peakeldb(
-    path: &PathBuf,
-    mzdb_filename: &str,
-    windows: &[IsolationWindow],
-    peakels: &[DiaMs2PeakelRecord],
-) -> Result<()> {
-    let writer = Ms2PeakelDbWriter::create(path)?;
-    writer.write_peakels(mzdb_filename, windows, peakels)?;
-    println!("DIA MS2 peakelDB created with {} isolation windows and {} peakels",
-             windows.len(), peakels.len());
     Ok(())
 }
 
@@ -474,64 +481,28 @@ fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<
 // Statistics
 // ============================================================================
 
-/// Print peakel statistics (common implementation)
-fn print_statistics(
-    title: &str,
-    count: usize,
-    total_area: f32,
-    avg_duration: f32,
-    avg_peaks: f32,
-    min_mz: f32,
-    max_mz: f32,
-    min_rt: f32,
-    max_rt: f32,
-) {
+/// Print peakel statistics from a `PeakelWriterStats`
+fn print_statistics(title: &str, stats: &mzdb::processing::PeakelWriterStats) {
+    if stats.peakel_count() == 0 {
+        return;
+    }
+
+    let (min_mz, max_mz) = stats.mz_range();
+    let (min_rt, max_rt) = stats.rt_range();
+
     println!();
     println!("=== {} ===", title);
-    println!("Total peakels: {}", count);
-    println!("Total area: {:.2e}", total_area);
-    println!("Average duration: {:.2}s", avg_duration);
-    println!("Average peaks per peakel: {:.1}", avg_peaks);
+    println!("Total peakels: {}", stats.peakel_count());
+    println!("Total area: {:.2e}", stats.total_area());
+    println!("Average duration: {:.2}s", stats.avg_duration());
+    println!("Average peaks per peakel: {:.1}", stats.avg_peaks());
     println!("m/z range: {:.2} - {:.2}", min_mz, max_mz);
     println!("RT range: {:.2}s - {:.2}s", min_rt, max_rt);
 }
 
-/// Print MS1 peakel statistics to stdout
-fn print_ms1_statistics(peakels: &[Peakel]) {
-    if peakels.is_empty() {
-        return;
-    }
-
-    let n = peakels.len() as f32;
-    print_statistics(
-        "MS1 Peakel Statistics",
-        peakels.len(),
-        peakels.iter().map(|p| p.calc_area()).sum(),
-        peakels.iter().map(|p| p.calc_duration()).sum::<f32>() / n,
-        peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
-        peakels.iter().flat_map(|p| p.apex_mz()).fold(f32::INFINITY, f32::min),
-        peakels.iter().flat_map(|p| p.apex_mz()).fold(f32::NEG_INFINITY, f32::max),
-        peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::INFINITY, f32::min),
-        peakels.iter().filter_map(|p| p.apex_elution_time()).fold(f32::NEG_INFINITY, f32::max),
-    );
-}
-
-/// Print MS2 DIA peakel statistics to stdout
-fn print_ms2_statistics(peakels: &[DiaMs2PeakelRecord]) {
-    if peakels.is_empty() {
-        return;
-    }
-
-    let n = peakels.len() as f32;
-    print_statistics(
-        "MS2 DIA Peakel Statistics",
-        peakels.len(),
-        peakels.iter().map(|p| p.area()).sum(),
-        peakels.iter().map(|p| p.duration()).sum::<f32>() / n,
-        peakels.iter().map(|p| p.peaks_count() as f32).sum::<f32>() / n,
-        peakels.iter().map(|p| p.mz()).fold(f32::INFINITY, f32::min),
-        peakels.iter().map(|p| p.mz()).fold(f32::NEG_INFINITY, f32::max),
-        peakels.iter().map(|p| p.elution_time()).fold(f32::INFINITY, f32::min),
-        peakels.iter().map(|p| p.elution_time()).fold(f32::NEG_INFINITY, f32::max),
-    );
+/// Build stats from a slice of peakels and print (used for TSV output mode)
+fn print_peakel_stats<T: mzdb::processing::HasPeakelData>(title: &str, peakels: &[T]) {
+    let mut stats = mzdb::processing::PeakelWriterStats::new();
+    stats.add_peakels(peakels);
+    print_statistics(title, &stats);
 }

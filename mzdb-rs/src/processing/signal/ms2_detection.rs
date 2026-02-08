@@ -20,8 +20,9 @@
 //! use mzdb::processing::signal::ms2_detection::{DiaMs2PeakelDetector, DiaMs2PeakelConfig};
 //!
 //! let reader = MzDbReader::open("dia_file.mzDB").unwrap();
-//! let detector = DiaMs2PeakelDetector::new();
-//! let (windows, peakels) = detector.detect_all_peakels(&reader).unwrap();
+//! let detector = DiaMs2PeakelDetector::new(&reader);
+//! let windows = detector.isolation_windows();
+//! let peakels = detector.detect_all_peakels(&reader).unwrap();
 //! println!("Detected {} peakels across {} windows", peakels.len(), windows.len());
 //! ```
 
@@ -29,12 +30,12 @@ use std::collections::BTreeMap;
 use anyhow_ext::*;
 
 #[cfg(feature = "processing-parallel")]
-use std::sync::LockResult;
+use std::sync::Mutex;
 
 use crate::MzDbReader;
 use crate::metadata::parse_isolation_window_offsets_from_xml;
 use super::detection::{
-    PeakelDetectionConfig, SpectrumPeakLookup, SortedPeaksProvider, PeakelDetector,
+    PeakelBatch, PeakelDetectionConfig, SpectrumPeakLookup, SortedPeaksProvider, PeakelDetector,
 };
 
 // ============================================================================
@@ -382,7 +383,7 @@ impl IsolationWindowPeakData {
         // Sort indices by descending intensity
         let mut sorted_indices: Vec<usize> = (0..all_peaks.len()).collect();
         sorted_indices.sort_by(|&a, &b| {
-            all_peaks[b].1.partial_cmp(&all_peaks[a].1).unwrap_or(std::cmp::Ordering::Equal)
+            all_peaks[b].1.total_cmp(&all_peaks[a].1)
         });
         
         Self {
@@ -439,6 +440,7 @@ impl SortedPeaksProvider for IsolationWindowPeakData {
 /// detecting peakels in the MS2 spectra for that window.
 pub struct DiaMs2PeakelDetector {
     config: DiaMs2PeakelConfig,
+    isolation_windows: Vec<IsolationWindow>,
 }
 
 impl PeakelDetector for DiaMs2PeakelDetector {
@@ -452,24 +454,36 @@ impl PeakelDetector for DiaMs2PeakelDetector {
 
 impl DiaMs2PeakelDetector {
     /// Create a new detector with default configuration
-    pub fn new() -> Self {
-        Self {
-            config: DiaMs2PeakelConfig::default(),
-        }
+    ///
+    /// Discovers isolation windows from the mzDB file at construction time.
+    pub fn new(reader: &MzDbReader) -> Self {
+        let config = DiaMs2PeakelConfig::default();
+        let isolation_windows = Self::discover_isolation_windows(reader);
+        log::info!("Found {} isolation windows", isolation_windows.len());
+        Self { config, isolation_windows }
     }
 
     /// Create with custom configuration
-    pub fn with_config(config: DiaMs2PeakelConfig) -> Self {
+    ///
+    /// Discovers isolation windows from the mzDB file at construction time.
+    pub fn with_config(config: DiaMs2PeakelConfig, reader: &MzDbReader) -> Self {
         log::info!("DiaMs2PeakelDetector config: min_peaks={}, mz_tol={} ppm, max_gaps={}",
                    config.min_peaks, config.mz_tol_ppm, config.max_consecutive_gaps);
-        Self { config }
+        let isolation_windows = Self::discover_isolation_windows(reader);
+        log::info!("Found {} isolation windows", isolation_windows.len());
+        Self { config, isolation_windows }
+    }
+
+    /// Get the isolation windows discovered from the mzDB file
+    pub fn isolation_windows(&self) -> &[IsolationWindow] {
+        &self.isolation_windows
     }
 
     /// Discover all isolation windows in the mzDB file
     ///
     /// This method parses the actual isolation window bounds from the precursor_list XML
     /// rather than assuming a fixed window width.
-    pub fn discover_isolation_windows(&self, reader: &MzDbReader) -> Vec<IsolationWindow> {
+    fn discover_isolation_windows(reader: &MzDbReader) -> Vec<IsolationWindow> {
         let headers = reader.get_spectrum_headers();
 
         // Group MS2 spectra by precursor m/z and track actual window bounds
@@ -553,7 +567,7 @@ impl DiaMs2PeakelDetector {
         let indexed_spectra = self.build_indexed_spectra(&spectra);
 
         // Run the walking algorithm
-        let detected_peakels = self.run_walking_algorithm(indexed_spectra, window);
+        let detected_peakels = self.run_walking_algorithm_for_window(indexed_spectra, window);
 
         log::info!("  Detected {} MS2 peakels in window {:.1}",
                    detected_peakels.len(), window.target_mz);
@@ -597,9 +611,9 @@ impl DiaMs2PeakelDetector {
 
     /// Core walking algorithm for peakel detection
     ///
-    /// This method uses the generic `PeakelDetector::detect_from_peak_data` 
+    /// This method uses the generic `PeakelDetector::run_walking_algorithm` 
     /// implementation and wraps the results with isolation window metadata.
-    fn run_walking_algorithm(
+    fn run_walking_algorithm_for_window(
         &self,
         mut indexed_spectra: Vec<IndexedMs2Spectrum>,
         window: &IsolationWindow,
@@ -609,13 +623,13 @@ impl DiaMs2PeakelDetector {
         }
 
         // Sort spectra by time for proper walking
-        indexed_spectra.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        indexed_spectra.sort_by(|a, b| a.time.total_cmp(&b.time));
 
         // Create peak data for the generic algorithm
         let peak_data = IsolationWindowPeakData::new(indexed_spectra);
         
         // Use the trait's default implementation
-        let peakels = self.detect_from_peak_data(&peak_data);
+        let peakels = self.run_walking_algorithm(&peak_data);
         
         // Wrap peakels with isolation window metadata
         peakels.into_iter()
@@ -630,7 +644,7 @@ impl DiaMs2PeakelDetector {
     pub fn detect_all_peakels(
         &self,
         reader: &MzDbReader,
-    ) -> Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
+    ) -> Result<Vec<DiaMs2PeakelRecord>> {
         self.detect_all_peakels_with_threads(reader, 1)
     }
 
@@ -642,58 +656,92 @@ impl DiaMs2PeakelDetector {
         &self,
         reader: &MzDbReader,
         num_threads: usize,
-    ) -> Result<(Vec<IsolationWindow>, Vec<DiaMs2PeakelRecord>)> {
-        // Discover isolation windows
-        let windows = self.discover_isolation_windows(reader);
+    ) -> Result<Vec<DiaMs2PeakelRecord>> {
+        let mut all_peakels = Vec::new();
 
-        log::info!("Found {} isolation windows", windows.len());
-
-        let all_peakels = if num_threads > 1 {
-            #[cfg(feature = "processing-parallel")]
-            {
-                self.detect_peakels_parallel(reader, &windows, num_threads)?
-            }
-            #[cfg(not(feature = "processing-parallel"))]
-            {
-                self.detect_peakels_sequential(reader, &windows)?
-            }
-        } else {
-            self.detect_peakels_sequential(reader, &windows)?
-        };
+        self.detect_peakels_in_batches_with_threads(reader, num_threads, |batch| {
+            all_peakels.extend(batch.peakels);
+            Ok(())
+        })?;
 
         log::info!("Total MS2 peakels detected: {}", all_peakels.len());
-
-        Ok((windows, all_peakels))
-    }
-
-    /// Sequential processing of isolation windows
-    fn detect_peakels_sequential(
-        &self,
-        reader: &MzDbReader,
-        windows: &[IsolationWindow],
-    ) -> Result<Vec<DiaMs2PeakelRecord>> {
-        let mut all_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
-
-        // Process each window
-        for window in windows {
-            let window_peakels = self.detect_peakels_for_window(reader, window)?;
-            all_peakels.extend(window_peakels);
-        }
 
         Ok(all_peakels)
     }
 
-    /// Parallel processing of isolation windows using producer-consumer pattern
+    /// Detect peakels in batches (one batch per isolation window), single-threaded.
+    ///
+    /// The callback receives a `PeakelBatch<DiaMs2PeakelRecord>` for each window,
+    /// allowing streaming writes without accumulating all peakels in memory.
+    pub fn detect_peakels_in_batches(
+        &self,
+        reader: &MzDbReader,
+        on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
+    ) -> Result<()> {
+        self.detect_peakels_in_batches_with_threads(reader, 1, on_batch)
+    }
+
+    /// Detect peakels in batches with configurable parallelism.
+    ///
+    /// The callback receives a `PeakelBatch<DiaMs2PeakelRecord>` for each isolation window.
+    pub fn detect_peakels_in_batches_with_threads(
+        &self,
+        reader: &MzDbReader,
+        num_threads: usize,
+        on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
+    ) -> Result<()> {
+        let windows = &self.isolation_windows;
+
+        if num_threads > 1 {
+            #[cfg(feature = "processing-parallel")]
+            {
+                self.detect_parallel_in_batches(reader, windows, num_threads, on_batch)?;
+            }
+            #[cfg(not(feature = "processing-parallel"))]
+            {
+                log::warn!("Parallel processing not enabled, using sequential");
+                self.detect_sequential_in_batches(reader, windows, on_batch)?;
+            }
+        } else {
+            self.detect_sequential_in_batches(reader, windows, on_batch)?;
+        }
+
+        Ok(())
+    }
+
+    /// Sequential processing of isolation windows, emitting batches via callback
+    fn detect_sequential_in_batches(
+        &self,
+        reader: &MzDbReader,
+        windows: &[IsolationWindow],
+        mut on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
+    ) -> Result<()> {
+        let total_batches = windows.len();
+
+        for (batch_index, window) in windows.iter().enumerate() {
+            let peakels = self.detect_peakels_for_window(reader, window)?;
+            on_batch(PeakelBatch {
+                peakels,
+                batch_index,
+                total_batches,
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Parallel processing of isolation windows using producer-consumer pattern,
+    /// emitting batches via callback after sorting by target m/z.
     #[cfg(feature = "processing-parallel")]
-    fn detect_peakels_parallel(
+    fn detect_parallel_in_batches(
         &self,
         reader: &MzDbReader,
         windows: &[IsolationWindow],
         num_threads: usize,
-    ) -> Result<Vec<DiaMs2PeakelRecord>> {
+        mut on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
+    ) -> Result<()> {
         use crossbeam_channel::bounded;
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Mutex;
         use std::time::Instant;
 
         let total_windows = windows.len();
@@ -706,8 +754,10 @@ impl DiaMs2PeakelDetector {
         type WorkItem = (IsolationWindow, Vec<crate::model::Spectrum>);
         let (tx, rx) = bounded::<WorkItem>(queue_size);
 
-        // Shared results collector
-        let results: Mutex<Vec<Vec<DiaMs2PeakelRecord>>> = Mutex::new(Vec::new());
+        // Shared results: (target_mz, peakels) for post-hoc ordering
+        let results: Mutex<Vec<(f64, Vec<DiaMs2PeakelRecord>)>> = Mutex::new(Vec::new());
+        // Producer error propagation
+        let producer_error: Mutex<Option<anyhow_ext::Error>> = Mutex::new(None);
         let windows_processed = AtomicUsize::new(0);
         let windows_loaded = AtomicUsize::new(0);
 
@@ -722,7 +772,7 @@ impl DiaMs2PeakelDetector {
                 let windows_processed = &windows_processed;
 
                 scope.spawn(move || {
-                    let mut thread_peakels: Vec<Vec<DiaMs2PeakelRecord>> = Vec::new();
+                    let mut thread_results: Vec<(f64, Vec<DiaMs2PeakelRecord>)> = Vec::new();
                     let mut items_processed = 0usize;
 
                     log::debug!("Consumer thread {} started", thread_id);
@@ -731,8 +781,8 @@ impl DiaMs2PeakelDetector {
                     while let Result::Ok((window, spectra)) = rx.recv() {
                         let process_start = Instant::now();
 
-                        let peakels = self.detect_peakels_from_spectra(&window, &spectra);
-                        thread_peakels.push(peakels);
+                        let peakels = self.detect_from_spectra(&window, &spectra);
+                        thread_results.push((window.target_mz, peakels));
                         items_processed += 1;
 
                         let count = windows_processed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -745,9 +795,9 @@ impl DiaMs2PeakelDetector {
                     log::debug!("Consumer thread {} finished, processed {} items", thread_id, items_processed);
 
                     // Collect results
-                    if let LockResult::Ok(mut guard) = results.lock() {
-                        guard.extend(thread_peakels);
-                    }
+                    results.lock()
+                        .expect("results mutex poisoned")
+                        .extend(thread_results);
                 });
             }
 
@@ -755,14 +805,21 @@ impl DiaMs2PeakelDetector {
             drop(rx);
 
             // Producer: load spectra using efficient SQL filtering and send to queue
+            let producer_error = &producer_error;
             log::info!("Producer starting to load spectra (using efficient SQL filtering)...");
             for window in windows {
                 let load_start = Instant::now();
 
                 // Use efficient method that filters by main_precursor_mz in SQL
                 let tolerance = (window.upper_mz - window.lower_mz) / 2.0;
-                let spectra = reader.get_dia_spectra_for_window(window.target_mz, Some(tolerance))
-                    .unwrap_or_default();
+                let spectra = match reader.get_dia_spectra_for_window(window.target_mz, Some(tolerance)) {
+                    std::result::Result::Ok(s) => s,
+                    std::result::Result::Err(e) => {
+                        log::error!("Failed to load spectra for window {:.1} m/z: {:?}", window.target_mz, e);
+                        *producer_error.lock().expect("producer_error mutex poisoned") = Some(e);
+                        break;
+                    }
+                };
 
                 let load_time = load_start.elapsed();
                 let loaded = windows_loaded.fetch_add(1, Ordering::Relaxed) + 1;
@@ -788,22 +845,37 @@ impl DiaMs2PeakelDetector {
         let total_time = start_time.elapsed();
         log::info!("All processing completed in {:?}", total_time);
 
-        // Extract results
-        let collected_results = results.into_inner()
-            .map_err(|e| anyhow!("Failed to collect results: {:?}", e))?;
-
-        let mut all_peakels: Vec<DiaMs2PeakelRecord> = Vec::new();
-
-        for window_peakels in collected_results {
-            all_peakels.extend(window_peakels);
+        // Check for producer errors
+        if let Some(e) = producer_error.into_inner()
+            .map_err(|e| anyhow!("Failed to check producer error: {:?}", e))?
+        {
+            return Err(e);
         }
 
-        Ok(all_peakels)
+        // Extract and sort results by target_mz for deterministic ordering
+        let mut collected_results = results.into_inner()
+            .map_err(|e| anyhow!("Failed to collect results: {:?}", e))?;
+
+        collected_results.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let total_batches = collected_results.len();
+        let mut total_peakels = 0usize;
+        for (batch_index, (_target_mz, peakels)) in collected_results.into_iter().enumerate() {
+            total_peakels += peakels.len();
+            on_batch(PeakelBatch {
+                peakels,
+                batch_index,
+                total_batches,
+            })?;
+        }
+
+        log::info!("Parallel detection complete: {} peakels in {} batches", total_peakels, total_batches);
+        Ok(())
     }
 
     /// Detect peakels from preloaded spectra (for parallel processing)
     #[cfg(feature = "processing-parallel")]
-    fn detect_peakels_from_spectra(
+    fn detect_from_spectra(
         &self,
         window: &IsolationWindow,
         spectra: &[crate::model::Spectrum],
@@ -816,15 +888,10 @@ impl DiaMs2PeakelDetector {
         let indexed_spectra = self.build_indexed_spectra(spectra);
 
         // Run the shared walking algorithm
-        self.run_walking_algorithm(indexed_spectra, window)
+        self.run_walking_algorithm_for_window(indexed_spectra, window)
     }
 }
 
-impl Default for DiaMs2PeakelDetector {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ============================================================================
 // Tests
