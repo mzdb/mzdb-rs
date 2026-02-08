@@ -103,7 +103,7 @@ fn main() {
     let mzdb = match MzDbReader::open(&input_str) {
         Ok(db) => db,
         Err(e) => {
-            eprintln!("Error opening mzDB file: {}", e);
+            eprintln!("Error opening mzDB file: {:#}", e);
             process::exit(1);
         }
     };
@@ -115,7 +115,7 @@ fn main() {
             println!("Successfully exported {} spectra to MGF", count);
         }
         Err(e) => {
-            eprintln!("Error exporting to MGF: {}", e);
+            eprintln!("Error exporting to MGF: {:#}", e);
             process::exit(1);
         }
     }

@@ -77,7 +77,7 @@ fn main() {
             result
         }
         Err(e) => {
-            eprintln!("Error checking file: {}", e);
+            eprintln!("Error checking file: {:#}", e);
             process::exit(1);
         }
     };
@@ -98,7 +98,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                eprintln!("Error checking bounding box integrity: {}", e);
+                eprintln!("Error checking bounding box integrity: {:#}", e);
                 process::exit(1);
             }
         }
@@ -131,7 +131,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                eprintln!("Error verifying DIA file: {}", e);
+                eprintln!("Error verifying DIA file: {:#}", e);
                 process::exit(1);
             }
         }
@@ -495,7 +495,7 @@ pub fn verify_dia_file(mzdb_path: &str, mzdb_check_result: &MzDbCheckResult) -> 
                     !results.is_empty()
                 }
                 Err(e) => {
-                    log::debug!("R-tree query error: {}", e);
+                    log::debug!("R-tree query error: {:#}", e);
                     false
                 }
             }

@@ -114,7 +114,7 @@ fn main() {
     let converter = match Dda2DiaConverter::new(&mzdb_str, &peakeldb_str, options) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error creating converter: {}", e);
+            eprintln!("Error creating converter: {:#}", e);
             process::exit(1);
         }
     };
@@ -133,7 +133,7 @@ fn main() {
             println!("  Output DIA spectra:  {}", stats.merged_spectra);
         }
         Err(e) => {
-            eprintln!("Error during conversion: {}", e);
+            eprintln!("Error during conversion: {:#}", e);
             process::exit(1);
         }
     }

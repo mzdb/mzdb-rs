@@ -242,7 +242,7 @@ fn main() {
     let config = match DiaSimplifierConfig::with_points(common.points) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error: Invalid configuration: {}", e);
+            eprintln!("Error: Invalid configuration: {:#}", e);
             process::exit(1);
         }
     };
@@ -292,7 +292,7 @@ fn main() {
             }
         }
         Err(e) => {
-            eprintln!("Error during simplification: {}", e);
+            eprintln!("Error during simplification: {:#}", e);
             process::exit(1);
         }
     }

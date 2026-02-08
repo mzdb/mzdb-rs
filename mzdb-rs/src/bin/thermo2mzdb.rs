@@ -86,7 +86,7 @@ fn main() {
         &args.output,
         bb_sizes,
     ) {
-        eprintln!("Error converting RAW to mzDB: {}", e);
+        eprintln!("Error converting RAW to mzDB: {:#}", e);
         process::exit(1);
     }
 

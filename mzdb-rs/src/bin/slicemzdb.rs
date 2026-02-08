@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process;
 
-use anyhow_ext::{Context, Result};
+use anyhow_ext::{bail, Context, Result};
 use clap::Parser;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -117,7 +117,7 @@ fn main() {
             println!("Output file: {}", output_path);
         }
         Err(e) => {
-            eprintln!("Error during slicing: {}", e);
+            eprintln!("Error during slicing: {:#}", e);
             process::exit(1);
         }
     }
@@ -203,7 +203,7 @@ fn slice_mzdb(
     if stats.sliced_spectrum_count == 0 {
         // Clean up the copied file
         std::fs::remove_file(output_path).ok();
-        return Err(anyhow_ext::anyhow!("No spectra found in the specified ID range"));
+        bail!("No spectra found in the specified ID range");
     }
 
     log::info!("Spectra to keep: {}", stats.sliced_spectrum_count);
