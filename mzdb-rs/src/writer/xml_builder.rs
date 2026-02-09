@@ -32,7 +32,6 @@ pub fn element_to_string(element: &Element) -> Result<String> {
 /// * `scan_window_lower` - Optional lower m/z limit of scan window
 /// * `scan_window_upper` - Optional upper m/z limit of scan window
 pub fn build_scan_list(
-    retention_time: f64,
     filter_string: Option<&str>,
     ion_injection_time: Option<f64>,
     instrument_config_ref: Option<&str>,
@@ -58,16 +57,8 @@ pub fn build_scan_list(
         scan.attributes.insert("instrumentConfigurationRef".to_string(), inst_ref.to_string());
     }
     
-    // Scan start time
-    let mut cv_time = Element::new("cvParam");
-    cv_time.attributes.insert("cvRef".to_string(), "MS".to_string());
-    cv_time.attributes.insert("accession".to_string(), "MS:1000016".to_string());
-    cv_time.attributes.insert("name".to_string(), "scan start time".to_string());
-    cv_time.attributes.insert("value".to_string(), format!("{:.6}", retention_time));
-    cv_time.attributes.insert("unitCvRef".to_string(), "UO".to_string());
-    cv_time.attributes.insert("unitAccession".to_string(), "UO:0000031".to_string());
-    cv_time.attributes.insert("unitName".to_string(), "minute".to_string());
-    scan.children.push(XMLNode::Element(cv_time));
+    // Note: scan start time (MS:1000016) is not included here as it is already
+    // stored in the spectrum.time column, avoiding redundant per-spectrum XML bloat.
     
     // Filter string if provided
     if let Some(filter) = filter_string {

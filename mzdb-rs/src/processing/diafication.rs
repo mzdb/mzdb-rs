@@ -946,7 +946,6 @@ fn write_dia_mzdb(
 
             let param_tree = generate_ms2_param_tree_xml(spectrum.time);
             let scan_list = build_scan_list(
-                spectrum.time as f64 / 60.0,  // Convert seconds to minutes
                 None,  // filter_string
                 None,  // ion_injection_time
                 Some("IC2"),  // instrument_config_ref for MS2
