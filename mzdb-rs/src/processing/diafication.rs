@@ -122,7 +122,7 @@ pub struct SimpleSpectrumHeader {
     pub precursor_list: Option<String>,
     pub product_list: Option<String>,
     pub data_encoding_id: i64,
-    pub bb_first_spectrum_id: i64,
+    pub bb_first_spectrum_id: Option<i64>,
 }
 
 // ============================================================================
@@ -806,7 +806,7 @@ struct DiaSpectrumParams {
     run_id: i64,
     data_proc_id: i64,
     data_encoding_id: i64,
-    bb_first_spectrum_id: i64,
+    bb_first_spectrum_id: Option<i64>,
 }
 
 impl DiaSpectrumParams {
@@ -993,7 +993,7 @@ fn write_dia_mzdb(
                 run_id: ctx.run_id,
                 data_proc_id: ctx.data_proc_id,
                 data_encoding_id: ctx.data_encoding_id,
-                bb_first_spectrum_id: first_spectrum_id,
+                bb_first_spectrum_id: Some(first_spectrum_id),
             };
             params.insert(&conn)?;
         }

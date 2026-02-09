@@ -486,7 +486,7 @@ pub struct SpectrumHeader {
     pub run_id: i64,
     pub data_processing_id: i64,
     pub data_encoding_id: i64,
-    pub bb_first_spectrum_id: i64, // FIXME: 0 is translated to NULL in the database, this type should be optional instead
+    pub bb_first_spectrum_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -137,7 +137,7 @@ mod tests {
 // Utility functions for data encoding lookup/creation
 // ============================================================================
 
-/// Get or create a centroid data encoding entry (64-bit m/z, 32-bit intensity)
+/// Get or create a centroid data encoding entry (32-bit m/z, 32-bit intensity)
 /// 
 /// This is used when creating new spectra in DIA conversion/simplification workflows.
 /// It first tries to find an existing centroid encoding, and creates one if not found.
@@ -156,9 +156,10 @@ pub fn get_or_create_centroid_data_encoding(conn: &Connection) -> Result<i64> {
     }
 
     // Create a new data encoding with standard settings
+    // mz_precision=32 because mz_array is Vec<f32> (LowRes encoding)
     conn.execute(
         "INSERT INTO data_encoding (mode, compression, byte_order, mz_precision, intensity_precision)
-         VALUES ('centroid', 'none', 'little_endian', 64, 32)",
+         VALUES ('centroid', 'none', 'little_endian', 32, 32)",
         [],
     )?;
 

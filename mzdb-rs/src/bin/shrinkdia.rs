@@ -22,6 +22,9 @@ use std::process;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use mzdb::processing::dia_simplifier::{DiaSimplifier, DiaSimplifierConfig};
+use mzdb::processing::staggered::{
+    StaggeredPeakelConfig, MzTolerance, SingleObservationStrategy, MultipleMatchStrategy,
+};
 
 /// Strategy for handling peakels observed in only one cycle's window
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -239,13 +242,33 @@ fn main() {
     }
 
     // Create configuration
-    let config = match DiaSimplifierConfig::with_points(common.points) {
+    let mut config = match DiaSimplifierConfig::with_points(common.points) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: Invalid configuration: {:#}", e);
             process::exit(1);
         }
     };
+
+    // Apply unstagger options if provided
+    if let Some(ref opts) = unstagger_opts {
+        config.staggered_peakel_config = StaggeredPeakelConfig {
+            mz_tolerance: MzTolerance::Ppm(opts.mz_tol_ppm),
+            min_correlation: opts.min_corr,
+            single_observation_strategy: match opts.single_obs {
+                SingleObsStrategy::Duplicate => SingleObservationStrategy::Duplicate,
+                SingleObsStrategy::Remove => SingleObservationStrategy::Remove,
+                SingleObsStrategy::KeepOriginal => SingleObservationStrategy::KeepOriginal,
+            },
+            multiple_match_strategy: match opts.multi_match {
+                MultiMatchStrategy::MergeAll => MultipleMatchStrategy::MergeAll,
+                MultiMatchStrategy::SelectBest => MultipleMatchStrategy::SelectBest,
+                MultiMatchStrategy::CreateSeparate => MultipleMatchStrategy::CreateSeparate,
+            },
+            enable_intensity_scaling: opts.intensity_scaling,
+            ..StaggeredPeakelConfig::default()
+        };
+    }
 
     // Run simplification
     let simplifier = DiaSimplifier::new(config);

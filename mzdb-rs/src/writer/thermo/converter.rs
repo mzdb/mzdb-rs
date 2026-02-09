@@ -946,7 +946,7 @@ fn convert_scan_to_spectrum(
         run_id: 1,
         data_processing_id: 1,
         data_encoding_id: 1, // Will be updated by writer
-        bb_first_spectrum_id: 0, // Will be updated by writer
+        bb_first_spectrum_id: None, // Will be updated by writer
     };
 
     // Convert centroid peaks to arrays - LabelPeak already has f32 mz and f32 intensity

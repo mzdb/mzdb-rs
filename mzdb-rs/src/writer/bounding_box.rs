@@ -300,27 +300,14 @@ fn write_peak_data(
     swap_bytes: bool,
 ) -> Result<()> {
     for i in first_idx..=last_idx {
-        // Write m/z
-        match encoding.peak_encoding {
-            PeakEncoding::HighRes | PeakEncoding::NoLoss => {
-                let mz = spectrum_data.get_mz_at(i)?;
-                let mz_bytes = if swap_bytes {
-                    mz.to_bits().swap_bytes().to_ne_bytes()
-                } else {
-                    mz.to_ne_bytes()
-                };
-                buffer.extend_from_slice(&mz_bytes);
-            }
-            PeakEncoding::LowRes => {
-                let mz = spectrum_data.get_mz_at(i)? as f32;
-                let mz_bytes = if swap_bytes {
-                    mz.to_bits().swap_bytes().to_ne_bytes()
-                } else {
-                    mz.to_ne_bytes()
-                };
-                buffer.extend_from_slice(&mz_bytes);
-            }
-        }
+        // Write m/z as f32
+        let mz = spectrum_data.get_mz_at(i)?;
+        let mz_bytes = if swap_bytes {
+            mz.to_bits().swap_bytes().to_ne_bytes()
+        } else {
+            mz.to_ne_bytes()
+        };
+        buffer.extend_from_slice(&mz_bytes);
         
         // Write intensity
         let intensity = spectrum_data.get_intensity_at(i)?;
@@ -508,7 +495,7 @@ use crate::model::DataPointProvider;
 ///   - spectrum_id (4 bytes, i32, little-endian)
 ///   - data_points_count (4 bytes, i32, little-endian)
 ///   - For each data point:
-///     - m/z (8 bytes, f64, little-endian)
+///     - m/z (4 bytes, f32, little-endian)
 ///     - intensity (4 bytes, f32, little-endian)
 ///
 /// # Arguments
@@ -529,7 +516,7 @@ where
         
         // Write data points (f64 m/z + f32 intensity, little-endian)
         for (mz, intensity) in data.mz_array().iter().zip(data.intensity_array().iter()) {
-            buffer.extend_from_slice(&mz.to_le_bytes());
+            buffer.extend_from_slice(&(*mz as f64).to_le_bytes());
             buffer.extend_from_slice(&intensity.to_le_bytes());
         }
     }

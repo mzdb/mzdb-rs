@@ -35,7 +35,10 @@ use rusqlite::Connection;
 
 use crate::processing::signal::ms2_detection::IsolationWindow;
 use crate::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel};
-use crate::processing::staggered::{StaggeredDiaDetector, StaggeredDiaInfo};
+use crate::processing::staggered::{
+    StaggeredDiaDetector, StaggeredDiaInfo, UnstaggeredWindow,
+    StaggeredPeakelMatcher, StaggeredPeakelConfig, SingleObservationStrategy,
+};
 use crate::model::{SpectrumHeader as ModelSpectrumHeader, Spectrum, SpectrumData, DataEncoding};
 use crate::writer::{
     xml_builder::generate_dia_precursor_list_xml_asymmetric,
@@ -53,6 +56,8 @@ pub struct DiaSimplifierConfig {
     pub points_per_peakel: usize,
     /// m/z merge tolerance - peaks within this distance are merged
     pub mz_merge_tolerance: f32,
+    /// Configuration for staggered DIA peakel matching (used when staggered mode is detected)
+    pub staggered_peakel_config: StaggeredPeakelConfig,
 }
 
 impl Default for DiaSimplifierConfig {
@@ -60,6 +65,7 @@ impl Default for DiaSimplifierConfig {
         Self {
             points_per_peakel: 3,
             mz_merge_tolerance: 0.001,
+            staggered_peakel_config: StaggeredPeakelConfig::default(),
         }
     }
 }
@@ -269,10 +275,37 @@ impl DiaSimplifier {
             .collect();
 
         // Extract data points from peakels
-        log::info!("Extracting peakel data points...");
         let half_window = self.config.points_per_peakel / 2;
-        let data_points =
-            extract_peakel_data_points(&peakels, &window_lookup, half_window)?;
+        let data_points = if staggered_detected {
+            // Staggered DIA: use peakel matcher to properly dispatch peaks
+            // across overlapping windows
+            log::info!("Running staggered peakel matcher...");
+            let matcher = StaggeredPeakelMatcher::with_config(
+                self.config.staggered_peakel_config.clone(),
+            );
+            let match_result = matcher.match_peakels(&peakels, &stagger_info);
+            log::info!("  Matched pairs: {}", match_result.matched_pairs.len());
+            log::info!("  Single observations: {}", match_result.single_observations.len());
+            log::info!("  Ambiguous matches: {}", match_result.ambiguous_matches.len());
+
+            // Build unstaggered window lookup by ID
+            let unstag_window_map: HashMap<i64, &UnstaggeredWindow> = stagger_info
+                .unstaggered_windows
+                .iter()
+                .map(|w| (w.id, w))
+                .collect();
+
+            extract_matched_data_points(
+                &match_result,
+                &unstag_window_map,
+                &self.config.staggered_peakel_config,
+                half_window,
+            )?
+        } else {
+            // Non-staggered: use original direct extraction
+            log::info!("Extracting peakel data points (non-staggered)...");
+            extract_peakel_data_points(&peakels, &window_lookup, half_window)?
+        };
         let data_point_count = data_points.len();
         log::info!("Extracted {} data points", data_point_count);
 
@@ -293,6 +326,7 @@ impl DiaSimplifier {
             &simplified_spectra,
             output_path,
             &ms2_headers,
+            &stagger_info.unstaggered_windows,
         )?;
 
         let stats = SimplificationStats {
@@ -425,6 +459,88 @@ fn extract_peakel_data_points(
     Ok(data_points)
 }
 
+/// Extract data points from peakels using the staggered peakel matcher results.
+///
+/// This replaces `extract_peakel_data_points` for staggered DIA mode.
+/// The matcher has already determined which unstaggered window each peakel belongs to,
+/// handling overlap regions, matched pairs, and single observations.
+fn extract_matched_data_points(
+    match_result: &crate::processing::staggered::PeakelMatchResult,
+    unstag_window_map: &HashMap<i64, &UnstaggeredWindow>,
+    peakel_config: &StaggeredPeakelConfig,
+    half_window: usize,
+) -> Result<Vec<PeakelDataPoint>> {
+    let mut data_points = Vec::new();
+
+    // Helper: extract data points from a single peakel into a given unstaggered window
+    let mut extract_from_peakel = |peakel: &ExtendedPeakel, window: &UnstaggeredWindow| {
+        let spectrum_ids = peakel.data.spectrum_ids.as_slice();
+        let apex_idx = peakel.apex_index().unwrap_or(spectrum_ids.len() / 2);
+        let start_idx = apex_idx.saturating_sub(half_window);
+        let end_idx = (apex_idx + half_window).min(spectrum_ids.len().saturating_sub(1));
+
+        for idx in start_idx..=end_idx {
+            if idx < spectrum_ids.len() {
+                data_points.push(PeakelDataPoint {
+                    spectrum_id: peakel.data.spectrum_ids[idx],
+                    mz: peakel.data.mz_values[idx],
+                    intensity: peakel.data.intensity_values[idx],
+                    precursor_mz: window.center_mz,
+                    isolation_lower: window.lower_mz,
+                    isolation_upper: window.upper_mz,
+                });
+            }
+        }
+    };
+
+    // 1. Matched pairs: peakels observed in both cycle A and B overlapping windows.
+    //    Use the cycle A peakel (arbitrary choice — both represent the same ion).
+    //    The target_window_id gives the correct unstaggered window.
+    for pair in &match_result.matched_pairs {
+        if let Some(window) = unstag_window_map.get(&pair.target_window_id) {
+            extract_from_peakel(&pair.cycle_a_peakel, window);
+        }
+    }
+
+    // 2. Single observations: peakels observed in only one cycle's window.
+    //    Strategy determines how they are handled.
+    for single in &match_result.single_observations {
+        match peakel_config.single_observation_strategy {
+            SingleObservationStrategy::Remove => {
+                // Skip entirely
+                continue;
+            }
+            SingleObservationStrategy::Duplicate => {
+                // Assign to all potential unstaggered windows
+                for &win_id in &single.potential_window_ids {
+                    if let Some(window) = unstag_window_map.get(&win_id) {
+                        extract_from_peakel(&single.peakel, window);
+                    }
+                }
+            }
+            SingleObservationStrategy::KeepOriginal => {
+                // Assign to the first potential window (the one containing the peakel's m/z)
+                if let Some(&win_id) = single.potential_window_ids.first() {
+                    if let Some(window) = unstag_window_map.get(&win_id) {
+                        extract_from_peakel(&single.peakel, window);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Ambiguous matches: multiple candidates from the other cycle.
+    //    Use the primary peakel in the target unstaggered window.
+    for ambiguous in &match_result.ambiguous_matches {
+        if let Some(window) = unstag_window_map.get(&ambiguous.target_window_id) {
+            extract_from_peakel(&ambiguous.primary_peakel, window);
+        }
+    }
+
+    log::info!("Extracted {} data points from matched peakels", data_points.len());
+    Ok(data_points)
+}
+
 /// Group data points into simplified spectra
 fn group_into_spectra(
     data_points: Vec<PeakelDataPoint>,
@@ -502,6 +618,7 @@ fn write_simplified_dia_mzdb_v2(
     simplified_spectra: &[SimplifiedSpectrum],
     output_path: &Path,
     _ms2_headers: &[SpectrumHeader],
+    unstaggered_windows: &[UnstaggeredWindow],
 ) -> Result<()> {
     use crate::writer::{MzDbWriterBuilder, WriterMetadata};
     use crate::MzDbReaderBuilder;
@@ -511,6 +628,38 @@ fn write_simplified_dia_mzdb_v2(
 
     log::info!("Opening source mzDB for reading...");
     let source_reader = MzDbReaderBuilder::new(source_mzdb_path).build()?;
+
+    // Pre-load param_tree and scan_list XML from the source spectrum table.
+    // These are NOT populated by iter_spectra (which reads from bounding boxes),
+    // so we must query them separately to preserve them in the output.
+    log::info!("Loading spectrum XML metadata (param_tree, scan_list)...");
+    let xml_metadata: HashMap<i64, (Option<String>, Option<String>)> = {
+        let conn = source_reader.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, param_tree, scan_list FROM spectrum"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (id, param_tree, scan_list) = row?;
+            map.insert(id, (param_tree, scan_list));
+        }
+        map
+    };
+    log::info!("  Loaded XML metadata for {} spectra", xml_metadata.len());
+
+    // Build two window assignment vectors (one per DIA series) from the unstaggered windows.
+    // In staggered DIA, the instrument alternates between two series of isolation windows (A and B).
+    // After unstaggering, each original window maps to a narrower, non-overlapping sub-window.
+    // We build one vector per series, ordered by m/z, so that window_a[i] gives the bounds
+    // for the i-th spectrum in a series A sweep, and similarly for series B.
+    let (windows_a, windows_b) = build_series_window_vectors(unstaggered_windows);
 
     // Get BB sizes from entity cache
     log::info!("Reading BB configuration...");
@@ -538,28 +687,40 @@ fn write_simplified_dia_mzdb_v2(
 
     writer.open()?;
 
-    // Create data encoding
+    // Create data encoding - LowRes because simplified spectra store m/z as f32
     let encoding = DataEncoding {
         id: 1,
         mode: DataMode::Centroid,
-        peak_encoding: PeakEncoding::HighRes,
+        peak_encoding: PeakEncoding::LowRes,
         byte_order: ByteOrder::LittleEndian,
         compression: "none".to_string(),
     };
 
-    // Iterate through all spectra in time order
+    // Iterate through all spectra in time order.
+    // Track DIA sweep boundaries by detecting when precursor_mz drops (new sweep starts).
+    // Alternate between series A and B based on sweep count.
     log::info!("Inserting spectra (interleaved MS1+MS2)...");
     let mut ms1_count = 0;
     let mut ms2_with_data = 0;
     let mut ms2_empty = 0;
     let mut total_count = 0;
 
+    let mut sweep_count = 0usize;
+    let mut ms2_idx_in_sweep = 0usize;
+    let mut last_precursor_mz = f64::MAX;
+
     let mut iter = source_reader.iter_spectra(None)?;
-    while let Some(spectrum) = iter.next()? {
+    while let Some(mut spectrum) = iter.next()? {
         total_count += 1;
 
         if total_count % 1000 == 0 {
             log::info!("  Progress: {} spectra", total_count);
+        }
+
+        // Patch header with XML metadata from source (iter_spectra doesn't populate these)
+        if let Some((param_tree, scan_list)) = xml_metadata.get(&spectrum.header.id) {
+            spectrum.header.param_tree_str = param_tree.clone();
+            spectrum.header.scan_list_str = scan_list.clone();
         }
 
         if spectrum.header.ms_level == 1 {
@@ -567,6 +728,21 @@ fn write_simplified_dia_mzdb_v2(
             writer.insert_spectrum(&spectrum, &encoding)?;
             ms1_count += 1;
         } else if spectrum.header.ms_level == 2 {
+            // Detect sweep boundary: precursor_mz drops means a new DIA sweep starts
+            let precursor_mz = spectrum.header.precursor_mz.unwrap_or(0.0);
+            if precursor_mz < last_precursor_mz - 1.0 {
+                // New sweep
+                sweep_count += 1;
+                ms2_idx_in_sweep = 0;
+            }
+            last_precursor_mz = precursor_mz;
+
+            // Get the correct unstaggered window bounds for this spectrum position
+            let series_windows = if sweep_count % 2 == 0 { &windows_a } else { &windows_b };
+            let window_bounds = series_windows.get(ms2_idx_in_sweep).copied();
+
+            ms2_idx_in_sweep += 1;
+
             // MS2: check if simplified data exists
             if let Some(simplified) = simplified_map.get(&spectrum.header.id) {
                 // Has data: create spectrum from simplified data
@@ -574,8 +750,10 @@ fn write_simplified_dia_mzdb_v2(
                 writer.insert_spectrum(&simplified_spectrum, &encoding)?;
                 ms2_with_data += 1;
             } else {
-                // Empty: create empty spectrum preserving header
-                let empty_spectrum = create_empty_ms2_spectrum_from_header(&spectrum.header, &encoding);
+                // Empty: create empty spectrum with corrected isolation window bounds
+                let empty_spectrum = create_empty_ms2_spectrum_from_header(
+                    &spectrum.header, &encoding, window_bounds,
+                );
                 writer.insert_spectrum_allow_empty(&empty_spectrum, &encoding)?;
                 ms2_empty += 1;
             }
@@ -650,7 +828,7 @@ fn convert_simplified_to_spectrum_simple(
             run_id: source_header.run_id,
             data_processing_id: source_header.data_processing_id,
             data_encoding_id: source_header.data_encoding_id,
-            bb_first_spectrum_id: 0,
+            bb_first_spectrum_id: None,
         },
         data: SpectrumData {
             data_encoding: data_encoding.clone(),
@@ -663,8 +841,78 @@ fn convert_simplified_to_spectrum_simple(
     }
 }
 
-/// Create empty MS2 spectrum from header
-fn create_empty_ms2_spectrum_from_header(source_header: &ModelSpectrumHeader, data_encoding: &DataEncoding) -> Spectrum {
+/// Build two window assignment vectors (one per DIA series) from unstaggered windows.
+///
+/// In staggered DIA, the instrument alternates between two series of MS2 sweeps (A and B)
+/// with different isolation window positions. After unstaggering, each original window is
+/// split into narrower non-overlapping sub-windows.
+///
+/// Each unstaggered window knows which original series it came from via `cycle_a_source_id`
+/// and `cycle_b_source_id`. We collect one window per original source, sorted by m/z,
+/// giving a 1:1 mapping from spectrum index within a sweep to its unstaggered bounds.
+///
+/// Returns (windows_a, windows_b) where each entry is (center_mz, lower_mz, upper_mz).
+fn build_series_window_vectors(
+    unstaggered_windows: &[UnstaggeredWindow],
+) -> (Vec<(f64, f64, f64)>, Vec<(f64, f64, f64)>) {
+    use std::collections::HashMap;
+
+    if unstaggered_windows.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    // For each series, collect one unstaggered window per unique source_id.
+    // Multiple unstaggered segments can share the same source_id (CycleAOnly + Overlap).
+    // We keep the widest one (the overlap region is the main segment).
+    let mut series_a_map: HashMap<i64, (f64, f64, f64)> = HashMap::new();
+    let mut series_b_map: HashMap<i64, (f64, f64, f64)> = HashMap::new();
+
+    for w in unstaggered_windows {
+        let bounds = (w.center_mz, w.lower_mz, w.upper_mz);
+        let width = w.upper_mz - w.lower_mz;
+
+        if let Some(source_id) = w.cycle_a_source_id {
+            let entry = series_a_map.entry(source_id).or_insert(bounds);
+            if width > entry.2 - entry.1 {
+                *entry = bounds;
+            }
+        }
+        if let Some(source_id) = w.cycle_b_source_id {
+            let entry = series_b_map.entry(source_id).or_insert(bounds);
+            if width > entry.2 - entry.1 {
+                *entry = bounds;
+            }
+        }
+    }
+
+    // Sort by center_mz to match the spectrum order within a sweep (ascending m/z)
+    let mut windows_a: Vec<_> = series_a_map.into_values().collect();
+    windows_a.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    let mut windows_b: Vec<_> = series_b_map.into_values().collect();
+    windows_b.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    log::info!("Window assignment vectors: series A = {} windows, series B = {} windows",
+               windows_a.len(), windows_b.len());
+
+    (windows_a, windows_b)
+}
+
+/// Create empty MS2 spectrum from header, with corrected isolation window bounds.
+///
+/// If window_bounds is provided (staggered mode), regenerates the precursor_list XML
+/// with the correct unstaggered bounds. Otherwise keeps the original XML.
+fn create_empty_ms2_spectrum_from_header(
+    source_header: &ModelSpectrumHeader,
+    data_encoding: &DataEncoding,
+    window_bounds: Option<(f64, f64, f64)>,
+) -> Spectrum {
+    let precursor_list_str = if let Some((center, lower, upper)) = window_bounds {
+        Some(generate_dia_precursor_list_xml_asymmetric(center, lower, upper))
+    } else {
+        source_header.precursor_list_str.clone()
+    };
+
     Spectrum {
         header: ModelSpectrumHeader {
             id: source_header.id,
@@ -677,12 +925,12 @@ fn create_empty_ms2_spectrum_from_header(source_header: &ModelSpectrumHeader, da
             tic: 0.0,
             base_peak_mz: 0.0,
             base_peak_intensity: 0.0,
-            precursor_mz: source_header.precursor_mz,
+            precursor_mz: window_bounds.map(|(center, _, _)| center).or(source_header.precursor_mz),
             precursor_charge: source_header.precursor_charge,
             peaks_count: 0,
             param_tree_str: source_header.param_tree_str.clone(),
             scan_list_str: source_header.scan_list_str.clone(),
-            precursor_list_str: source_header.precursor_list_str.clone(),
+            precursor_list_str,
             product_list_str: None,
             shared_param_tree_id: source_header.shared_param_tree_id,
             instrument_configuration_id: source_header.instrument_configuration_id,
@@ -690,7 +938,7 @@ fn create_empty_ms2_spectrum_from_header(source_header: &ModelSpectrumHeader, da
             run_id: source_header.run_id,
             data_processing_id: source_header.data_processing_id,
             data_encoding_id: source_header.data_encoding_id,
-            bb_first_spectrum_id: 0,
+            bb_first_spectrum_id: None,
         },
         data: SpectrumData {
             data_encoding: data_encoding.clone(),
