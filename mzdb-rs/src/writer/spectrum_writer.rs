@@ -305,7 +305,7 @@ fn insert_spectrum_header(
             sh.precursor_list_str.as_deref(),     // 16: precursor_list
             sh.product_list_str.as_deref(),       // 17: product_list
             1i64,                                 // 18: shared_param_tree_id
-            1i64,                                 // 19: instrument_configuration_id
+            sh.instrument_configuration_id,       // 19: instrument_configuration_id
             1i64,                                 // 20: source_file_id
             1i64,                                 // 21: run_id
             1i64,                                 // 22: data_processing_id

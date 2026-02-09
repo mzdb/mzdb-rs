@@ -92,7 +92,7 @@ pub use data_encoding::get_or_create_centroid_data_encoding;
 pub use run_slice::RunSliceFactory;
 pub use schema::{MZDB_SCHEMA, SPECTRUM_TABLE_SCHEMA};
 
-pub use metadata::WriterMetadata;
+pub use metadata::{SharedParamTree, WriterMetadata};
 
 /// Main mzDB writer for creating mzDB files
 ///

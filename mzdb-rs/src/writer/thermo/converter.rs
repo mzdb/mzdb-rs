@@ -1,8 +1,9 @@
 //! RAW to mzDB Conversion Logic
 
 use anyhow_ext::{Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
-use thernio::raw::RawFile;
+use thernio::raw::{Analyzer, IonizationMode, RawFile};
 
 use crate::metadata::*;
 use crate::model::*;
@@ -178,6 +179,28 @@ pub fn convert_raw_to_mzdb(
     // Clone scan events to avoid borrow conflict with raw.scan()
     let scan_events: Vec<_> = raw.scan_events().to_vec();
     
+    // Discover distinct analyzer types from scan events for instrument configurations.
+    // Unknown analyzer types are skipped — they would produce empty CV terms.
+    let mut analyzer_config_map: HashMap<Analyzer, i64> = HashMap::new();
+    for se in &scan_events {
+        if analyzer_cv(se.analyzer).is_some() {
+            let next_id = analyzer_config_map.len() as i64 + 1;
+            analyzer_config_map.entry(se.analyzer).or_insert(next_id);
+        }
+    }
+    
+    // Determine the ionization mode from the first scan event
+    let ionization = scan_events.first()
+        .map(|se| se.ionization)
+        .unwrap_or(IonizationMode::ESI);
+    
+    if analyzer_config_map.len() > 1 {
+        println!("  Instrument configurations: {} distinct analyzers", analyzer_config_map.len());
+        for (analyzer, config_id) in &analyzer_config_map {
+            println!("    IC{}: {:?}", config_id, analyzer);
+        }
+    }
+    
     for scan_num in 1..=num_scans {
         let scan = raw.scan(scan_num)
             .with_context(|| format!("Failed to read scan {} for statistics", scan_num))?;
@@ -194,7 +217,7 @@ pub fn convert_raw_to_mzdb(
     }
     
     // Build metadata from RAW file (returns metadata + method texts)
-    let (metadata, ms_method_text, _lc_method_text) = build_metadata(&mut raw, &stats)?;
+    let (metadata, ms_method_text, _lc_method_text) = build_metadata(&mut raw, &stats, &analyzer_config_map, ionization)?;
     
     // Build mzdb param_tree with legacy instrumentMethods for backward compatibility
     let mzdb_param_tree = if ms_method_text.is_some() {
@@ -239,7 +262,7 @@ pub fn convert_raw_to_mzdb(
         };
         
         // Convert to mzDB spectrum
-        let spectrum = convert_scan_to_spectrum(scan_num, &scan, scan_event, current_cycle, &raw)?;
+        let spectrum = convert_scan_to_spectrum(scan_num, &scan, scan_event, current_cycle, &raw, &analyzer_config_map)?;
         
         // Always use Centroid mode with LowRes encoding (32-bit m/z, 32-bit intensity)
         // since we're always extracting centroid data from the RAW file
@@ -444,22 +467,50 @@ fn filetime_to_iso8601(filetime: u64) -> String {
 
 /// Build WriterMetadata from RAW file information
 /// Returns (metadata, ms_method_text, lc_method_text)
-fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterMetadata, Option<String>, Option<String>)> {
-    // First, build the component list which requires mutable borrow
-    let component_list = build_component_list(raw)?;
+fn build_metadata(
+    raw: &mut RawFile,
+    stats: &ConversionStats,
+    analyzer_config_map: &HashMap<Analyzer, i64>,
+    ionization: IonizationMode,
+) -> Result<(WriterMetadata, Option<String>, Option<String>)> {
+    // Build CommonInstrumentParams shared_param_tree from instrument model and serial number
+    let model_name = raw.model().to_string();
+    let serial_number = raw.serial_number().to_string();
+    let common_instrument_xml = build_common_instrument_params(&model_name, &serial_number)?;
+
+    let shared_param_trees = vec![crate::writer::SharedParamTree {
+        id: 1,
+        data: common_instrument_xml,
+        schema_name: "CommonInstrumentParams".to_string(),
+    }];
+
+    // Build instrument configurations for each distinct analyzer, sorted by config_id
+    // All ICs reference the same CommonInstrumentParams shared_param_tree
+    let mut instrument_configurations = Vec::new();
+    for (&analyzer, &config_id) in analyzer_config_map {
+        let component_list = build_component_list_for_analyzer(analyzer, ionization)?;
+        instrument_configurations.push(InstrumentConfiguration {
+            id: config_id,
+            name: format!("IC{}", config_id),
+            param_tree: None,
+            component_list,
+            shared_param_tree_id: Some(1),
+            software_id: 1,
+        });
+    }
+    instrument_configurations.sort_by_key(|ic| ic.id);
 
     // Now get the other data (immutable borrows)
     let seq_row = raw.sequence_row();
     let header = raw.header();
     let autosampler = raw.autosampler_info();
     let (low_mz, high_mz) = raw.mz_range();
-    let model_name = raw.model().to_string();
 
     // Convert creation date
     let creation_date = filetime_to_iso8601(header.audit_start.time);
 
     // Pre-declare all formatted strings to ensure they live long enough
-    let version_str = header.version.to_string();
+    let _version_str = header.version.to_string();
     let raw_file_path = seq_row.raw_file_path();
     let sample_type_str = format!("{:?}", seq_row.injection().sample_type);
     let vol_str = format!("{:.2}", seq_row.injection().injection_volume);
@@ -499,32 +550,6 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
             "".to_string()
         },
         shared_param_tree_id: None,
-    };
-
-    // Instrument configuration with more detailed param tree
-    let mut inst_params = vec![
-        ("MS", "MS:1000494", "Thermo Scientific instrument model", model_name.as_str()),
-    ];
-
-    // Add file version
-    if header.version > 0 {
-        inst_params.push(("MS", "MS:1000569", "RAW file version", version_str.as_str()));
-    }
-
-    // Add instrument method path if available
-    if !seq_row.instrument_method().is_empty() {
-        inst_params.push(("MS", "MS:1000004", "instrument method", seq_row.instrument_method()));
-    }
-
-    let inst_param_tree = build_param_tree_simple(&inst_params)?;
-
-    let inst_config = InstrumentConfiguration {
-        id: 1,
-        name: model_name.clone(),
-        param_tree: Some(inst_param_tree),
-        component_list,
-        shared_param_tree_id: None,
-        software_id: 1,
     };
 
     // Sample with comprehensive details
@@ -697,7 +722,7 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
             None
         },
         param_tree: Some(run_param_tree),
-        shared_param_tree_id: None,
+        shared_param_tree_id: Some(1),
         sample_id: Some(1),
         default_instrument_config_id: 1,
         default_source_file_id: Some(1),
@@ -711,9 +736,10 @@ fn build_metadata(raw: &mut RawFile, stats: &ConversionStats) -> Result<(WriterM
             samples: vec![sample],
             software: vec![software],
             source_files: vec![source_file],
-            instrument_configurations: vec![inst_config],
+            instrument_configurations,
             data_processings: vec![data_processing],
             processing_methods: vec![processing_method],
+            shared_param_trees,
         },
         ms_method_text,
         lc_method_text,
@@ -727,6 +753,7 @@ fn convert_scan_to_spectrum(
     scan_event: Option<&thernio::raw::ScanEvent>,
     cycle: i64,
     raw: &RawFile,
+    analyzer_config_map: &HashMap<Analyzer, i64>,
 ) -> Result<Spectrum> {
     // Get filter string (1-based scan number)
     let filter_string = raw.filter_string(scan_num);
@@ -737,19 +764,15 @@ fn convert_scan_to_spectrum(
     // Get ion injection time from trailer extra record
     let ion_injection_time = trailer_record_opt.and_then(|r| r.ion_injection_time());
     
-    // Determine instrument configuration reference based on MS level
-    let instrument_config_ref = if scan.ms_level == 1 {
-        Some("IC1")
-    } else {
-        Some("IC2")
-    };
+    // Determine instrument configuration from the scan's analyzer type
+    let config_id = analyzer_config_map.get(&scan.analyzer).copied().unwrap_or(1);
+    let instrument_config_ref = Some(format!("IC{}", config_id));
     
     // Build scan list XML with additional metadata
     let scan_list_str = build_scan_list(
-        scan.retention_time,
         filter_string.as_deref(),
         ion_injection_time,
-        instrument_config_ref,
+        instrument_config_ref.as_deref(),
         Some(scan.low_mz),
         Some(scan.high_mz),
     )?;
@@ -940,8 +963,8 @@ fn convert_scan_to_spectrum(
         scan_list_str: Some(scan_list_str),
         precursor_list_str,
         product_list_str: None,
-        shared_param_tree_id: None,
-        instrument_configuration_id: 1,
+        shared_param_tree_id: Some(1),
+        instrument_configuration_id: config_id,
         source_file_id: 1,
         run_id: 1,
         data_processing_id: 1,

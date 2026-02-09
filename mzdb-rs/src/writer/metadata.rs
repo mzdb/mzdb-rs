@@ -20,6 +20,18 @@ pub struct WriterMetadata {
     pub instrument_configurations: Vec<InstrumentConfiguration>,
     pub data_processings: Vec<DataProcessing>,
     pub processing_methods: Vec<ProcessingMethod>,
+    pub shared_param_trees: Vec<SharedParamTree>,
+}
+
+/// A shared parameter tree that can be referenced by multiple entities
+/// (spectra, instrument configurations, etc.) to avoid data duplication.
+#[derive(Clone, Debug)]
+pub struct SharedParamTree {
+    pub id: i64,
+    /// XML data content
+    pub data: String,
+    /// Schema name (e.g. "CommonInstrumentParams")
+    pub schema_name: String,
 }
 
 impl WriterMetadata {
@@ -75,6 +87,7 @@ impl WriterMetadata {
             }],
             data_processings: vec![],
             processing_methods: vec![],
+            shared_param_trees: vec![],
         }
     }
 }
@@ -104,6 +117,9 @@ pub(crate) fn insert_metadata(
     
     // Insert source files
     insert_source_files(conn, metadata)?;
+    
+    // Insert shared param trees (before instrument configurations, which reference them)
+    insert_shared_param_trees(conn, metadata)?;
     
     // Insert instrument configurations
     insert_instrument_configurations(conn, metadata)?;
@@ -263,6 +279,26 @@ fn insert_source_files(conn: &Connection, metadata: &WriterMetadata) -> Result<(
     Ok(())
 }
 
+fn insert_shared_param_trees(conn: &Connection, metadata: &WriterMetadata) -> Result<()> {
+    if metadata.shared_param_trees.is_empty() {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare(
+        "INSERT INTO shared_param_tree (id, data, schema_name) VALUES (?, ?, ?)"
+    )?;
+
+    for spt in &metadata.shared_param_trees {
+        stmt.execute(rusqlite::params![
+            spt.id,
+            &spt.data,
+            &spt.schema_name,
+        ])?;
+    }
+
+    Ok(())
+}
+
 fn insert_instrument_configurations(conn: &Connection, metadata: &WriterMetadata) -> Result<()> {
     let mut stmt = conn.prepare(
         "INSERT INTO instrument_configuration VALUES (NULL, ?, NULL, ?, NULL, ?)"
@@ -364,17 +400,16 @@ fn insert_runs(conn: &Connection, metadata: &WriterMetadata, is_dia: bool) -> Re
         ])?;
     } else {
         for run in &metadata.runs {
-            // TODO: serialize param_tree properly
             stmt.execute(rusqlite::params![
                 &run.name,
-                rusqlite::types::Null, // start_timestamp
-                "",                    // param_tree
-                rusqlite::types::Null, // shared_param_tree_id
-                1i64,                  // sample_id
-                1i64,                  // default_instrument_config_id
-                rusqlite::types::Null, // default_source_file_id
-                1i64,                  // default_scan_processing_id
-                1i64,                  // default_chrom_processing_id
+                &run.start_timestamp,
+                &run.param_tree,
+                run.shared_param_tree_id,
+                run.sample_id,
+                run.default_instrument_config_id,
+                run.default_source_file_id,
+                run.default_scan_processing_id,
+                run.default_chrom_processing_id,
             ])?;
         }
     }
