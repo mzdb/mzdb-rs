@@ -301,22 +301,26 @@ fn insert_shared_param_trees(conn: &Connection, metadata: &WriterMetadata) -> Re
 
 fn insert_instrument_configurations(conn: &Connection, metadata: &WriterMetadata) -> Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT INTO instrument_configuration VALUES (NULL, ?, NULL, ?, NULL, ?)"
+        "INSERT INTO instrument_configuration VALUES (NULL, ?, ?, ?, ?, ?)"
     )?;
     
     if metadata.instrument_configurations.is_empty() {
         // Insert default instrument configuration
         stmt.execute(rusqlite::params![
             "default_instrument",
-            "",   // component_list
-            1i64, // software_id
+            Option::<String>::None, // param_tree
+            "",                     // component_list
+            Option::<i64>::None,    // shared_param_tree_id
+            1i64,                   // software_id
         ])?;
     } else {
         for inst_config in &metadata.instrument_configurations {
             stmt.execute(rusqlite::params![
                 &inst_config.name,
-                "",   // component_list - TODO: serialize when available
-                1i64, // software_id
+                &inst_config.param_tree,
+                &inst_config.component_list,
+                &inst_config.shared_param_tree_id,
+                inst_config.software_id,
             ])?;
         }
     }
