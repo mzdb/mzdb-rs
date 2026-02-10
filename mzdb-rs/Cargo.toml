@@ -18,6 +18,7 @@ tempfile = "3"
 # Core dependencies
 anyhow = "1.0"
 anyhow_ext = "0.2"
+compact_str = { version = "0.9", features = ["serde"] }
 fallible-iterator = "0.3"
 log = "0.4"
 ordered-float = "4.2"

@@ -763,27 +763,27 @@ fn convert_scan_to_spectrum(
     };
 
     // Build spectrum param tree with appropriate CV terms
-    use crate::writer::xml_builder::CvParam;
+    use crate::xml::{CvParam, CvRef};
     let mut spec_params = Vec::new();
 
     // MS level
     let ms_level_str = scan.ms_level.to_string();
-    spec_params.push(CvParam::new("MS", "MS:1000511", "ms level", &ms_level_str));
+    spec_params.push(CvParam::new(CvRef::MS, "MS:1000511", "ms level", &ms_level_str));
     
     // Spectrum type based on MS level
     match scan.ms_level {
-        1 => spec_params.push(CvParam::new("MS", "MS:1000579", "MS1 spectrum", "")),
-        _ => spec_params.push(CvParam::new("MS", "MS:1000580", "MSn spectrum", "")),
+        1 => spec_params.push(CvParam::new(CvRef::MS, "MS:1000579", "MS1 spectrum", "")),
+        _ => spec_params.push(CvParam::new(CvRef::MS, "MS:1000580", "MSn spectrum", "")),
     }
 
     // Polarity from scan event
     if let Some(event) = scan_event {
         match event.polarity {
             thernio::raw::Polarity::Positive => {
-                spec_params.push(CvParam::new("MS", "MS:1000130", "positive scan", ""));
+                spec_params.push(CvParam::new(CvRef::MS, "MS:1000130", "positive scan", ""));
             }
             thernio::raw::Polarity::Negative => {
-                spec_params.push(CvParam::new("MS", "MS:1000129", "negative scan", ""));
+                spec_params.push(CvParam::new(CvRef::MS, "MS:1000129", "negative scan", ""));
             }
             _ => {} // Don't add polarity if unknown
         }
@@ -791,34 +791,34 @@ fn convert_scan_to_spectrum(
 
     // Total ion current
     let tic_str = format!("{:.0}", scan.total_ion_current);
-    spec_params.push(CvParam::with_unit(
-        "MS", "MS:1000285", "total ion current", &tic_str,
-        "MS", "MS:1000131", "number of detector counts"
+    spec_params.push(CvParam::new_with_unit(
+        CvRef::MS, "MS:1000285", "total ion current", &tic_str,
+        CvRef::MS, "MS:1000131", "number of detector counts"
     ));
 
     // Scan mode (centroid/profile) from scan event
     if let Some(event) = scan_event {
         match event.scan_mode {
             thernio::raw::ScanMode::Centroid => {
-                spec_params.push(CvParam::new("MS", "MS:1000127", "centroid spectrum", ""));
+                spec_params.push(CvParam::new(CvRef::MS, "MS:1000127", "centroid spectrum", ""));
             }
             thernio::raw::ScanMode::Profile => {
-                spec_params.push(CvParam::new("MS", "MS:1000128", "profile spectrum", ""));
+                spec_params.push(CvParam::new(CvRef::MS, "MS:1000128", "profile spectrum", ""));
             }
         }
     }
 
     // Base peak m/z and intensity
     let bp_mz_str = format!("{:.6}", scan.base_peak_mz);
-    spec_params.push(CvParam::with_unit(
-        "MS", "MS:1000504", "base peak m/z", &bp_mz_str,
-        "MS", "MS:1000040", "m/z"
+    spec_params.push(CvParam::new_with_unit(
+        CvRef::MS, "MS:1000504", "base peak m/z", &bp_mz_str,
+        CvRef::MS, "MS:1000040", "m/z"
     ));
 
     let bp_int_str = format!("{:.2}", scan.base_peak_intensity);
-    spec_params.push(CvParam::with_unit(
-        "MS", "MS:1000505", "base peak intensity", &bp_int_str,
-        "MS", "MS:1000131", "number of detector counts"
+    spec_params.push(CvParam::new_with_unit(
+        CvRef::MS, "MS:1000505", "base peak intensity", &bp_int_str,
+        CvRef::MS, "MS:1000131", "number of detector counts"
     ));
 
     // Observed m/z range (lowest and highest observed m/z) from centroid stream
@@ -828,15 +828,15 @@ fn convert_scan_to_spectrum(
             let highest_mz = centroids.last().map(|p| p.mz as f64).unwrap_or(scan.high_mz);
             
             let lowest_mz_str = format!("{:.6}", lowest_mz);
-            spec_params.push(CvParam::with_unit(
-                "MS", "MS:1000528", "lowest observed m/z", &lowest_mz_str,
-                "MS", "MS:1000040", "m/z"
+            spec_params.push(CvParam::new_with_unit(
+                CvRef::MS, "MS:1000528", "lowest observed m/z", &lowest_mz_str,
+                CvRef::MS, "MS:1000040", "m/z"
             ));
             
             let highest_mz_str = format!("{:.6}", highest_mz);
-            spec_params.push(CvParam::with_unit(
-                "MS", "MS:1000527", "highest observed m/z", &highest_mz_str,
-                "MS", "MS:1000040", "m/z"
+            spec_params.push(CvParam::new_with_unit(
+                CvRef::MS, "MS:1000527", "highest observed m/z", &highest_mz_str,
+                CvRef::MS, "MS:1000040", "m/z"
             ));
         }
     }

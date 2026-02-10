@@ -125,7 +125,7 @@ pub use rtree::{
 // Re-export xml types and parsing functions
 pub use xml::{
     // Core parameter types
-    CvParam, UserParam, UserText, ParamTree,
+    CvRef, CvUnit as XmlCvUnit, CvParam, UserParam, UserText, ParamTree,
     // Structured XML types
     FileContent, ComponentList, InstrumentComponent,
     ScanList, Scan, ScanWindow,

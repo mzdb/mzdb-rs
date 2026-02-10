@@ -12,7 +12,7 @@ pub(crate) use crate::writer::xml_builder::{
     element_to_string, build_scan_list, build_precursor_list,
     build_param_tree, build_param_tree_simple,
     build_full_param_tree, build_full_param_tree_simple,
-    CvParam, SimpleUserParam,
+    CvParam, UserParam,
 };
 
 /// Map an Analyzer to its CV accession and name.

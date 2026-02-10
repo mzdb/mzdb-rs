@@ -23,8 +23,11 @@
 #![allow(unused)]
 
 use anyhow_ext::{Result};
+use compact_str::CompactString;
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::model::MzRange;
 
@@ -66,56 +69,185 @@ const SCAN_WINDOW_LOWER_LIMIT: &str = "MS:1000501";
 const SCAN_WINDOW_UPPER_LIMIT: &str = "MS:1000500";
 
 // ============================================================================
+// CV Reference Enum
+// ============================================================================
+
+/// Controlled vocabulary reference identifier.
+///
+/// Represents the ontology a CV term belongs to. Uses a compact enum (1 byte)
+/// instead of a String since only a few ontologies are used in mzDB/mzML.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CvRef {
+    /// PSI Mass Spectrometry Ontology
+    #[default]
+    MS,
+    /// PSI Ontology (generic)
+    PSI,
+    /// Unit Ontology
+    UO,
+}
+
+impl fmt::Display for CvRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CvRef::MS => write!(f, "MS"),
+            CvRef::PSI => write!(f, "PSI"),
+            CvRef::UO => write!(f, "UO"),
+        }
+    }
+}
+
+impl FromStr for CvRef {
+    type Err = ();
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "MS" => Ok(CvRef::MS),
+            "PSI" | "psi_ms" | "psi-ms" => Ok(CvRef::PSI),
+            "UO" => Ok(CvRef::UO),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<&str> for CvRef {
+    /// Parse a CV reference string, defaulting to MS for unknown values.
+    fn from(s: &str) -> Self {
+        CvRef::from_str(s).unwrap_or(CvRef::MS)
+    }
+}
+
+// ============================================================================
+// CV Unit
+// ============================================================================
+
+/// Unit reference for a CV parameter (e.g. minutes, m/z, milliseconds).
+///
+/// Unit fields always come as a triplet; grouping them in a struct enforces
+/// this invariant. 56 bytes with CompactString; `Option<CvUnit>` is also 56
+/// bytes thanks to niche optimization.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CvUnit {
+    /// Unit CV reference (e.g. UO, MS)
+    pub cv_ref: CvRef,
+    /// Unit accession (e.g. "UO:0000031")
+    pub accession: CompactString,
+    /// Unit name (e.g. "minute")
+    pub name: CompactString,
+}
+
+impl CvUnit {
+    pub fn new(cv_ref: CvRef, accession: &str, name: &str) -> Self {
+        Self {
+            cv_ref,
+            accession: CompactString::from(accession),
+            name: CompactString::from(name),
+        }
+    }
+}
+
+// ============================================================================
 // Core CV/User Parameter Structures
 // ============================================================================
 
-/// A controlled vocabulary parameter from mzML/mzDB XML
+/// A controlled vocabulary parameter from mzML/mzDB XML.
+///
+/// 136 bytes with CompactString + CvRef enum (vs 168 with all String).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CvParam {
-    /// Reference to the CV (e.g., "MS", "UO")
-    pub cv_ref: Option<String>,
+    /// Reference to the CV (e.g., MS, UO)
+    pub cv_ref: Option<CvRef>,
     /// CV accession number (e.g., "MS:1000511")
-    pub accession: String,
+    pub accession: CompactString,
     /// Human-readable name
-    pub name: Option<String>,
+    pub name: Option<CompactString>,
     /// Parameter value (may be empty)
-    pub value: Option<String>,
-    /// Unit CV reference
-    pub unit_cv_ref: Option<String>,
-    /// Unit accession (e.g., "UO:0000031")
-    pub unit_accession: Option<String>,
-    /// Unit name (e.g., "minute")
-    pub unit_name: Option<String>,
+    pub value: Option<CompactString>,
+    /// Unit reference (grouped; None when no unit)
+    pub unit: Option<CvUnit>,
 }
 
-/// A user-defined parameter
+impl CvParam {
+    /// Create a CV parameter without units
+    pub fn new(cv_ref: CvRef, accession: &str, name: &str, value: &str) -> Self {
+        Self {
+            cv_ref: Some(cv_ref),
+            accession: CompactString::from(accession),
+            name: Some(CompactString::from(name)),
+            value: if value.is_empty() { None } else { Some(CompactString::from(value)) },
+            unit: None,
+        }
+    }
+
+    /// Create a CV parameter with units
+    pub fn new_with_unit(
+        cv_ref: CvRef,
+        accession: &str,
+        name: &str,
+        value: &str,
+        unit_cv_ref: CvRef,
+        unit_accession: &str,
+        unit_name: &str,
+    ) -> Self {
+        Self {
+            cv_ref: Some(cv_ref),
+            accession: CompactString::from(accession),
+            name: Some(CompactString::from(name)),
+            value: if value.is_empty() { None } else { Some(CompactString::from(value)) },
+            unit: Some(CvUnit::new(unit_cv_ref, unit_accession, unit_name)),
+        }
+    }
+}
+
+/// A user-defined parameter (no CV equivalent).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserParam {
     /// CV reference (optional)
-    pub cv_ref: Option<String>,
+    pub cv_ref: Option<CvRef>,
     /// Accession (optional, often "MS:-1" for user params)
-    pub accession: Option<String>,
+    pub accession: Option<CompactString>,
     /// Parameter name
-    pub name: String,
+    pub name: CompactString,
     /// Parameter value
-    pub value: Option<String>,
+    pub value: Option<CompactString>,
     /// Data type (e.g., "xsd:float", "xsd:string")
-    pub param_type: Option<String>,
-    /// Unit CV reference
-    pub unit_cv_ref: Option<String>,
-    /// Unit accession
-    pub unit_accession: Option<String>,
-    /// Unit name
-    pub unit_name: Option<String>,
+    pub param_type: Option<CompactString>,
+    /// Unit reference (grouped; None when no unit)
+    pub unit: Option<CvUnit>,
+}
+
+impl UserParam {
+    /// Create a user parameter with type xsd:string and default MS cv_ref
+    pub fn new(name: &str, value: &str) -> Self {
+        Self {
+            cv_ref: Some(CvRef::MS),
+            accession: None,
+            name: CompactString::from(name),
+            value: if value.is_empty() { None } else { Some(CompactString::from(value)) },
+            param_type: Some(CompactString::from("xsd:string")),
+            unit: None,
+        }
+    }
+
+    /// Create a user parameter with an explicit type
+    pub fn new_with_type(name: &str, value: &str, param_type: &str) -> Self {
+        Self {
+            cv_ref: Some(CvRef::MS),
+            accession: None,
+            name: CompactString::from(name),
+            value: if value.is_empty() { None } else { Some(CompactString::from(value)) },
+            param_type: Some(CompactString::from(param_type)),
+            unit: None,
+        }
+    }
 }
 
 /// A user-defined text block (for long text content like instrument methods)
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserText {
     /// CV reference (optional)
-    pub cv_ref: Option<String>,
+    pub cv_ref: Option<CvRef>,
     /// Accession (optional)
-    pub accession: Option<String>,
+    pub accession: Option<CompactString>,
     /// Text block name (e.g., "instrumentMethods")
     pub name: String,
     /// Data type (e.g., "xsd:string")
@@ -316,36 +448,48 @@ pub struct ProductList {
 
 /// Parse a CV param from an XML node
 fn parse_cv_param_node(node: &Node) -> CvParam {
+    let unit = match (node.attribute("unitCvRef"), node.attribute("unitAccession"), node.attribute("unitName")) {
+        (Some(cv_ref), Some(acc), Some(name)) => Some(CvUnit {
+            cv_ref: CvRef::from(cv_ref),
+            accession: CompactString::from(acc),
+            name: CompactString::from(name),
+        }),
+        _ => None,
+    };
     CvParam {
-        cv_ref: node.attribute("cvRef").map(String::from),
-        accession: node.attribute("accession").unwrap_or("").to_string(),
-        name: node.attribute("name").map(String::from),
-        value: node.attribute("value").map(String::from),
-        unit_cv_ref: node.attribute("unitCvRef").map(String::from),
-        unit_accession: node.attribute("unitAccession").map(String::from),
-        unit_name: node.attribute("unitName").map(String::from),
+        cv_ref: node.attribute("cvRef").map(CvRef::from),
+        accession: CompactString::from(node.attribute("accession").unwrap_or("")),
+        name: node.attribute("name").map(CompactString::from),
+        value: node.attribute("value").map(CompactString::from),
+        unit,
     }
 }
 
 /// Parse a user param from an XML node
 fn parse_user_param_node(node: &Node) -> UserParam {
+    let unit = match (node.attribute("unitCvRef"), node.attribute("unitAccession"), node.attribute("unitName")) {
+        (Some(cv_ref), Some(acc), Some(name)) => Some(CvUnit {
+            cv_ref: CvRef::from(cv_ref),
+            accession: CompactString::from(acc),
+            name: CompactString::from(name),
+        }),
+        _ => None,
+    };
     UserParam {
-        cv_ref: node.attribute("cvRef").map(String::from),
-        accession: node.attribute("accession").map(String::from),
-        name: node.attribute("name").unwrap_or("").to_string(),
-        value: node.attribute("value").map(String::from),
-        param_type: node.attribute("type").map(String::from),
-        unit_cv_ref: node.attribute("unitCvRef").map(String::from),
-        unit_accession: node.attribute("unitAccession").map(String::from),
-        unit_name: node.attribute("unitName").map(String::from),
+        cv_ref: node.attribute("cvRef").map(CvRef::from),
+        accession: node.attribute("accession").map(CompactString::from),
+        name: CompactString::from(node.attribute("name").unwrap_or("")),
+        value: node.attribute("value").map(CompactString::from),
+        param_type: node.attribute("type").map(CompactString::from),
+        unit,
     }
 }
 
 /// Parse a user text from an XML node
 fn parse_user_text_node(node: &Node) -> UserText {
     UserText {
-        cv_ref: node.attribute("cvRef").map(String::from),
-        accession: node.attribute("accession").map(String::from),
+        cv_ref: node.attribute("cvRef").map(CvRef::from),
+        accession: node.attribute("accession").map(CompactString::from),
         name: node.attribute("name").unwrap_or("").to_string(),
         text_type: node.attribute("type").map(String::from),
         text: node.text().unwrap_or("").to_string(),
@@ -390,7 +534,7 @@ fn find_cv_param_name(cv_params: &[CvParam], accession: &str) -> Option<String> 
     cv_params
         .iter()
         .find(|p| p.accession == accession)
-        .and_then(|p| p.name.clone())
+        .and_then(|p| p.name.as_ref().map(|n| n.to_string()))
 }
 
 /// Parse an XML document and get the root element's count attribute
@@ -583,11 +727,12 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
             time_unit: scan_cv_params
                 .iter()
                 .find(|p| p.accession == SCAN_START_TIME)
-                .and_then(|p| p.unit_name.clone()),
+                .and_then(|p| p.unit.as_ref())
+                .map(|u| u.name.to_string()),
             filter_string: scan_cv_params
                 .iter()
                 .find(|p| p.accession == FILTER_STRING)
-                .and_then(|p| p.value.clone()),
+                .and_then(|p| p.value.as_ref().map(|v| v.to_string())),
             ion_injection_time: find_cv_param_value(&scan_cv_params, ION_INJECTION_TIME),
             scan_windows,
             cv_params: scan_cv_params,
@@ -693,7 +838,7 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
                             PQD     // PQD
                         )
                     })
-                    .and_then(|p| p.name.clone());
+                    .and_then(|p| p.name.as_ref().map(|n| n.to_string()));
 
                 Activation {
                     collision_energy: find_cv_param_value(&cv_params, COLLISION_ENERGY),
@@ -789,7 +934,7 @@ pub fn find_param_value(param_tree_xml: &str, accession: &str) -> Option<String>
         .cv_params
         .iter()
         .find(|p| p.accession == accession)
-        .and_then(|p| p.value.clone())
+        .and_then(|p| p.value.as_ref().map(|v| v.to_string()))
 }
 
 /// Find a user param value by name in param_tree XML
@@ -799,7 +944,7 @@ pub fn find_user_param_value(param_tree_xml: &str, name: &str) -> Option<String>
         .user_params
         .iter()
         .find(|p| p.name == name)
-        .and_then(|p| p.value.clone())
+        .and_then(|p| p.value.as_ref().map(|v| v.to_string()))
 }
 
 /// Find a user text content by name in param_tree XML
@@ -870,11 +1015,11 @@ mod tests {
         let result = parse_param_tree(xml).unwrap();
         assert_eq!(result.cv_params.len(), 1);
         assert_eq!(result.cv_params[0].accession, "MS:1000511");
-        assert_eq!(result.cv_params[0].value, Some("1".to_string()));
+        assert_eq!(result.cv_params[0].value.as_deref(), Some("1"));
         assert_eq!(result.user_params.len(), 1);
         assert_eq!(result.user_params[0].name, "ms1_bb_mz_width");
-        assert_eq!(result.user_params[0].cv_ref, Some("MS".to_string()));
-        assert_eq!(result.user_params[0].accession, Some("MS:-1".to_string()));
+        assert_eq!(result.user_params[0].cv_ref, Some(CvRef::MS));
+        assert_eq!(result.user_params[0].accession.as_deref(), Some("MS:-1"));
         assert_eq!(result.user_texts.len(), 0);
     }
 
