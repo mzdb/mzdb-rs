@@ -264,33 +264,49 @@ pub fn build_precursor_list(
 /// Each parameter is a tuple of (cvRef, accession, name, value) or
 /// (cvRef, accession, name, value, unitCvRef, unitAccession, unitName) for parameters with units
 pub fn build_param_tree(params: &[CvParam]) -> Result<String> {
+    build_full_param_tree(params, &[])
+}
+
+/// Build a param_tree XML string containing both cvParams and/or userParams.
+///
+/// Either section is omitted when its slice is empty.
+pub fn build_full_param_tree(cv_params: &[CvParam], user_params: &[SimpleUserParam]) -> Result<String> {
     let mut root = Element::new("params");
-    
-    // Create cvParams wrapper
-    let mut cv_params = Element::new("cvParams");
-    
-    for param in params {
-        let mut cv_param = Element::new("cvParam");
-        cv_param.attributes.insert("cvRef".to_string(), param.cv_ref.to_string());
-        cv_param.attributes.insert("accession".to_string(), param.accession.to_string());
-        cv_param.attributes.insert("name".to_string(), param.name.to_string());
-        
-        if !param.value.is_empty() {
-            cv_param.attributes.insert("value".to_string(), param.value.to_string());
+
+    if !cv_params.is_empty() {
+        let mut cv_wrapper = Element::new("cvParams");
+        for param in cv_params {
+            let mut el = Element::new("cvParam");
+            el.attributes.insert("cvRef".to_string(), param.cv_ref.to_string());
+            el.attributes.insert("accession".to_string(), param.accession.to_string());
+            el.attributes.insert("name".to_string(), param.name.to_string());
+            if !param.value.is_empty() {
+                el.attributes.insert("value".to_string(), param.value.to_string());
+            }
+            if let Some(ref unit) = param.unit {
+                el.attributes.insert("unitCvRef".to_string(), unit.cv_ref.to_string());
+                el.attributes.insert("unitAccession".to_string(), unit.accession.to_string());
+                el.attributes.insert("unitName".to_string(), unit.name.to_string());
+            }
+            cv_wrapper.children.push(XMLNode::Element(el));
         }
-        
-        // Add unit attributes if present
-        if let Some(ref unit) = param.unit {
-            cv_param.attributes.insert("unitCvRef".to_string(), unit.cv_ref.to_string());
-            cv_param.attributes.insert("unitAccession".to_string(), unit.accession.to_string());
-            cv_param.attributes.insert("unitName".to_string(), unit.name.to_string());
-        }
-        
-        cv_params.children.push(XMLNode::Element(cv_param));
+        root.children.push(XMLNode::Element(cv_wrapper));
     }
-    
-    root.children.push(XMLNode::Element(cv_params));
-    
+
+    if !user_params.is_empty() {
+        let mut user_wrapper = Element::new("userParams");
+        for param in user_params {
+            let mut el = Element::new("userParam");
+            el.attributes.insert("cvRef".to_string(), "MS".to_string());
+            el.attributes.insert("accession".to_string(), "MS:-1".to_string());
+            el.attributes.insert("name".to_string(), param.name.to_string());
+            el.attributes.insert("type".to_string(), param.param_type.to_string());
+            el.attributes.insert("value".to_string(), param.value.to_string());
+            user_wrapper.children.push(XMLNode::Element(el));
+        }
+        root.children.push(XMLNode::Element(user_wrapper));
+    }
+
     element_to_string(&root)
 }
 
@@ -300,6 +316,23 @@ pub fn build_param_tree_simple(params: &[(&str, &str, &str, &str)]) -> Result<St
         .map(|(cv_ref, accession, name, value)| CvParam::new(cv_ref, accession, name, value))
         .collect();
     build_param_tree(&cv_params)
+}
+
+/// Helper to build a full param tree (cvParams + userParams) from simple tuples.
+///
+/// `cv_params`: `(cv_ref, accession, name, value)` tuples
+/// `user_params`: `(name, value)` tuples (type defaults to xsd:string)
+pub fn build_full_param_tree_simple(
+    cv_params: &[(&str, &str, &str, &str)],
+    user_params: &[(&str, &str)],
+) -> Result<String> {
+    let cv: Vec<CvParam> = cv_params.iter()
+        .map(|(cv_ref, accession, name, value)| CvParam::new(cv_ref, accession, name, value))
+        .collect();
+    let up: Vec<SimpleUserParam> = user_params.iter()
+        .map(|(name, value)| SimpleUserParam::new(name, value))
+        .collect();
+    build_full_param_tree(&cv, &up)
 }
 
 /// CV Parameter structure for building param trees
@@ -354,6 +387,34 @@ pub struct CvUnit {
     pub cv_ref: String,
     pub accession: String,
     pub name: String,
+}
+
+/// User-defined parameter (no CV equivalent)
+#[derive(Debug, Clone)]
+pub struct SimpleUserParam {
+    pub name: String,
+    pub value: String,
+    pub param_type: String,
+}
+
+impl SimpleUserParam {
+    /// Create a user parameter with type xsd:string
+    pub fn new(name: &str, value: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: value.to_string(),
+            param_type: "xsd:string".to_string(),
+        }
+    }
+
+    /// Create a user parameter with an explicit type
+    pub fn with_type(name: &str, value: &str, param_type: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: value.to_string(),
+            param_type: param_type.to_string(),
+        }
+    }
 }
 
 /// Convert activation type string to CV accession and name

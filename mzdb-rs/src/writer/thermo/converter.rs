@@ -217,7 +217,7 @@ pub fn convert_raw_to_mzdb(
     }
     
     // Build metadata from RAW file (returns metadata + method texts)
-    let (metadata, ms_method_text, _lc_method_text) = build_metadata(&mut raw, &stats, &analyzer_config_map, ionization)?;
+    let (metadata, ms_method_text, _lc_method_text) = build_metadata(&mut raw, &stats, &analyzer_config_map, ionization, is_dia, raw_path)?;
     
     // Build mzdb param_tree with legacy instrumentMethods for backward compatibility
     let mzdb_param_tree = if ms_method_text.is_some() {
@@ -434,36 +434,6 @@ fn build_mzdb_user_texts(ms_method: Option<&str>) -> Result<String> {
     Ok(String::from_utf8(output)?)
 }
 
-/// Convert Windows FILETIME to ISO-8601 string
-fn filetime_to_iso8601(filetime: u64) -> String {
-    // FILETIME is 100-nanosecond intervals since January 1, 1601 UTC
-    const FILETIME_EPOCH_DIFF: u64 = 11644473600; // seconds between 1601 and 1970
-
-    let seconds_since_1601 = filetime / 10_000_000;
-    if seconds_since_1601 < FILETIME_EPOCH_DIFF {
-        return String::new();
-    }
-
-    let unix_timestamp = seconds_since_1601 - FILETIME_EPOCH_DIFF;
-
-    // Simple ISO-8601 formatting (basic version without full datetime library)
-    let seconds_in_day = 86400;
-    let days = unix_timestamp / seconds_in_day;
-    let remaining_seconds = unix_timestamp % seconds_in_day;
-
-    let hours = remaining_seconds / 3600;
-    let minutes = (remaining_seconds % 3600) / 60;
-    let seconds = remaining_seconds % 60;
-
-    // Simple date calculation (approximate, good enough for display)
-    let year = 1970 + (days / 365) as i32;
-    let day_of_year = days % 365;
-    let month = (day_of_year / 30) + 1;
-    let day = (day_of_year % 30) + 1;
-
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-            year, month, day, hours, minutes, seconds)
-}
 
 /// Build WriterMetadata from RAW file information
 /// Returns (metadata, ms_method_text, lc_method_text)
@@ -472,6 +442,8 @@ fn build_metadata(
     stats: &ConversionStats,
     analyzer_config_map: &HashMap<Analyzer, i64>,
     ionization: IonizationMode,
+    is_dia: bool,
+    raw_path: &Path,
 ) -> Result<(WriterMetadata, Option<String>, Option<String>)> {
     // Build CommonInstrumentParams shared_param_tree from instrument model and serial number
     let model_name = raw.model().to_string();
@@ -503,32 +475,16 @@ fn build_metadata(
     // Now get the other data (immutable borrows)
     let seq_row = raw.sequence_row();
     let header = raw.header();
-    let autosampler = raw.autosampler_info();
-    let (low_mz, high_mz) = raw.mz_range();
 
     // Convert creation date
-    let creation_date = filetime_to_iso8601(header.audit_start.time);
+    let creation_date = raw.created_timestamp()
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default();
 
     // Pre-declare all formatted strings to ensure they live long enough
-    let _version_str = header.version.to_string();
-    let raw_file_path = seq_row.raw_file_path();
-    let sample_type_str = format!("{:?}", seq_row.injection().sample_type);
     let vol_str = format!("{:.2}", seq_row.injection().injection_volume);
-    let weight_str = format!("{:.3}", seq_row.injection().sample_weight);
-    let sample_vol_str = format!("{:.2}", seq_row.injection().sample_volume);
-    let dilution_str = format!("{:.3}", seq_row.injection().dilution_factor);
-    let tray_str = format!("{}:{}", autosampler.tray_index, autosampler.vial_index);
-    let start_time_str = format!("{:.2}", raw.start_time());
-    let _end_time_str = format!("{:.2}", raw.end_time());
-    let _low_mz_str = format!("{:.4}", low_mz);
-    let _high_mz_str = format!("{:.4}", high_mz);
     let ms1_str = stats.ms1_count.to_string();
     let ms2_str = stats.ms2_count.to_string();
-    let ms3_str = stats.ms3_count.to_string();
-    let min_rt_str = format!("{:.4}", stats.min_rt);
-    let max_rt_str = format!("{:.4}", stats.max_rt);
-    let min_mz_str = format!("{:.4}", stats.min_precursor_mz);
-    let max_mz_str = format!("{:.4}", stats.max_precursor_mz);
 
     // Software - include embedded method info if available
     let mut software_params = Vec::new();
@@ -552,74 +508,50 @@ fn build_metadata(
         shared_param_tree_id: None,
     };
 
-    // Sample with comprehensive details
-    let mut sample_params = vec![
-        ("MS", "MS:1000002", "sample name", seq_row.sample_id()),
-    ];
+    // Sample param_tree: userParams for Thermo-specific sequence row fields
+    // (no standard PSI-MS sample attributes match these Thermo fields accurately)
+    let mut sample_user_params: Vec<(&str, &str)> = Vec::new();
 
-    // Add sample type
-    if !sample_type_str.is_empty() && sample_type_str != "Unknown" {
-        sample_params.push(("MS", "MS:1000001", "sample type", sample_type_str.as_str()));
+    if !header.created.user_name.is_empty() {
+        sample_user_params.push(("CreatorID", &header.created.user_name));
     }
-
-    // Add comment if available
-    if !seq_row.comment().is_empty() {
-        sample_params.push(("MS", "MS:1000003", "sample comment", seq_row.comment()));
-    }
-
-    // Add injection volume
-    if seq_row.injection().injection_volume > 0.0 {
-        sample_params.push(("MS", "MS:1000005", "injection volume", vol_str.as_str()));
-    }
-
-    // Add sample weight
-    if seq_row.injection().sample_weight > 0.0 {
-        sample_params.push(("MS", "MS:1000006", "sample weight", weight_str.as_str()));
-    }
-
-    // Add sample volume
-    if seq_row.injection().sample_volume > 0.0 {
-        sample_params.push(("MS", "MS:1000007", "sample volume", sample_vol_str.as_str()));
-    }
-
-    // Add dilution factor
-    if seq_row.injection().dilution_factor > 0.0 && seq_row.injection().dilution_factor != 1.0 {
-        sample_params.push(("MS", "MS:1000008", "dilution factor", dilution_str.as_str()));
-    }
-
-    // Add vial position
     if !seq_row.position().is_empty() {
-        sample_params.push(("MS", "MS:1000009", "vial position", seq_row.position()));
+        sample_user_params.push(("SeqRowVialPosition", seq_row.position()));
+    }
+    if seq_row.injection().injection_volume > 0.0 {
+        sample_user_params.push(("SeqRowInjectedVolume", &vol_str));
+    }
+    if !seq_row.calibration_file().is_empty() {
+        sample_user_params.push(("SeqRowCalibrationFile", seq_row.calibration_file()));
+    }
+    if !seq_row.instrument_method().is_empty() {
+        sample_user_params.push(("SeqRowInstrumentMethod", seq_row.instrument_method()));
+    }
+    if !seq_row.processing_method().is_empty() {
+        sample_user_params.push(("SeqRowProcessingMethod", seq_row.processing_method()));
+    }
+    if !seq_row.comment().is_empty() {
+        sample_user_params.push(("SeqRowComment", seq_row.comment()));
     }
 
-    // Add autosampler tray info
-    if autosampler.vials_per_tray > 0 {
-        sample_params.push(("MS", "MS:1000010", "autosampler position", tray_str.as_str()));
-    }
-
-    if !autosampler.tray_name.is_empty() {
-        sample_params.push(("MS", "MS:1000011", "autosampler tray", &autosampler.tray_name));
-    }
-
-    let sample_param_tree = build_param_tree_simple(&sample_params)?;
+    let sample_param_tree = if sample_user_params.is_empty() {
+        None
+    } else {
+        Some(build_full_param_tree_simple(&[], &sample_user_params)?)
+    };
 
     let sample = Sample {
         id: 1,
         name: seq_row.sample_id().to_string(),
-        param_tree: Some(sample_param_tree),
+        param_tree: sample_param_tree,
         shared_param_tree_id: None,
     };
 
-    // Source file with creation date, version, and path
+    // Source file with creation date
     let mut source_params = vec![
         ("MS", "MS:1000768", "Thermo nativeID format", ""),
         ("MS", "MS:1000563", "Thermo RAW format", ""),
     ];
-
-    // Add original path if available
-    if !raw_file_path.is_empty() {
-        source_params.push(("MS", "MS:1000569", "file path", &raw_file_path));
-    }
 
     if !creation_date.is_empty() {
         source_params.push(("MS", "MS:1000747", "creation date", &creation_date));
@@ -642,14 +574,9 @@ fn build_metadata(
     };
 
     // Processing method
-    let mut proc_params = vec![
-        ("MS", "MS:1000544", "Conversion to mzML", ""),
+    let proc_params = vec![
+        ("MS", "MS:1000530", "file format conversion", "Conversion to mzDB"),
     ];
-
-    // Add processing method path if available
-    if !seq_row.processing_method().is_empty() {
-        proc_params.push(("MS", "MS:1000530", "processing method", seq_row.processing_method()));
-    }
 
     let processing_method = ProcessingMethod {
         id: 1,
@@ -660,32 +587,18 @@ fn build_metadata(
         software_id: 1,
     };
 
-    // Run with comprehensive scan statistics and method texts
+    // Run with acquisition mode and scan statistics
+    let acquisition_value = if is_dia { "DIA acquisition" } else { "DDA acquisition" };
     let mut run_params = vec![
-        ("MS", "MS:1000016", "scan start time", start_time_str.as_str()),
+        ("MS", "MS:1001954", "acquisition parameter", acquisition_value),
     ];
 
     // Add MS level counts if available
     if stats.ms1_count > 0 {
-        run_params.push(("PRIDE", "PRIDE:0000481", "Number of MS1 spectra", ms1_str.as_str()));
+        run_params.push(("MS", "MS:4000059", "number of MS1 spectra", ms1_str.as_str()));
     }
     if stats.ms2_count > 0 {
-        run_params.push(("PRIDE", "PRIDE:0000482", "Number of MS2 spectra", ms2_str.as_str()));
-    }
-    if stats.ms3_count > 0 {
-        run_params.push(("PRIDE", "PRIDE:0000483", "Number of MS3 spectra", ms3_str.as_str()));
-    }
-
-    // Add RT range from stats
-    if stats.max_rt > 0.0 {
-        run_params.push(("PRIDE", "PRIDE:0000474", "MS min RT", min_rt_str.as_str()));
-        run_params.push(("PRIDE", "PRIDE:0000475", "MS max RT", max_rt_str.as_str()));
-    }
-
-    // Add precursor m/z range from stats
-    if stats.max_precursor_mz > 0.0 {
-        run_params.push(("PRIDE", "PRIDE:0000476", "MS min MZ", min_mz_str.as_str()));
-        run_params.push(("PRIDE", "PRIDE:0000477", "MS max MZ", max_mz_str.as_str()));
+        run_params.push(("MS", "MS:4000060", "number of MS2 spectra", ms2_str.as_str()));
     }
 
     // Build basic param tree
@@ -713,9 +626,15 @@ fn build_metadata(
         }
     }
 
+    // Use RAW filename stem as run name
+    let run_name = raw_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("run_1")
+        .to_string();
+
     let run = Run {
         id: 1,
-        name: "run_1".to_string(),
+        name: run_name,
         start_timestamp: if !creation_date.is_empty() {
             Some(creation_date)
         } else {

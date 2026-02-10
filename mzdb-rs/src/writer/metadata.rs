@@ -246,7 +246,7 @@ fn insert_samples(conn: &Connection, metadata: &WriterMetadata) -> Result<()> {
         for sample in &metadata.samples {
             stmt.execute(rusqlite::params![
                 &sample.name,
-                rusqlite::types::Null,  // param_tree
+                &sample.param_tree,
             ])?;
         }
     }
@@ -368,7 +368,7 @@ fn insert_mzdb_header(
     stmt.execute(rusqlite::params![
         "0.7",          // version
         timestamp.to_string(),
-        "",             // file_content - TODO: proper serialization
+        "<fileContent>\n  <cvParam cvRef=\"MS\" accession=\"MS:1000579\" name=\"MS1 spectrum\" value=\"\"/>\n  <cvParam cvRef=\"MS\" accession=\"MS:1000580\" name=\"MSn spectrum\" value=\"\"/>\n</fileContent>\n",
         "",             // contacts
         param_tree,     // param_tree
     ])?;
