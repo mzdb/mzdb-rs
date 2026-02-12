@@ -51,8 +51,14 @@ pub trait PeakelDetectionConfig: Clone + Send + Sync {
         self.max_time_window() / 2.0
     }
     
+    /// Whether to zero-pad the XIC before derivative analysis.
+    /// Default is false to preserve legacy MS1 behavior.
+    fn zero_pad_xic(&self) -> bool {
+        false
+    }
+    
     fn create_finder(&self) -> Box<dyn PeakelFinder + Send + Sync> {
-        create_peakel_finder(self.algorithm(), self.min_peaks())
+        create_peakel_finder(self.algorithm(), self.min_peaks(), self.zero_pad_xic())
     }
 }
 
@@ -441,13 +447,14 @@ pub fn find_matching_peakel_range(
 ///
 /// # Returns
 /// A boxed PeakelFinder trait object
-pub fn create_peakel_finder(algorithm: &str, min_peaks: usize) -> Box<dyn PeakelFinder + Send + Sync> {
+pub fn create_peakel_finder(algorithm: &str, min_peaks: usize, zero_pad_xic: bool) -> Box<dyn PeakelFinder + Send + Sync> {
     match algorithm {
         "smart" => {
             let mut config = SmartPeakelFinderConfig::default();
             config.min_peaks_count = min_peaks;
             config.use_smoothing = true;
             config.use_baseline_remover = false;
+            config.zero_pad_xic = zero_pad_xic;
             Box::new(SmartPeakelFinder::with_config(config))
         }
         _ => {
@@ -597,9 +604,9 @@ mod tests {
     #[test]
     fn test_create_peakel_finder() {
         // Just verify it doesn't panic
-        let _smart = create_peakel_finder("smart", 5);
-        let _basic = create_peakel_finder("basic", 3);
-        let _default = create_peakel_finder("unknown", 4);
+        let _smart = create_peakel_finder("smart", 5, false);
+        let _basic = create_peakel_finder("basic", 3, false);
+        let _default = create_peakel_finder("unknown", 4, false);
     }
     
     #[test]

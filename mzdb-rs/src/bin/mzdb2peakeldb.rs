@@ -337,6 +337,7 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
         skip_apex_boundary_check: !args.require_apex_boundary,
+        zero_pad_xic: true,
     };
 
     let detector = DiaMs2PeakelDetector::with_config(config.clone(), reader);

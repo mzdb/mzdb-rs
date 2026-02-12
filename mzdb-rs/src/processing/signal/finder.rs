@@ -190,6 +190,16 @@ pub struct SmartPeakelFinderConfig {
     pub sg_smoothing_width: usize,
     /// Whether to use adaptive smoothing width
     pub use_adaptive_sg_smoothing: bool,
+    /// Whether to zero-pad the XIC before derivative analysis.
+    ///
+    /// When enabled, a single zero is prepended and/or appended to the
+    /// intensities before `find_significant_mini_maxi`. This ensures that signals
+    /// with their apex at the first or last position (common in MS2 DIA fragment
+    /// ions) produce the ascending/descending slope transitions that the derivative
+    /// analysis requires to detect a maximum.
+    ///
+    /// Default is `false` to preserve legacy MS1 behavior.
+    pub zero_pad_xic: bool,
 }
 
 impl Default for SmartPeakelFinderConfig {
@@ -205,6 +215,7 @@ impl Default for SmartPeakelFinderConfig {
             use_smoothing: true,
             sg_smoothing_width: 5,
             use_adaptive_sg_smoothing: true,
+            zero_pad_xic: false,
         }
     }
 }
@@ -312,9 +323,21 @@ impl PeakelFinder for SmartPeakelFinder {
 
         let smoothed_intensities: Vec<f64> = smoothed_data.iter().map(|&(_, i)| i as f64).collect();
 
+        // Optionally zero-pad the intensities before derivative analysis.
+        // This allows detection of peaks whose apex is at the first or last position.
+        let (analysis_intensities, left_pad) = if self.config.zero_pad_xic {
+            let mut padded = Vec::with_capacity(smoothed_intensities.len() + 2);
+            padded.push(0.0);
+            padded.extend_from_slice(&smoothed_intensities);
+            padded.push(0.0);
+            (padded, 1usize)
+        } else {
+            (smoothed_intensities, 0usize)
+        };
+
         // Find significant minima and maxima
         let mini_maxi = find_significant_mini_maxi(
-            &smoothed_intensities,
+            &analysis_intensities,
             self.config.mini_maxi_distance_thresh,
             self.config.max_intensity_rel_thresh,
         );
@@ -323,16 +346,19 @@ impl PeakelFinder for SmartPeakelFinder {
             return vec![];
         }
 
-        // Convert mini/maxi into peakel indices
+        // Convert mini/maxi into peakel indices, mapping back to original data space
         let mut tmp_peakels_indices: Vec<(usize, usize)> = Vec::new();
         let mut prev_min_idx: Option<usize> = None;
+        let max_original_idx = peaks_count - 1;
 
         for change in &mini_maxi {
             if change.is_minimum {
+                // Map padded index back to original and clamp
+                let original_idx = (change.index).saturating_sub(left_pad).min(max_original_idx);
                 if let Some(prev_idx) = prev_min_idx {
-                    tmp_peakels_indices.push((prev_idx, change.index));
+                    tmp_peakels_indices.push((prev_idx, original_idx));
                 }
-                prev_min_idx = Some(change.index);
+                prev_min_idx = Some(original_idx);
             }
         }
 

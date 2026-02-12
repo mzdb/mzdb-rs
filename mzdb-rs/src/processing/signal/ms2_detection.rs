@@ -281,6 +281,10 @@ pub struct DiaMs2PeakelConfig {
     /// Whether to skip the apex boundary check (apex must not be first or last peak).
     /// Default is true to match Scala reference implementation behavior.
     pub skip_apex_boundary_check: bool,
+    /// Whether to zero-pad the XIC before derivative analysis.
+    /// Default is true for MS2 DIA data where fragment ions often appear as
+    /// sharp spikes with the apex at the first position.
+    pub zero_pad_xic: bool,
 }
 
 impl Default for DiaMs2PeakelConfig {
@@ -297,6 +301,7 @@ impl Default for DiaMs2PeakelConfig {
             min_peakel_duration: 0.0,
             algorithm: "smart".to_string(),
             skip_apex_boundary_check: true,
+            zero_pad_xic: true,
         }
     }
 }
@@ -317,6 +322,7 @@ impl PeakelDetectionConfig for DiaMs2PeakelConfig {
     #[inline] fn min_peakel_duration(&self) -> f32 { self.min_peakel_duration }
     #[inline] fn algorithm(&self) -> &str { &self.algorithm }
     #[inline] fn skip_apex_boundary_check(&self) -> bool { self.skip_apex_boundary_check }
+    #[inline] fn zero_pad_xic(&self) -> bool { self.zero_pad_xic }
 }
 
 /// Peak key for MS2 detection - simpler than MS1, no triplet
