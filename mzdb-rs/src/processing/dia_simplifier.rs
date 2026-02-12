@@ -561,7 +561,7 @@ fn group_into_spectra(
 
     for ((spectrum_id, _precursor_mz), mut points) in groups {
         // Sort by m/z
-        points.sort_by(|a, b| a.mz.partial_cmp(&b.mz).unwrap());
+        points.sort_by(|a, b| a.mz.total_cmp(&b.mz));
 
         // Merge duplicate m/z values (sum intensities)
         let mut merged_mz: Vec<f32> = Vec::new();
@@ -603,7 +603,7 @@ fn group_into_spectra(
     // Sort by cycle then by precursor_mz
     spectra.sort_by(|a, b| match a.cycle.cmp(&b.cycle) {
         std::cmp::Ordering::Equal => {
-            a.precursor_mz.partial_cmp(&b.precursor_mz).unwrap()
+            a.precursor_mz.total_cmp(&b.precursor_mz)
         }
         other => other,
     });
@@ -793,7 +793,7 @@ fn convert_simplified_to_spectrum_simple(
     let tic: f32 = simplified.intensity_array.iter().sum();
     let (base_peak_mz, base_peak_intensity) = simplified.mz_array.iter()
         .zip(&simplified.intensity_array)
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(&mz, &intensity)| (mz as f64, intensity))
         .unwrap_or((0.0, 0.0));
 
@@ -887,10 +887,10 @@ fn build_series_window_vectors(
 
     // Sort by center_mz to match the spectrum order within a sweep (ascending m/z)
     let mut windows_a: Vec<_> = series_a_map.into_values().collect();
-    windows_a.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    windows_a.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut windows_b: Vec<_> = series_b_map.into_values().collect();
-    windows_b.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    windows_b.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     log::info!("Window assignment vectors: series A = {} windows, series B = {} windows",
                windows_a.len(), windows_b.len());

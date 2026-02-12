@@ -438,8 +438,7 @@ impl MzDbReader {
         
         // Sort by retention time for proper chromatographic processing
         spectra.sort_by(|a, b| {
-            a.header.time.partial_cmp(&b.header.time)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            a.header.time.total_cmp(&b.header.time)
         });
         
         Ok(spectra)
@@ -608,7 +607,7 @@ impl MzDbReader {
         }
         
         let mut result: Vec<_> = windows.into_values().collect();
-        result.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        result.sort_by(|a, b| a.0.total_cmp(&b.0));
         result
     }
 

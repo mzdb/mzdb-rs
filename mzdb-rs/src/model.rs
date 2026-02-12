@@ -381,7 +381,7 @@ impl SpectrumData {
         let mz_da = mz * mz_tol_ppm / 1_000_000.0;
         let idx = self
             .mz_array
-            .binary_search_by(|&probe| probe.partial_cmp(&mz).unwrap_or(std::cmp::Ordering::Equal))
+            .binary_search_by(|&probe| probe.total_cmp(&mz))
             .unwrap_or_else(|i| i);
 
         let new_idx = if idx == self.peaks_count {

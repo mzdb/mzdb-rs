@@ -93,7 +93,7 @@ impl ChromatogramData {
         let max_idx = self.intensity_array
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(idx, _)| idx)?;
         
         Some((self.time_array[max_idx], self.intensity_array[max_idx]))
@@ -122,7 +122,7 @@ impl ChromatogramData {
         
         // Find the bracketing indices
         let idx = self.time_array
-            .binary_search_by(|&t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Equal))
+            .binary_search_by(|&t| t.total_cmp(&time))
             .unwrap_or_else(|i| i);
         
         if idx == 0 {

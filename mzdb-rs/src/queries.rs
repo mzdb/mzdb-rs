@@ -993,7 +993,7 @@ pub fn get_isolation_windows(db: &Connection) -> Result<Vec<MzRange>> {
     }
 
     // Sort by min_mz
-    windows.sort_by(|a, b| a.min_mz.partial_cmp(&b.min_mz).unwrap_or(std::cmp::Ordering::Equal));
+    windows.sort_by(|a, b| a.min_mz.total_cmp(&b.min_mz));
 
     Ok(windows)
 }

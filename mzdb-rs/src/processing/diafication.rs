@@ -247,7 +247,7 @@ pub fn merge_peaks(spectra: &[&RescaledSpectrum], mz_tolerance: f32) -> SimpleSp
         }
     }
 
-    all_peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    all_peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut merged = SimpleSpectrumData::new();
 
@@ -308,7 +308,7 @@ pub fn create_merged_dia_spectra(
     }
 
     merged_spectra.sort_by(|a, b| match a.cycle.cmp(&b.cycle) {
-        std::cmp::Ordering::Equal => a.window_center.partial_cmp(&b.window_center).unwrap(),
+        std::cmp::Ordering::Equal => a.window_center.total_cmp(&b.window_center),
         other => other,
     });
 
@@ -589,8 +589,7 @@ fn process_ms2_spectra(
                 .enumerate()
                 .min_by(|(_, a), (_, b)| {
                     ((*a - ms2_time).abs())
-                        .partial_cmp(&((*b - ms2_time).abs()))
-                        .unwrap()
+                        .total_cmp(&((*b - ms2_time).abs()))
                 })
                 .map(|(i, _)| i)
                 .unwrap_or(0);
@@ -763,7 +762,7 @@ fn find_base_peak(mz_array: &[f32], intensity_array: &[f32]) -> (f64, f32) {
     mz_array
         .iter()
         .zip(intensity_array.iter())
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(&mz, &int)| (mz as f64, int))
         .unwrap_or((0.0, 0.0))
 }

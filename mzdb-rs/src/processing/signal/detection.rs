@@ -633,7 +633,7 @@ pub fn is_target_mz_within_range(target_mz: f32, mz_tol_da: f32, min_mz: f32, ma
 pub fn sort_indices_by_descending_f32_value(values: &[f32]) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..values.len()).collect();
     indices.sort_by(|&a, &b| {
-        values[b].partial_cmp(&values[a]).unwrap_or(std::cmp::Ordering::Equal)
+        values[b].total_cmp(&values[a])
     });
     indices
 }

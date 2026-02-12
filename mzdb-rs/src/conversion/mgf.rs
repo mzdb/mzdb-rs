@@ -183,10 +183,10 @@ impl<W: Write> MgfWriter<W> {
         if let Some(max_peaks) = self.options.max_peaks
             && filtered_peaks.len() > max_peaks
         {
-            filtered_peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            filtered_peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
             filtered_peaks.truncate(max_peaks);
             // Re-sort by m/z for output
-            filtered_peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            filtered_peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
         
         // Write BEGIN IONS

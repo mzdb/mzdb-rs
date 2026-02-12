@@ -395,7 +395,7 @@ fn test_walking_peakel_detection() -> Result<()> {
     println!("Total peaks above threshold: {}", all_peaks.len());
     
     // Sort peaks by intensity (descending)
-    all_peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    all_peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
     
     // Track used peaks per spectrum
     let mut used_peaks: Vec<HashSet<usize>> = vec![HashSet::new(); ms1_count];
@@ -509,7 +509,7 @@ fn test_walking_peakel_detection() -> Result<()> {
     if !detected_peakels.is_empty() {
         // Sort by intensity
         detected_peakels.sort_by(|a, b| 
-            b.apex_intensity().partial_cmp(&a.apex_intensity()).unwrap_or(std::cmp::Ordering::Equal)
+            b.apex_intensity().total_cmp(&a.apex_intensity())
         );
         
         println!("\nTop 10 peakels by intensity:");

@@ -106,7 +106,7 @@ fn calculate_fallback_half_width(target_mzs: &[f64]) -> f64 {
         return 4.0;
     }
     
-    spacings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    spacings.sort_by(|a, b| a.total_cmp(b));
     let median_spacing = spacings[spacings.len() / 2];
     
     // In staggered DIA, spacing between consecutive windows equals half-width
@@ -506,8 +506,8 @@ impl StaggeredDiaDetector {
         }
 
         // Sort by target m/z
-        odd_windows.sort_by(|a, b| a.target_mz.partial_cmp(&b.target_mz).unwrap());
-        even_windows.sort_by(|a, b| a.target_mz.partial_cmp(&b.target_mz).unwrap());
+        odd_windows.sort_by(|a, b| a.target_mz.total_cmp(&b.target_mz));
+        even_windows.sort_by(|a, b| a.target_mz.total_cmp(&b.target_mz));
 
         (odd_windows, even_windows)
     }
@@ -534,8 +534,8 @@ impl StaggeredDiaDetector {
         }
         
         // Sort
-        odd_targets.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        even_targets.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        odd_targets.sort_by(|a, b| a.total_cmp(b));
+        even_targets.sort_by(|a, b| a.total_cmp(b));
         
         // Calculate spacing within each set (this should be the actual window width)
         let mut spacings = Vec::new();
@@ -559,7 +559,7 @@ impl StaggeredDiaDetector {
         }
         
         // Return median spacing as window width
-        spacings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        spacings.sort_by(|a, b| a.total_cmp(b));
         spacings[spacings.len() / 2]
     }
 
@@ -612,7 +612,7 @@ impl StaggeredDiaDetector {
         }
 
         // Return median offset (more robust than mean)
-        offsets.sort_by(|a: &f64, b: &f64| a.partial_cmp(b).unwrap());
+        offsets.sort_by(|a: &f64, b: &f64| a.total_cmp(b));
         let median = offsets[offsets.len() / 2];
         log::debug!("calculate_offset: median offset = {:.2}", median);
         median
@@ -646,7 +646,7 @@ impl StaggeredDiaDetector {
         }
 
         // Sort by m/z position
-        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        events.sort_by(|a, b| a.0.total_cmp(&b.0));
 
         // Sweep line to create non-overlapping windows
         let mut unstaggered = Vec::new();
@@ -1125,7 +1125,7 @@ impl PeakelMerger {
         }
 
         // Sort by elution time
-        all_points.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        all_points.sort_by(|a, b| a.1.total_cmp(&b.1));
 
         // Build merged Peakel
         let merged_data = Peakel::from_vectors(

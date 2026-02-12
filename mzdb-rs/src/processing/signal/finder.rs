@@ -733,7 +733,7 @@ pub fn find_significant_mini_maxi(
 
     // Sort maxima by descending intensity value
     let mut sorted_indexed_maxima = indexed_maxima.clone();
-    sorted_indexed_maxima.sort_by(|a, b| b.1.value.partial_cmp(&a.1.value).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_indexed_maxima.sort_by(|a, b| b.1.value.total_cmp(&a.1.value));
 
     // Process each maximum in order of decreasing intensity
     for (max_idx, maximum) in &sorted_indexed_maxima {
@@ -853,7 +853,7 @@ pub fn find_significant_mini_maxi(
                 let min_in_range = mini_maxi[first_idx..=last_idx]
                     .iter()
                     .filter(|c| c.is_minimum)
-                    .min_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
+                    .min_by(|a, b| a.value.total_cmp(&b.value));
                 
                 if let Some(min_change) = min_in_range {
                     significant_changes.push(min_change.clone());
@@ -1050,7 +1050,7 @@ mod tests {
         for (i, (start, end)) in peakels.iter().enumerate() {
             let peak_slice = &xic_data[*start..=*end];
             let apex = peak_slice.iter()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .max_by(|a, b| a.1.total_cmp(&b.1))
                 .unwrap();
             println!("  Peakel {}: indices [{}-{}], apex RT={:.2} int={:.0}",
                 i + 1, start, end, apex.0, apex.1);

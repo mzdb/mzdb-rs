@@ -301,7 +301,7 @@ impl BaselineRemover {
 
         // Calculate median
         let mut sorted = intensities.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.total_cmp(b));
         let median = if sorted.len() % 2 == 0 {
             (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
         } else {
@@ -310,7 +310,7 @@ impl BaselineRemover {
 
         // Calculate MAD
         let mut deviations: Vec<f32> = intensities.iter().map(|&i| (i - median).abs()).collect();
-        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        deviations.sort_by(|a, b| a.total_cmp(b));
         let mad = if deviations.len() % 2 == 0 {
             (deviations[deviations.len() / 2 - 1] + deviations[deviations.len() / 2]) / 2.0
         } else {
