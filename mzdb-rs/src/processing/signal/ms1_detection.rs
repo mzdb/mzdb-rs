@@ -569,7 +569,8 @@ impl Ms1PeakelDetector {
                 ms1_headers,
             )?;
 
-            let peakels = self.run_walking_algorithm(&peak_data);
+            let peakels: Vec<_> = self.run_walking_algorithm(&peak_data)
+                .into_iter().map(|(p, _)| p).collect();
 
             log::debug!("Run slice {}: detected {} peakels", rs_number, peakels.len());
             total_peakels += peakels.len();
@@ -635,7 +636,8 @@ impl Ms1PeakelDetector {
 
                     // Channel closure (from drop(work_tx)) signals end of work
                     while let Ok((batch_index, peak_data)) = work_rx.recv() {
-                        let peakels = self.run_walking_algorithm(&peak_data);
+                        let peakels: Vec<_> = self.run_walking_algorithm(&peak_data)
+                            .into_iter().map(|(p, _)| p).collect();
 
                         if result_tx.send((batch_index, peakels)).is_err() {
                             log::warn!("Result channel closed, stopping consumer {}", thread_id);

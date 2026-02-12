@@ -8,6 +8,7 @@
 //! - Generic walking algorithm implementation
 
 use std::collections::HashSet;
+use log::trace;
 use std::hash::Hash;
 
 use smallvec::SmallVec;
@@ -15,7 +16,7 @@ use smallvec::SmallVec;
 use super::finder::{
     BasicPeakelFinder, PeakelFinder, SmartPeakelFinder, SmartPeakelFinderConfig,
 };
-use crate::processing::Peakel;
+use crate::processing::{Peakel, HasPeakelData};
 
 // ============================================================================
 // Configuration Trait
@@ -161,7 +162,7 @@ pub trait PeakelDetector {
     /// 4. Validates and builds peakels
     /// 
     /// Override this method only if you need completely custom detection logic.
-    fn run_walking_algorithm(&self, peak_data: &Self::PeakData) -> Vec<Peakel>
+    fn run_walking_algorithm(&self, peak_data: &Self::PeakData) -> Vec<(Peakel, <Self::PeakData as SortedPeaksProvider>::PeakKey)>
     where
         <Self::PeakData as SortedPeaksProvider>::SpectrumLookup: 
             SpectrumPeakLookup<PeakKey = <Self::PeakData as SortedPeaksProvider>::PeakKey>,
@@ -175,7 +176,7 @@ pub trait PeakelDetector {
         let max_consecutive_gaps = config.max_consecutive_gaps();
         let mz_tol_ppm = config.mz_tol_ppm();
         
-        let mut peakels = Vec::new();
+        let mut peakels: Vec<(Peakel, <Self::PeakData as SortedPeaksProvider>::PeakKey)> = Vec::new();
         let mut used_peaks: HashSet<<Self::PeakData as SortedPeaksProvider>::PeakKey> = HashSet::new();
         
         // XIC vectors reused across iterations
@@ -185,8 +186,26 @@ pub trait PeakelDetector {
         let mut xic_peak_keys: Vec<<Self::PeakData as SortedPeaksProvider>::PeakKey> = Vec::new();
         let mut xic_spectrum_indices: Vec<usize> = Vec::new();
         
+        // Optional m/z filter for trace logging: set TRACE_MZ=818.45,313.19,... 
+        // to only trace seeds near those m/z values
+        let trace_mz_targets: Vec<f32> = std::env::var("TRACE_MZ")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        
+        trace!("[walk] ALGORITHM START: {} seeds, threshold={:.0}, trace_targets={:?}",
+            peak_data.spectra_count(), intensity_threshold, trace_mz_targets);
+        
         for (apex_mz, apex_intensity, apex_spectrum_idx, apex_peak_key) in peak_data.sorted_peaks_iter() {
+            let is_trace_target = !trace_mz_targets.is_empty() && 
+                trace_mz_targets.iter().any(|&t| ((apex_mz - t).abs() / t * 1e6) < mz_tol_ppm);
+            
             if used_peaks.contains(&apex_peak_key) {
+                if is_trace_target {
+                    trace!("[walk] SKIP seed mz={:.4} int={:.0} spec_idx={} (already used)",
+                        apex_mz, apex_intensity, apex_spectrum_idx);
+                }
                 continue;
             }
             
@@ -200,6 +219,11 @@ pub trait PeakelDetector {
             
             let mz_tol_da = apex_mz * mz_tol_ppm * 1e-6;
             let apex_time = peak_data.get_spectrum_lookup(apex_spectrum_idx).time();
+            
+            if is_trace_target {
+                trace!("[walk] START seed mz={:.4} int={:.0} rt={:.1} spec_idx={}",
+                    apex_mz, apex_intensity, apex_time, apex_spectrum_idx);
+            }
             
             xic_times.clear();
             xic_intensities.clear();
@@ -244,6 +268,10 @@ pub trait PeakelDetector {
                     
                     if let Some((mz, intensity, peak_key)) = spectrum.find_nearest_peak(apex_mz, mz_tol_da, target_idx) {
                         if !used_peaks.contains(&peak_key) {
+                            if is_trace_target {
+                                trace!("[walk]   dir={} offset={} spec_idx={} rt={:.1} FOUND mz={:.4} int={:.0}",
+                                    direction, offset, target_idx, spectrum.time(), mz, intensity);
+                            }
                             if direction > 0 {
                                 xic_times.push(spectrum.time());
                                 xic_intensities.push(intensity);
@@ -260,15 +288,27 @@ pub trait PeakelDetector {
                             }
                             gap_count = 0;
                         } else {
+                            if is_trace_target {
+                                trace!("[walk]   dir={} offset={} spec_idx={} rt={:.1} USED (gap {})",
+                                    direction, offset, target_idx, spectrum.time(), gap_count + 1);
+                            }
                             gap_count += 1;
                             half_gaps_count += 1;
                         }
                     } else {
+                        if is_trace_target {
+                            trace!("[walk]   dir={} offset={} spec_idx={} rt={:.1} NO_PEAK (gap {})",
+                                direction, offset, target_idx, spectrum.time(), gap_count + 1);
+                        }
                         gap_count += 1;
                         half_gaps_count += 1;
                     }
                     
                     if gap_count > max_consecutive_gaps {
+                        if is_trace_target {
+                            trace!("[walk]   dir={} STOPPED at offset={} gap_count={} > max={}",
+                                direction, offset, gap_count, max_consecutive_gaps);
+                        }
                         break;
                     }
                     
@@ -279,7 +319,17 @@ pub trait PeakelDetector {
             // Apex position in the XIC is the number of elements prepended during left walk
             let apex_pos = left_count;
             
+            if is_trace_target {
+                trace!("[walk] XIC built: len={} apex_pos={} min_peaks={} times={:?} ints={:?}",
+                    xic_times.len(), apex_pos, min_peaks,
+                    xic_times.iter().map(|t| format!("{:.1}", t)).collect::<Vec<_>>(),
+                    xic_intensities.iter().map(|i| format!("{:.0}", i)).collect::<Vec<_>>());
+            }
+            
             if xic_times.len() < min_peaks {
+                if is_trace_target {
+                    trace!("[walk] SKIPPED xic_len={} < min_peaks={}", xic_times.len(), min_peaks);
+                }
                 continue;
             }
             
@@ -290,9 +340,17 @@ pub trait PeakelDetector {
             
             let ranges = finder.find_peakels_indices(&xic_pairs);
             
+            if is_trace_target {
+                trace!("[walk] PeakelFinder ranges={:?}", ranges);
+            }
+            
             let (matching_range, detected_indices) = find_matching_peakel_range(
                 &ranges, &xic_times, apex_time
             );
+            
+            if is_trace_target {
+                trace!("[walk] matching_range={:?} detected_indices={:?}", matching_range, detected_indices);
+            }
             
             for (i, key) in xic_peak_keys.iter().enumerate() {
                 if !detected_indices.contains(&i) {
@@ -310,10 +368,23 @@ pub trait PeakelDetector {
                     config,
                     |idx| peak_data.get_spectrum_lookup(idx).spectrum_id(),
                 ) {
+                    if is_trace_target {
+                        trace!("[walk] PEAKEL CREATED mz={:.4} rt={:.1} int={:.0} peaks={}",
+                            peakel.apex_mz().unwrap_or(0.0),
+                            peakel.apex_elution_time().unwrap_or(0.0),
+                            peakel.apex_intensity().unwrap_or(0.0),
+                            peakel.peaks_count());
+                    }
                     for key in &xic_peak_keys[start..=end] {
                         used_peaks.insert(*key);
                     }
-                    peakels.push(peakel);
+                    // Extract the apex peak key using the peakel's true apex index
+                    let true_apex_idx_in_slice = Peakel::calc_apex_index(&xic_intensities[start..=end])
+                        .unwrap_or(apex_pos.saturating_sub(start));
+                    let apex_peak_key = xic_peak_keys[start + true_apex_idx_in_slice];
+                    peakels.push((peakel, apex_peak_key));
+                } else if is_trace_target {
+                    trace!("[walk] PEAKEL REJECTED by validate_and_build mz={:.4}", apex_mz);
                 }
             }
         }
@@ -342,12 +413,16 @@ pub trait PeakelDetector {
         let peakel_len = xic_times.len();
         
         if peakel_len < config.min_peaks() {
+            trace!("[validate] REJECT peaks={} < min_peaks={} mz={:.4}",
+                peakel_len, config.min_peaks(), xic_mz_values.get(apex_index_in_peakel).unwrap_or(&0.0));
             return None;
         }
         
         // Validation 1: apex must not be first or last peak (optional - disabled by default to match Scala)
         if !config.skip_apex_boundary_check() {
             if apex_index_in_peakel == 0 || apex_index_in_peakel >= peakel_len - 1 {
+                trace!("[validate] REJECT apex_boundary apex_idx={} peakel_len={} mz={:.4}",
+                    apex_index_in_peakel, peakel_len, xic_mz_values.get(apex_index_in_peakel).unwrap_or(&0.0));
                 return None;
             }
         }
@@ -367,6 +442,10 @@ pub trait PeakelDetector {
         };
         
         if amplitude.is_nan() || amplitude < config.min_peakel_amplitude() {
+            trace!("[validate] REJECT amplitude={:.2} < min={:.2} mz={:.4} apex_int={:.0} min_int={:.0}",
+                amplitude, config.min_peakel_amplitude(),
+                xic_mz_values.get(apex_index_in_peakel).unwrap_or(&0.0),
+                apex_intensity, min_intensity);
             return None;
         }
         
@@ -376,6 +455,9 @@ pub trait PeakelDetector {
         let duration = last_time - first_time;
         
         if duration < config.min_peakel_duration() {
+            trace!("[validate] REJECT duration={:.1} < min={:.1} mz={:.4}",
+                duration, config.min_peakel_duration(),
+                xic_mz_values.get(apex_index_in_peakel).unwrap_or(&0.0));
             return None;
         }
         

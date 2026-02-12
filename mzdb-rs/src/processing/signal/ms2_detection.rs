@@ -27,6 +27,8 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 use anyhow_ext::*;
 
 #[cfg(feature = "processing-parallel")]
@@ -76,6 +78,32 @@ pub struct DiaMs2PeakelRecord {
     pub isolation_window_id: i64,
     /// Precursor m/z (isolation window target)
     pub precursor_mz: f64,
+}
+
+/// Globally unique identifier for an apex peak: (spectrum_id, peak_index_in_original_spectrum).
+/// Unlike Ms2PeakKey whose spectrum_idx is local to a window's merged timeline,
+/// this uses the database spectrum ID and is stable across windows.
+type ApexPeakId = (i64, usize);
+
+/// A peakel discarded by the apex-in-current filter, carrying its apex peak identity
+/// for robust deduplication during rescue.
+struct DiscardedPeakel {
+    record: DiaMs2PeakelRecord,
+    /// Globally unique apex peak identifier (spectrum_id, peak_idx).
+    apex_peak_id: ApexPeakId,
+}
+
+/// Result of running the walking algorithm for a single isolation window.
+/// 
+/// Separates peakels whose apex is in the current window from those discarded
+/// because their apex falls in a neighbor window's spectrum. The latter
+/// can be rescued during post-processing if no other window claims them.
+struct Ms2PeakelDetectionResult {
+    /// Peakels whose apex is in the current window, with their apex peak identities
+    current_window_peakels: Vec<(DiaMs2PeakelRecord, ApexPeakId)>,
+    /// Peakels whose apex falls in a neighbor window's spectrum.
+    /// These are candidates for rescue if not emitted by any other window.
+    neighbor_window_peakels: Vec<DiscardedPeakel>,
 }
 
 impl DiaMs2PeakelRecord {
@@ -199,20 +227,35 @@ impl std::ops::Deref for DiaMs2PeakelRecord {
 /// 
 /// Uses separate vectors for m/z and intensity values (consistent with MS1).
 /// The `peak_indices` vector maps back to original peak positions in the source spectrum.
+///
+/// Data vectors are Arc-wrapped for efficient sharing across staggered window pairs.
+/// Cloning this struct copies scalar fields and bumps Arc refcounts (no data copy).
+#[derive(Clone)]
 pub struct IndexedMs2Spectrum {
-    #[allow(dead_code)]
-    spectrum_idx: usize,
     spectrum_id: i64,
     time: f32,
     /// m/z values sorted by m/z (for binary search) - 32-bit for centroid data
-    mz_values: Vec<f32>,
+    mz_values: Arc<Vec<f32>>,
     /// Intensity values (parallel to mz_values)
-    intensity_values: Vec<f32>,
+    intensity_values: Arc<Vec<f32>>,
     /// Original peak indices in source spectrum (parallel to mz_values)
-    peak_indices: Vec<usize>,
+    peak_indices: Arc<Vec<usize>>,
+    /// Source isolation window this spectrum belongs to
+    source_window: Arc<IsolationWindow>,
 }
 
 impl IndexedMs2Spectrum {
+    /// Get the spectrum time (RT)
+    pub fn rt(&self) -> f32 { self.time }
+    /// Get the spectrum ID
+    pub fn id(&self) -> i64 { self.spectrum_id }
+    /// Get the source isolation window this spectrum belongs to
+    pub fn source_window(&self) -> &Arc<IsolationWindow> { &self.source_window }
+    /// Get the m/z values
+    pub fn mz_values(&self) -> &[f32] { &self.mz_values }
+    /// Get the intensity values
+    pub fn intensity_values(&self) -> &[f32] { &self.intensity_values }
+
     /// Find the nearest peak within m/z tolerance using binary search.
     /// Returns (mz, intensity, original_peak_idx) if found.
     fn find_nearest_peak_internal(&self, target_mz: f32, mz_tol_da: f32) -> Option<(f32, f32, usize)> {
@@ -255,6 +298,21 @@ impl IndexedMs2Spectrum {
 // ============================================================================
 
 /// Configuration for DIA MS2 peakel detection
+///
+/// # Gap tolerance and staggered DIA
+///
+/// For staggered DIA acquisitions, spectra from overlapping windows are interleaved
+/// in the merged timeline. When walking an XIC for a fragment ion, spectra from
+/// the neighbor window appear as gaps (they don't contain the same fragment peaks).
+/// With N overlapping windows at the same RT, up to N-1 consecutive neighbor spectra
+/// may separate two current-window spectra in the timeline.
+///
+/// `max_consecutive_gaps` must be set high enough to bridge these interleaved spectra:
+/// - Non-staggered DIA: 1 gap is often sufficient
+/// - Staggered DIA (2 overlapping windows): 3+ gaps recommended (default)
+///
+/// Setting this too low causes XICs to be truncated prematurely, losing signal.
+/// Setting this too high may merge distinct elution events into one peakel.
 #[derive(Clone, Debug)]
 pub struct DiaMs2PeakelConfig {
     /// m/z tolerance in PPM for XIC extraction
@@ -293,11 +351,14 @@ impl Default for DiaMs2PeakelConfig {
             mz_tol_ppm: 10.0,
             min_intensity: 100.0,
             min_peaks: 5,
+            // Default of 3 bridges interleaved neighbor spectra in staggered DIA
             max_consecutive_gaps: 3,
             max_total_gaps: usize::MAX,
             max_time_window: 1200.0,
             intensity_percentile: 0.9,
-            min_peakel_amplitude: 1.5,
+            // Amplitude filter disabled for DIA MS2: with staggered interleaving,
+            // fragments often have very few points per peak and naturally low amplitude ratios
+            min_peakel_amplitude: 1.0,
             min_peakel_duration: 0.0,
             algorithm: "smart".to_string(),
             skip_apex_boundary_check: true,
@@ -362,41 +423,131 @@ impl SpectrumPeakLookup for IndexedMs2Spectrum {
 /// 
 /// This struct wraps the indexed spectra and sorted peak indices
 /// to implement `SortedPeaksProvider` for the generic detection algorithm.
+///
+/// When used with staggered DIA data, spectra from neighbor windows are included
+/// for walk extension, but only peaks from the current (reference) window are
+/// used as seeds. This mirrors the MS1 run slice triplet pattern.
 pub struct IsolationWindowPeakData {
-    /// Indexed spectra sorted by time
+    /// All spectra sorted by time (current + neighbors merged)
     spectra: Vec<IndexedMs2Spectrum>,
-    /// All peaks: (mz, intensity, spectrum_idx, peak_idx)
+    /// All peaks from CURRENT window only: (mz, intensity, spectrum_idx, peak_idx)
+    /// spectrum_idx refers to position in the merged `spectra` vec
     all_peaks: Vec<(f32, f32, usize, usize)>,
-    /// Indices sorted by descending intensity
+    /// Indices into all_peaks sorted by descending intensity
     sorted_indices: Vec<usize>,
+    /// Spectrum IDs belonging to the current (reference) window.
+    /// Used to check if a peakel's true apex falls in the current window.
+    current_window_spectrum_ids: HashSet<i64>,
 }
 
 impl IsolationWindowPeakData {
-    /// Create peak data from indexed spectra
-    pub fn new(spectra: Vec<IndexedMs2Spectrum>) -> Self {
-        // Collect all peaks from separate vectors
+    /// Create peak data from a single window's spectra (no neighbors).
+    ///
+    /// All spectra are treated as current — all peaks are seeds.
+    /// This preserves backward compatibility for non-staggered DIA data.
+    pub fn new(spectra: &[IndexedMs2Spectrum]) -> Self {
+        let current_window_spectrum_ids: HashSet<i64> = spectra.iter()
+            .map(|s| s.spectrum_id)
+            .collect();
+
+        // Clone into owned vec (cheap: Arc refcount bumps only), sort by time
+        let mut owned: Vec<IndexedMs2Spectrum> = spectra.to_vec();
+        owned.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+        Self::build(owned, &current_window_spectrum_ids)
+    }
+
+    /// Create peak data from current window spectra + neighbor windows.
+    ///
+    /// Seeds (all_peaks/sorted_indices) are built only from current window spectra.
+    /// Neighbor spectra are included in the merged spectra list so the walking
+    /// algorithm can extend XICs into them, but they are never used as starting
+    /// points — mirroring the MS1 run slice triplet pattern.
+    ///
+    /// IMPORTANT: Each window's spectra must be loaded with strict filtering
+    /// (exact precursor_mz match) to avoid duplicate spectrum IDs across windows.
+    pub fn new_with_neighbors(
+        current_spectra: &[IndexedMs2Spectrum],
+        left_neighbor: Option<&[IndexedMs2Spectrum]>,
+        right_neighbor: Option<&[IndexedMs2Spectrum]>,
+    ) -> Self {
+        let current_window_spectrum_ids: HashSet<i64> = current_spectra.iter()
+            .map(|s| s.spectrum_id)
+            .collect();
+
+        // Merge all spectra (struct fields like spectrum_id and time are copied,
+        // but data vectors are Arc-wrapped so only refcounts are bumped)
+        let total_len = current_spectra.len()
+            + left_neighbor.map_or(0, |s| s.len())
+            + right_neighbor.map_or(0, |s| s.len());
+
+        let mut merged = Vec::with_capacity(total_len);
+        if let Some(left) = left_neighbor {
+            merged.extend_from_slice(left);
+        }
+        merged.extend_from_slice(current_spectra);
+        if let Some(right) = right_neighbor {
+            merged.extend_from_slice(right);
+        }
+
+        // Sort by time to interleave staggered cycles
+        merged.sort_by(|a, b| a.time.total_cmp(&b.time));
+
+        Self::build(merged, &current_window_spectrum_ids)
+    }
+
+    /// Common builder: index only current-window spectra as seeds.
+    fn build(spectra: Vec<IndexedMs2Spectrum>, current_ids: &HashSet<i64>) -> Self {
         let mut all_peaks: Vec<(f32, f32, usize, usize)> = Vec::new();
+
         for (spectrum_idx, spectrum) in spectra.iter().enumerate() {
+            // Only index peaks from the current window as seeds
+            if !current_ids.contains(&spectrum.spectrum_id) {
+                continue;
+            }
+
             for (i, (&mz, &intensity)) in spectrum.mz_values.iter()
                 .zip(spectrum.intensity_values.iter())
-                .enumerate() 
+                .enumerate()
             {
                 let peak_idx = spectrum.peak_indices[i];
                 all_peaks.push((mz, intensity, spectrum_idx, peak_idx));
             }
         }
-        
+
         // Sort indices by descending intensity
         let mut sorted_indices: Vec<usize> = (0..all_peaks.len()).collect();
         sorted_indices.sort_by(|&a, &b| {
             all_peaks[b].1.total_cmp(&all_peaks[a].1)
         });
-        
+
         Self {
             spectra,
             all_peaks,
             sorted_indices,
+            current_window_spectrum_ids: current_ids.clone(),
         }
+    }
+
+    /// Check if a spectrum ID belongs to the current (reference) window.
+    #[inline]
+    pub fn is_current_window_spectrum(&self, spectrum_id: i64) -> bool {
+        self.current_window_spectrum_ids.contains(&spectrum_id)
+    }
+
+    /// Number of seed peaks (from current window only)
+    pub fn all_peaks_count(&self) -> usize {
+        self.all_peaks.len()
+    }
+
+    /// Iterate over all seed peaks: (mz, intensity, spectrum_idx, peak_idx)
+    pub fn all_peaks_iter(&self) -> impl Iterator<Item = &(f32, f32, usize, usize)> {
+        self.all_peaks.iter()
+    }
+
+    /// Compute intensity threshold using the given config
+    pub fn intensity_threshold(&self, config: &impl PeakelDetectionConfig) -> f32 {
+        self.calc_intensity_threshold(config)
     }
 }
 
@@ -444,9 +595,16 @@ impl SortedPeaksProvider for IsolationWindowPeakData {
 ///
 /// Processes DIA data by iterating over each isolation window,
 /// detecting peakels in the MS2 spectra for that window.
-pub struct DiaMs2PeakelDetector {
+///
+/// For staggered DIA data, automatically detects overlapping windows
+/// and uses a sliding triplet pattern (current + left/right neighbors)
+/// to double the effective sampling rate for XIC extraction.
+    pub struct DiaMs2PeakelDetector {
     config: DiaMs2PeakelConfig,
-    isolation_windows: Vec<IsolationWindow>,
+    /// Isolation windows as Arc for sharing with IndexedMs2Spectrum
+    isolation_windows: Vec<Arc<IsolationWindow>>,
+    /// Whether the DIA acquisition uses staggered (overlapping) windows
+    is_staggered: bool,
 }
 
 impl PeakelDetector for DiaMs2PeakelDetector {
@@ -464,25 +622,70 @@ impl DiaMs2PeakelDetector {
     /// Discovers isolation windows from the mzDB file at construction time.
     pub fn new(reader: &MzDbReader) -> Self {
         let config = DiaMs2PeakelConfig::default();
-        let isolation_windows = Self::discover_isolation_windows(reader);
-        log::info!("Found {} isolation windows", isolation_windows.len());
-        Self { config, isolation_windows }
+        Self::with_config(config, reader)
     }
 
     /// Create with custom configuration
     ///
     /// Discovers isolation windows from the mzDB file at construction time.
+    /// Automatically detects staggered DIA acquisition.
     pub fn with_config(config: DiaMs2PeakelConfig, reader: &MzDbReader) -> Self {
         log::info!("DiaMs2PeakelDetector config: min_peaks={}, mz_tol={} ppm, max_gaps={}",
                    config.min_peaks, config.mz_tol_ppm, config.max_consecutive_gaps);
-        let isolation_windows = Self::discover_isolation_windows(reader);
-        log::info!("Found {} isolation windows", isolation_windows.len());
-        Self { config, isolation_windows }
+        let raw_windows = Self::discover_isolation_windows(reader);
+        let is_staggered = Self::detect_staggering(&raw_windows);
+        let isolation_windows: Vec<Arc<IsolationWindow>> = raw_windows.into_iter()
+            .map(Arc::new)
+            .collect();
+        log::info!("Found {} isolation windows (staggered={})",
+                   isolation_windows.len(), is_staggered);
+        Self { config, isolation_windows, is_staggered }
     }
 
     /// Get the isolation windows discovered from the mzDB file
-    pub fn isolation_windows(&self) -> &[IsolationWindow] {
-        &self.isolation_windows
+    pub fn isolation_windows(&self) -> Vec<IsolationWindow> {
+        self.isolation_windows.iter().map(|w| (**w).clone()).collect()
+    }
+
+    /// Whether staggered DIA was auto-detected
+    pub fn is_staggered(&self) -> bool {
+        self.is_staggered
+    }
+
+    /// Get a reference to the detection configuration
+    pub fn config(&self) -> &DiaMs2PeakelConfig {
+        &self.config
+    }
+
+    /// Detect whether the DIA acquisition uses staggered (overlapping) windows.
+    ///
+    /// Checks if consecutive windows (sorted by target m/z) overlap.
+    fn detect_staggering(windows: &[IsolationWindow]) -> bool {
+        if windows.len() < 2 {
+            return false;
+        }
+
+        // Count overlapping consecutive pairs
+        let mut overlap_count = 0usize;
+        for pair in windows.windows(2) {
+            if pair[0].upper_mz > pair[1].lower_mz {
+                overlap_count += 1;
+            }
+        }
+
+        // Staggered if majority of consecutive pairs overlap
+        let is_staggered = overlap_count > windows.len() / 3;
+        if is_staggered {
+            log::info!("Detected staggered DIA: {}/{} consecutive window pairs overlap",
+                       overlap_count, windows.len() - 1);
+        }
+        is_staggered
+    }
+
+    /// Check if two windows overlap in m/z space.
+    #[inline]
+    fn windows_overlap(a: &IsolationWindow, b: &IsolationWindow) -> bool {
+        a.upper_mz > b.lower_mz && b.upper_mz > a.lower_mz
     }
 
     /// Discover all isolation windows in the mzDB file
@@ -552,45 +755,58 @@ impl DiaMs2PeakelDetector {
     ///
     /// This method loads MS2 spectra only for the specified isolation window,
     /// processes them using the walking algorithm, and returns detected peakels.
+    /// Detect peakels for a single isolation window (backward-compatible, no neighbors)
+    ///
+    /// This method loads MS2 spectra only for the specified isolation window,
+    /// processes them using the walking algorithm, and returns detected peakels.
     pub fn detect_peakels_for_window(
         &self,
         reader: &MzDbReader,
-        window: &IsolationWindow,
+        window: &Arc<IsolationWindow>,
     ) -> Result<Vec<DiaMs2PeakelRecord>> {
-        log::info!("Processing isolation window: {:.1} m/z ({} spectra)",
-                   window.target_mz, window.spectrum_count);
-
-        // Get MS2 spectra for this isolation window using efficient SQL filtering
-        // Use tolerance based on window width to capture all spectra
-        let tolerance = (window.upper_mz - window.lower_mz) / 2.0;
-        let spectra = reader.get_dia_spectra_for_window(window.target_mz, Some(tolerance))?;
-
-        if spectra.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Build indexed spectra for fast m/z lookup
-        let indexed_spectra = self.build_indexed_spectra(&spectra);
-
-        // Run the walking algorithm
-        let detected_peakels = self.run_walking_algorithm_for_window(indexed_spectra, window);
-
-        log::info!("  Detected {} MS2 peakels in window {:.1}",
-                   detected_peakels.len(), window.target_mz);
-
-        Ok(detected_peakels)
+        let spectra = Self::load_spectra_for_window(reader, window)?;
+        let indexed = self.build_indexed_spectra(&spectra, window);
+        let result = self.run_walking_algorithm_for_window(&indexed, window, None, None);
+        // No neighbors → no apex-in-neighbor discards expected, but merge for safety
+        let mut peakels: Vec<DiaMs2PeakelRecord> = result.current_window_peakels.into_iter().map(|(r, _)| r).collect();
+        peakels.extend(result.neighbor_window_peakels.into_iter().map(|dp| dp.record));
+        Ok(peakels)
     }
 
-    /// Build indexed spectra from raw spectra for fast m/z lookup
-    fn build_indexed_spectra(&self, spectra: &[crate::model::Spectrum]) -> Vec<IndexedMs2Spectrum> {
+    /// Load raw spectra for a single isolation window.
+    ///
+    /// Uses tight tolerance around the target m/z to match only spectra belonging
+    /// to this specific window. The tolerance is based on the window spacing
+    /// (half the distance to the nearest neighbor), not the isolation window width,
+    /// to avoid capturing spectra from overlapping staggered windows.
+    fn load_spectra_for_window(
+        reader: &MzDbReader,
+        window: &IsolationWindow,
+    ) -> Result<Vec<crate::model::Spectrum>> {
+        log::info!("Loading spectra for window {:.1} m/z ({} spectra)",
+                   window.target_mz, window.spectrum_count);
+        // Use default tolerance (0.1 Da) — main_precursor_mz values are identical
+        // for all spectra in a given window, so tight matching is correct.
+        // Using the window half-width would capture spectra from adjacent
+        // staggered windows that share the overlap region.
+        reader.get_dia_spectra_for_window(window.target_mz, None)
+    }
+
+    /// Build indexed spectra from raw spectra for fast m/z lookup.
+    ///
+    /// Data vectors are wrapped in Arc for efficient sharing across staggered window pairs.
+    pub fn build_indexed_spectra(
+        &self,
+        spectra: &[crate::model::Spectrum],
+        window: &Arc<IsolationWindow>,
+    ) -> Vec<IndexedMs2Spectrum> {
         let mut indexed_spectra: Vec<IndexedMs2Spectrum> = Vec::with_capacity(spectra.len());
 
-        for (idx, spectrum) in spectra.iter().enumerate() {
-            // Collect peaks that pass intensity threshold into separate vectors
+        for spectrum in spectra.iter() {
             let mut mz_values: Vec<f32> = Vec::new();
             let mut intensity_values: Vec<f32> = Vec::new();
             let mut peak_indices: Vec<usize> = Vec::new();
-            
+
             for (peak_idx, (&mz, &intensity)) in spectrum.data.mz_array.iter()
                 .zip(spectrum.data.intensity_array.iter())
                 .enumerate()
@@ -603,44 +819,91 @@ impl DiaMs2PeakelDetector {
             }
 
             indexed_spectra.push(IndexedMs2Spectrum {
-                spectrum_idx: idx,
                 spectrum_id: spectrum.header.id,
                 time: spectrum.header.time,
-                mz_values,
-                intensity_values,
-                peak_indices,
+                mz_values: Arc::new(mz_values),
+                intensity_values: Arc::new(intensity_values),
+                peak_indices: Arc::new(peak_indices),
+                source_window: Arc::clone(window),
             });
         }
 
         indexed_spectra
     }
 
-    /// Core walking algorithm for peakel detection
+    /// Core walking algorithm for peakel detection with optional neighbor windows.
     ///
-    /// This method uses the generic `PeakelDetector::run_walking_algorithm` 
-    /// implementation and wraps the results with isolation window metadata.
+    /// When neighbors are provided, their spectra are included in the merged
+    /// timeline for walk extension, but only peaks from `current_spectra` are
+    /// used as seeds. Peakels whose true apex falls in a neighbor spectrum
+    /// are discarded (they will be detected when that neighbor is current).
+    /// Result of running the walking algorithm for a single window.
+    /// Contains the kept peakels and any peakels discarded because their apex
+    /// falls in a neighbor window's spectrum.
     fn run_walking_algorithm_for_window(
         &self,
-        mut indexed_spectra: Vec<IndexedMs2Spectrum>,
-        window: &IsolationWindow,
-    ) -> Vec<DiaMs2PeakelRecord> {
-        if indexed_spectra.is_empty() {
-            return Vec::new();
+        current_spectra: &[IndexedMs2Spectrum],
+        window: &Arc<IsolationWindow>,
+        left_neighbor: Option<&[IndexedMs2Spectrum]>,
+        right_neighbor: Option<&[IndexedMs2Spectrum]>,
+    ) -> Ms2PeakelDetectionResult {
+        if current_spectra.is_empty() {
+            return Ms2PeakelDetectionResult {
+                current_window_peakels: Vec::new(),
+                neighbor_window_peakels: Vec::new(),
+            };
         }
 
-        // Sort spectra by time for proper walking
-        indexed_spectra.sort_by(|a, b| a.time.total_cmp(&b.time));
+        // Build peak data with or without neighbors
+        let has_neighbors = left_neighbor.is_some() || right_neighbor.is_some();
+        let peak_data = if has_neighbors {
+            IsolationWindowPeakData::new_with_neighbors(
+                current_spectra, left_neighbor, right_neighbor,
+            )
+        } else {
+            IsolationWindowPeakData::new(current_spectra)
+        };
 
-        // Create peak data for the generic algorithm
-        let peak_data = IsolationWindowPeakData::new(indexed_spectra);
-        
-        // Use the trait's default implementation
-        let peakels = self.run_walking_algorithm(&peak_data);
-        
-        // Wrap peakels with isolation window metadata
-        peakels.into_iter()
-            .map(|peakel| DiaMs2PeakelRecord::new(peakel, window.id, window.target_mz))
-            .collect()
+        // Use the trait's default walking algorithm
+        let peakels_with_keys = self.run_walking_algorithm(&peak_data);
+
+        // Partition: keep peakels whose apex is in the current window,
+        // collect those whose apex is in a neighbor window for potential rescue
+        let mut current_window_peakels = Vec::new();
+        let mut neighbor_window_peakels = Vec::new();
+
+        for (peakel, apex_peak_key) in peakels_with_keys {
+            // Convert local Ms2PeakKey to global ApexPeakId
+            let apex_spectrum_id = peak_data.get_spectrum_lookup(apex_peak_key.spectrum_idx).spectrum_id();
+            let apex_peak_id: ApexPeakId = (apex_spectrum_id, apex_peak_key.peak_idx);
+
+            let in_current = if let Some(apex_idx) = peakel.apex_index() {
+                let spectrum_ids = peakel.spectrum_ids();
+                if apex_idx < spectrum_ids.len() {
+                    peak_data.is_current_window_spectrum(spectrum_ids[apex_idx])
+                } else {
+                    true // conservative: keep if can't determine
+                }
+            } else {
+                true
+            };
+
+            if in_current {
+                let record = DiaMs2PeakelRecord::new(peakel, window.id, window.target_mz);
+                current_window_peakels.push((record, apex_peak_id));
+            } else {
+                // Apex falls in a neighbor spectrum: attribute to the window where
+                // the apex was actually measured (read from the spectrum's source_window)
+                let apex_spectrum = peak_data.get_spectrum_lookup(apex_peak_key.spectrum_idx);
+                let apex_window = apex_spectrum.source_window();
+                neighbor_window_peakels.push(DiscardedPeakel {
+                    record: DiaMs2PeakelRecord::new(peakel, apex_window.id, apex_window.target_mz),
+                    apex_peak_id,
+                });
+            }
+        }
+
+        Ms2PeakelDetectionResult { current_window_peakels, neighbor_window_peakels }
     }
 
 
@@ -718,42 +981,180 @@ impl DiaMs2PeakelDetector {
         Ok(())
     }
 
-    /// Sequential processing of isolation windows, emitting batches via callback
+    /// Rescue orphaned apex-in-neighbor peakels.
+    ///
+    /// When the apex of a peakel falls in a neighbor window's spectrum, it gets
+    /// discarded from the current window. Normally, the neighbor window would detect
+    /// this peakel when it becomes the "current" window. But in staggered DIA, the
+    /// precursor m/z may not fall in the neighbor's isolation bounds, so the peakel
+    /// is never emitted by any window.
+    ///
+    /// This method rescues such orphans by:
+    /// 1. Deduplicating discards using ApexPeakId (spectrum_id, peak_idx) — globally unique
+    /// 2. Keeping only the best version (most peaks) per unique apex peak
+    /// 3. Filtering out any that match an already-emitted peakel
+    fn rescue_orphan_peakels(
+        discarded: Vec<DiscardedPeakel>,
+        emitted_keys: &HashSet<ApexPeakId>,
+    ) -> Vec<DiaMs2PeakelRecord> {
+        use std::collections::HashMap;
+
+        if discarded.is_empty() {
+            return Vec::new();
+        }
+
+        log::info!("  Apex-in-neighbor rescue: {} total discards to process", discarded.len());
+
+        // Deduplicate by ApexPeakId (spectrum_id, peak_idx) — globally unique.
+        // Keep the version with the most peaks (richest XIC walk).
+        let mut best_per_apex: HashMap<ApexPeakId, DiscardedPeakel> = HashMap::new();
+
+        for dp in discarded {
+            match best_per_apex.entry(dp.apex_peak_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if dp.record.peaks_count() > entry.get().record.peaks_count() {
+                        entry.insert(dp);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(dp);
+                }
+            }
+        }
+
+        let deduplicated_count = best_per_apex.len();
+
+        // Filter out any that were already emitted by another window
+        let rescued: Vec<DiaMs2PeakelRecord> = best_per_apex.into_values()
+            .filter(|dp| !emitted_keys.contains(&dp.apex_peak_id))
+            .map(|dp| dp.record)
+            .collect();
+
+        log::info!("  Rescued {} unique orphan peakels ({} deduplicated, {} already emitted)",
+                   rescued.len(), deduplicated_count, deduplicated_count - rescued.len());
+
+        rescued
+    }
+
+    /// Sequential processing of isolation windows, emitting batches via callback.
+    ///
+    /// For staggered DIA, uses a sliding window of [prev, current, next] indexed spectra.
+    /// Only peaks from the current window are used as seeds; neighbor spectra extend
+    /// the walking algorithm's reach.
+    ///
+    /// The right neighbor's indexed spectra are reused as the current window's spectra
+    /// in the next iteration, avoiding redundant DB loads.
     fn detect_sequential_in_batches(
         &self,
         reader: &MzDbReader,
-        windows: &[IsolationWindow],
+        windows: &[Arc<IsolationWindow>],
         mut on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
     ) -> Result<()> {
         let total_batches = windows.len();
 
+        if !self.is_staggered {
+            // Non-staggered: simple per-window processing (backward compatible)
+            for (batch_index, window) in windows.iter().enumerate() {
+                let peakels = self.detect_peakels_for_window(reader, window)?;
+                on_batch(PeakelBatch { peakels, batch_index, total_batches })?;
+            }
+            return Ok(());
+        }
+
+        // Staggered: sliding window of indexed spectra
+        // Load first window
+        let mut prev_indexed: Option<Vec<IndexedMs2Spectrum>> = None;
+        let mut current_indexed: Option<Vec<IndexedMs2Spectrum>> = None;
+
+        // Collect apex-in-neighbor discards for potential rescue
+        let mut all_discarded: Vec<DiscardedPeakel> = Vec::new();
+        // Track emitted peakels by ApexPeakId for cross-checking against rescued orphans
+        let mut emitted_apex_keys: HashSet<ApexPeakId> = HashSet::new();
+
         for (batch_index, window) in windows.iter().enumerate() {
-            let peakels = self.detect_peakels_for_window(reader, window)?;
+            // Get current indexed spectra: reuse from previous iteration's right neighbor,
+            // or load fresh from DB
+            let cur = match current_indexed.take() {
+                Some(cached) => cached,
+                None => {
+                    let raw_spectra = Self::load_spectra_for_window(reader, window)?;
+                    self.build_indexed_spectra(&raw_spectra, window)
+                }
+            };
+
+            // Determine left neighbor
+            let left_neighbor = prev_indexed.as_ref()
+                .filter(|_| batch_index > 0 && Self::windows_overlap(&windows[batch_index - 1], window))
+                .map(|v| v.as_slice());
+
+            // Load right neighbor if next window overlaps
+            let next_indexed = if batch_index + 1 < windows.len()
+                && Self::windows_overlap(window, &windows[batch_index + 1])
+            {
+                let next_window = &windows[batch_index + 1];
+                let next_raw = Self::load_spectra_for_window(reader, next_window)?;
+                Some(self.build_indexed_spectra(&next_raw, next_window))
+            } else {
+                None
+            };
+            let right_neighbor = next_indexed.as_deref();
+
+            let result = self.run_walking_algorithm_for_window(
+                &cur, window, left_neighbor, right_neighbor,
+            );
+
+            log::info!("  Window {}/{}: {:.1} m/z → {} peakels, {} apex-in-neighbor (neighbors: left={}, right={})",
+                       batch_index + 1, total_batches, window.target_mz, result.current_window_peakels.len(),
+                       result.neighbor_window_peakels.len(),
+                       left_neighbor.is_some(), right_neighbor.is_some());
+
+            // Track emitted peakels' apex keys and extract records
+            let kept_records: Vec<DiaMs2PeakelRecord> = result.current_window_peakels.into_iter()
+                .map(|(record, apex_peak_id)| {
+                    emitted_apex_keys.insert(apex_peak_id);
+                    record
+                })
+                .collect();
+
+            on_batch(PeakelBatch { peakels: kept_records, batch_index, total_batches })?;
+
+            // Collect discards for later rescue
+            all_discarded.extend(result.neighbor_window_peakels);
+
+            // Slide: current → prev, right neighbor → current for next iteration
+            prev_indexed = Some(cur);
+            current_indexed = next_indexed;
+        }
+
+        // Rescue orphaned apex-in-neighbor peakels
+        let rescued = Self::rescue_orphan_peakels(all_discarded, &emitted_apex_keys);
+        if !rescued.is_empty() {
+            log::info!("  Rescued {} orphan apex-in-neighbor peakels", rescued.len());
             on_batch(PeakelBatch {
-                peakels,
-                batch_index,
-                total_batches,
+                peakels: rescued,
+                batch_index: total_batches,
+                total_batches: total_batches + 1,
             })?;
         }
 
         Ok(())
     }
 
-    /// Parallel processing of isolation windows using producer-consumer pattern
-    /// with streaming ordered emission via BinaryHeap.
+    /// Parallel processing of isolation windows using producer-consumer pattern.
+    ///
+    /// For staggered DIA, the producer builds indexed spectra and shares them
+    /// via Arc between consecutive work items (sliding triplet pattern).
+    /// Each window's spectra are loaded once from DB and reused as neighbor.
     ///
     /// Architecture:
-    /// - Producer thread: loads spectra with its own DB connection, sends through bounded work channel
-    /// - N consumer threads: run detection, send (window_index, peakels) through bounded results channel
-    /// - Main thread: receives results, reorders via BinaryHeap, calls on_batch in window order
-    ///
-    /// This ensures on_batch is called progressively (not deferred to the end),
-    /// allowing the writer to work in parallel with detection.
+    /// - Producer thread: loads spectra with sliding Arc cache, sends triplets
+    /// - N consumer threads: run detection with neighbors, send results
+    /// - Main thread: receives results and calls on_batch
     #[cfg(feature = "processing-parallel")]
     fn detect_parallel_in_batches(
         &self,
         db_path: &str,
-        windows: &[IsolationWindow],
+        windows: &[Arc<IsolationWindow>],
         num_threads: usize,
         mut on_batch: impl FnMut(PeakelBatch<DiaMs2PeakelRecord>) -> Result<()>,
     ) -> Result<()> {
@@ -763,17 +1164,23 @@ impl DiaMs2PeakelDetector {
         let total_windows = windows.len();
         let queue_size = num_threads * 2;
 
-        log::info!("Processing {} isolation windows with {} consumer threads (queue size: {})",
-                   total_windows, num_threads, queue_size);
+        log::info!("Processing {} isolation windows with {} consumer threads (queue size: {}, staggered={})",
+                   total_windows, num_threads, queue_size, self.is_staggered);
 
-        // Work channel: producer -> consumers (spectra to process)
-        type WorkItem = (usize, IsolationWindow, Vec<crate::model::Spectrum>);
-        let (work_tx, work_rx) = bounded::<WorkItem>(queue_size);
+        // Work item: window + current indexed spectra + optional neighbor spectra (Arc-shared)
+        struct IsolationWindowTripletData {
+            window_idx: usize,
+            window: Arc<IsolationWindow>,
+            current_spectra: Arc<Vec<IndexedMs2Spectrum>>,
+            left_neighbor: Option<Arc<Vec<IndexedMs2Spectrum>>>,
+            right_neighbor: Option<Arc<Vec<IndexedMs2Spectrum>>>,
+        }
+        // SAFETY: IndexedMs2Spectrum contains Arc fields which are Send+Sync
+        unsafe impl Send for IsolationWindowTripletData {}
 
-        // Results channel: consumers -> main thread (detected peakels with window index)
-        let (result_tx, result_rx) = bounded::<(usize, Vec<DiaMs2PeakelRecord>)>(queue_size);
+        let (work_tx, work_rx) = bounded::<IsolationWindowTripletData>(queue_size);
+        let (result_tx, result_rx) = bounded::<(usize, Ms2PeakelDetectionResult)>(queue_size);
 
-        // Producer error propagation
         let producer_error: Mutex<Option<anyhow_ext::Error>> = Mutex::new(None);
         let start_time = Instant::now();
 
@@ -787,16 +1194,19 @@ impl DiaMs2PeakelDetector {
                     let mut items_processed = 0usize;
                     log::debug!("Consumer thread {} started", thread_id);
 
-                    while let std::result::Result::Ok((window_idx, window, spectra)) = work_rx.recv() {
-                        let peakels = self.detect_from_spectra(&window, &spectra);
+                    while let std::result::Result::Ok(work) = work_rx.recv() {
+                        let left = work.left_neighbor.as_deref().map(|v| v.as_slice());
+                        let right = work.right_neighbor.as_deref().map(|v| v.as_slice());
 
-                        log::debug!("Thread {} processed window {}/{}: {:.1} m/z ({} spectra, {} peakels)",
-                                   thread_id, window_idx + 1, total_windows,
-                                   window.target_mz, spectra.len(), peakels.len());
+                        let result = self.run_walking_algorithm_for_window(
+                            &work.current_spectra, &work.window, left, right,
+                        );
 
-                        // Send result to main thread for ordered emission
-                        // This blocks if main thread is slow (backpressure)
-                        if result_tx.send((window_idx, peakels)).is_err() {
+                        log::debug!("Thread {} processed window {}/{}: {:.1} m/z ({} peakels, {} discards)",
+                                   thread_id, work.window_idx + 1, total_windows,
+                                   work.window.target_mz, result.current_window_peakels.len(), result.neighbor_window_peakels.len());
+
+                        if result_tx.send((work.window_idx, result)).is_err() {
                             log::warn!("Result channel closed, stopping consumer {}", thread_id);
                             break;
                         }
@@ -804,37 +1214,80 @@ impl DiaMs2PeakelDetector {
                     }
 
                     log::debug!("Consumer thread {} finished, processed {} items", thread_id, items_processed);
-                    // result_tx clone is dropped here
                 });
             }
 
-            // Drop extra clones so channels close properly when all producers/consumers finish
             drop(work_rx);
             drop(result_tx);
 
-            // Producer: runs on a scoped thread with its own DB connection
+            // Producer: sliding window with Arc sharing
             let producer_error = &producer_error;
+            let is_staggered = self.is_staggered;
+
             scope.spawn(move || {
                 let result: Result<()> = (|| {
                     let producer_reader = MzDbReader::builder(db_path)
                         .read_only()
                         .build()?;
 
-                    log::info!("Producer starting to load spectra...");
+                    log::info!("Producer starting to load spectra (staggered={})...", is_staggered);
+
+                    // Sliding cache: prev, current, and prefetched next (as Arcs)
+                    let mut prev_arc: Option<Arc<Vec<IndexedMs2Spectrum>>> = None;
+                    let mut current_arc: Option<Arc<Vec<IndexedMs2Spectrum>>> = None;
 
                     for (idx, window) in windows.iter().enumerate() {
-                        let tolerance = (window.upper_mz - window.lower_mz) / 2.0;
-                        let spectra = producer_reader.get_dia_spectra_for_window(
-                            window.target_mz, Some(tolerance)
-                        )?;
+                        // Get current: reuse from previous iteration's prefetched next, or load fresh
+                        let cur_arc = match current_arc.take() {
+                            Some(cached) => cached,
+                            None => {
+                                let raw = Self::load_spectra_for_window(&producer_reader, window)?;
+                                Arc::new(self.build_indexed_spectra(&raw, window))
+                            }
+                        };
 
-                        log::debug!("Producer loaded window {}/{}: {:.1} m/z ({} spectra)",
-                                   idx + 1, total_windows, window.target_mz, spectra.len());
+                        // Determine neighbors for staggered DIA
+                        let left_neighbor = if is_staggered {
+                            prev_arc.as_ref()
+                                .filter(|_| idx > 0 && Self::windows_overlap(&windows[idx - 1], window))
+                                .cloned()
+                        } else {
+                            None
+                        };
 
-                        if work_tx.send((idx, window.clone(), spectra)).is_err() {
+                        // Load and cache right neighbor if next window overlaps
+                        let next_arc = if is_staggered && idx + 1 < windows.len()
+                            && Self::windows_overlap(window, &windows[idx + 1])
+                        {
+                            let next_window = &windows[idx + 1];
+                            let next_raw = Self::load_spectra_for_window(
+                                &producer_reader, next_window
+                            )?;
+                            Some(Arc::new(self.build_indexed_spectra(&next_raw, next_window)))
+                        } else {
+                            None
+                        };
+
+                        let right_neighbor = next_arc.clone();
+
+                        log::debug!("Producer loaded window {}/{}: {:.1} m/z (left={}, right={})",
+                                   idx + 1, total_windows, window.target_mz,
+                                   left_neighbor.is_some(), right_neighbor.is_some());
+
+                        if work_tx.send(IsolationWindowTripletData {
+                            window_idx: idx,
+                            window: Arc::clone(window),
+                            current_spectra: Arc::clone(&cur_arc),
+                            left_neighbor,
+                            right_neighbor,
+                        }).is_err() {
                             log::warn!("Work channel closed early, stopping producer");
                             break;
                         }
+
+                        // Slide: current → prev, prefetched next → current
+                        prev_arc = Some(cur_arc);
+                        current_arc = next_arc;
                     }
 
                     log::debug!("Producer finished: {} windows", total_windows);
@@ -845,32 +1298,54 @@ impl DiaMs2PeakelDetector {
                     log::error!("Producer error: {:?}", e);
                     *producer_error.lock().expect("producer_error mutex poisoned") = Some(e);
                 }
-                // work_tx is dropped here, closing the work channel
             });
 
-            // Main thread: receive results and emit batches as they arrive.
-            // No ordering needed — the peakeldb writer is order-independent.
+            // Main thread: receive results, emit batches, collect discards
             let mut total_peakels = 0usize;
             let mut batches_emitted = 0usize;
+            let mut all_discarded: Vec<DiscardedPeakel> = Vec::new();
+            let mut emitted_apex_keys: HashSet<ApexPeakId> = HashSet::new();
 
-            for (window_idx, peakels) in result_rx {
-                total_peakels += peakels.len();
+            for (window_idx, result) in result_rx {
+                total_peakels += result.current_window_peakels.len();
+
+                // Track emitted peakels' apex keys and extract records
+                let kept_records: Vec<DiaMs2PeakelRecord> = result.current_window_peakels.into_iter()
+                    .map(|(record, apex_peak_id)| {
+                        emitted_apex_keys.insert(apex_peak_id);
+                        record
+                    })
+                    .collect();
 
                 if let Err(e) = on_batch(PeakelBatch {
-                    peakels,
+                    peakels: kept_records,
                     batch_index: window_idx,
                     total_batches: total_windows,
                 }) {
                     log::error!("on_batch error at window {}: {:?}", window_idx, e);
                     break;
                 }
+
+                all_discarded.extend(result.neighbor_window_peakels);
                 batches_emitted += 1;
+            }
+
+            // Rescue orphaned peakels
+            let rescued = Self::rescue_orphan_peakels(all_discarded, &emitted_apex_keys);
+            if !rescued.is_empty() {
+                total_peakels += rescued.len();
+                log::info!("  Rescued {} orphan apex-in-neighbor peakels", rescued.len());
+                if let Err(e) = on_batch(PeakelBatch {
+                    peakels: rescued,
+                    batch_index: total_windows,
+                    total_batches: total_windows + 1,
+                }) {
+                    log::error!("on_batch error for rescued peakels: {:?}", e);
+                }
             }
 
             log::info!("Parallel detection complete in {:?}: {} peakels in {} batches",
                        start_time.elapsed(), total_peakels, batches_emitted);
-
-            // All threads are automatically joined when scope exits
         });
 
         // Check for producer errors
@@ -881,24 +1356,6 @@ impl DiaMs2PeakelDetector {
         }
 
         Ok(())
-    }
-
-    /// Detect peakels from preloaded spectra (for parallel processing)
-    #[cfg(feature = "processing-parallel")]
-    fn detect_from_spectra(
-        &self,
-        window: &IsolationWindow,
-        spectra: &[crate::model::Spectrum],
-    ) -> Vec<DiaMs2PeakelRecord> {
-        if spectra.is_empty() {
-            return Vec::new();
-        }
-
-        // Build indexed spectra for fast m/z lookup
-        let indexed_spectra = self.build_indexed_spectra(spectra);
-
-        // Run the shared walking algorithm
-        self.run_walking_algorithm_for_window(indexed_spectra, window)
     }
 }
 

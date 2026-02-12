@@ -75,7 +75,10 @@ struct Args {
     #[arg(long = "min-peaks", default_value = "5")]
     min_peaks: usize,
 
-    /// Maximum consecutive gaps in XIC before stopping walk
+    /// Maximum consecutive gaps in XIC before stopping walk.
+    /// For staggered DIA (overlapping windows), neighbor spectra are interleaved
+    /// in the timeline and appear as gaps. Use >=3 for staggered DIA to bridge
+    /// over interleaved neighbor spectra. For non-staggered DIA, 1 may suffice.
     #[arg(long = "max-gaps", default_value = "3")]
     max_consecutive_gaps: usize,
 
@@ -88,9 +91,10 @@ struct Args {
     #[arg(long = "intensity-pct", default_value = "0.9")]
     intensity_percentile: f32,
 
-    /// Minimum peakel amplitude (apex/min intensity ratio)
-    #[arg(long = "min-amplitude", default_value = "1.5")]
-    min_peakel_amplitude: f32,
+    /// Minimum peakel amplitude (apex/min intensity ratio).
+    /// If not specified, uses algorithm default (1.5 for MS1, 1.0 for DIA MS2).
+    #[arg(long = "min-amplitude")]
+    min_peakel_amplitude: Option<f32>,
 
     /// Minimum peakel duration in seconds
     #[arg(long = "min-duration", default_value = "0.0")]
@@ -228,6 +232,7 @@ fn main() -> Result<()> {
 
 fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
     // Build configuration for Ms1PeakelDetector
+    let ms1_defaults = Ms1PeakelConfig::default();
     let config = Ms1PeakelConfig {
         mz_tol_ppm: args.mz_tol_ppm,
         min_intensity: args.min_intensity,
@@ -236,7 +241,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
         max_total_gaps: args.max_total_gaps,
         max_time_window: 1200.0,
         intensity_percentile: args.intensity_percentile,
-        min_peakel_amplitude: args.min_peakel_amplitude,
+        min_peakel_amplitude: args.min_peakel_amplitude.unwrap_or(ms1_defaults.min_peakel_amplitude),
         min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
         skip_apex_boundary_check: !args.require_apex_boundary,
@@ -325,6 +330,7 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
 // ============================================================================
 
 fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
+    let ms2_defaults = DiaMs2PeakelConfig::default();
     let config = DiaMs2PeakelConfig {
         mz_tol_ppm: args.mz_tol_ppm,
         min_intensity: args.min_intensity,
@@ -333,7 +339,7 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         max_total_gaps: args.max_total_gaps,
         max_time_window: 1200.0,
         intensity_percentile: args.intensity_percentile,
-        min_peakel_amplitude: args.min_peakel_amplitude,
+        min_peakel_amplitude: args.min_peakel_amplitude.unwrap_or(ms2_defaults.min_peakel_amplitude),
         min_peakel_duration: args.min_peakel_duration,
         algorithm: args.algo.clone(),
         skip_apex_boundary_check: !args.require_apex_boundary,
@@ -345,7 +351,7 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
 
     println!("Detecting MS2 peakels (DIA mode)...");
     println!("  Validation: min_amplitude={}, min_duration={}s, apex_boundary_check={}",
-             args.min_peakel_amplitude, args.min_peakel_duration, !config.skip_apex_boundary_check);
+             config.min_peakel_amplitude, config.min_peakel_duration, !config.skip_apex_boundary_check);
     println!("Found {} isolation windows", windows.len());
 
     // Get input filename for metadata
@@ -358,7 +364,7 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
         "sqlite" => {
             // Create writer with windows metadata
             let mut writer = Ms2PeakelDbWriter::create(
-                &args.output_file_path, input_filename, windows
+                &args.output_file_path, input_filename, &windows
             )?;
 
             // Stream peakel batches directly to SQLite
