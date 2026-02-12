@@ -258,6 +258,28 @@ fn bb_row_buffer_to_spectrum_buffer(
 ///     println!("Spectrum: {}", spectrum.header.id);
 /// }
 /// ```
+/// Wrapper for Spectrum that implements Ord by spectrum ID (for use in BinaryHeap).
+/// Used with `Reverse` to create a min-heap ordered by ascending spectrum ID.
+pub struct SpectrumByIdOrd(pub Spectrum);
+
+impl PartialEq for SpectrumByIdOrd {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.header.id == other.0.header.id
+    }
+}
+impl Eq for SpectrumByIdOrd {}
+
+impl PartialOrd for SpectrumByIdOrd {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SpectrumByIdOrd {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.header.id.cmp(&other.0.header.id)
+    }
+}
+
 pub struct SpectrumIterator<'a> {
     stmt: Statement<'a>,
     entity_cache: &'a EntityCache,
@@ -274,6 +296,11 @@ pub struct SpectrumIterator<'a> {
     /// Fast path: when msn_bb_time_width == 0, each BB has exactly 1 spectrum.
     /// We can decode directly from rows without buffering.
     dia_single_spectrum_mode: bool,
+    /// When iterating all ms levels, use a priority queue (min-heap by spectrum ID)
+    /// to reorder spectra across BBs from different run_slices (MS1 vs MS2).
+    /// This mirrors the Java SpectrumIterator's PriorityQueue behavior.
+    use_priority_queue: bool,
+    priority_queue: std::collections::BinaryHeap<std::cmp::Reverse<SpectrumByIdOrd>>,
 }
 
 impl<'a> SpectrumIterator<'a> {
@@ -293,6 +320,8 @@ impl<'a> SpectrumIterator<'a> {
             Some(level) => create_bb_iter_stmt_for_single_ms_level(db, level).dot()?,
         };
 
+        let use_priority_queue = ms_level.is_none();
+
         Ok(Self {
             stmt,
             entity_cache,
@@ -305,6 +334,8 @@ impl<'a> SpectrumIterator<'a> {
             dia_param: None,
             dia_spectrum_ids: None,
             dia_single_spectrum_mode: false,
+            use_priority_queue,
+            priority_queue: std::collections::BinaryHeap::with_capacity(200),
         })
     }
 
@@ -398,6 +429,8 @@ impl<'a> SpectrumIterator<'a> {
             dia_param: Some(main_precursor_mz),
             dia_spectrum_ids,
             dia_single_spectrum_mode: is_single_spectrum_bbs,
+            use_priority_queue: false,
+            priority_queue: std::collections::BinaryHeap::new(),
         })
     }
 
@@ -473,6 +506,108 @@ impl<'a> SpectrumIterator<'a> {
         self.spectrum_buffer.clear();
         self.spectrum_buffer_idx = 0;
 
+        if self.use_priority_queue {
+            // Priority queue mode (all ms levels): load BBs cycle-by-cycle,
+            // push decoded spectra into the min-heap, then drain in ID order.
+            // This mirrors the Java SpectrumIterator's PriorityQueue behavior.
+            self.fill_with_priority_queue()
+        } else {
+            // Standard mode (single ms level or DIA): sequential BB iteration
+            self.fill_sequential()
+        }
+    }
+
+    /// Fill spectrum buffer using priority queue reordering (for all-ms-levels iteration).
+    ///
+    /// Loads BBs and merges spectrum slices (like sequential mode), but pushes
+    /// decoded spectra into a min-heap instead of the flat buffer. Keeps loading
+    /// as long as the next BB belongs to the same cycle or is MS2+ (following the
+    /// Java SpectrumIterator logic). Stops at cycle boundaries, then drains the
+    /// heap in spectrum ID order into the buffer.
+    fn fill_with_priority_queue(&mut self) -> Result<bool> {
+        // Process bounding boxes, merging slices with same first_spectrum_id
+        while let Some(bb) = self.read_next_bb()? {
+            let bb_first_spectrum_header = self
+                .entity_cache
+                .get_spectrum_header(bb.first_spectrum_id)
+                .ok_or_else(|| anyhow!("spectrum header not found for ID {}", bb.first_spectrum_id))?;
+
+            let next_ms_level = bb_first_spectrum_header.ms_level;
+            let next_cycle = bb_first_spectrum_header.cycle;
+
+            let is_new_spectrum = match self.prev_first_spectrum_id {
+                None => false,
+                Some(prev_id) => bb.first_spectrum_id != prev_id,
+            };
+
+            if is_new_spectrum {
+                // Process accumulated BBs (merge slices) and push into priority queue
+                self.flush_bb_buffer_to_priority_queue()?;
+
+                // Check if we should stop loading and yield the current batch.
+                // Following Java logic: continue if same cycle or MS2+
+                if !self.priority_queue.is_empty() {
+                    let cur_max_cycle = self.priority_queue.iter()
+                        .map(|r| r.0 .0.header.cycle)
+                        .max()
+                        .unwrap_or(0);
+
+                    let should_continue = next_cycle == cur_max_cycle
+                        || next_ms_level > 1;
+
+                    if !should_continue {
+                        // Cycle boundary: save this BB for next batch, drain queue
+                        self.prev_first_spectrum_id = Some(bb.first_spectrum_id);
+                        self.bb_row_buffer.push(bb);
+                        self.drain_priority_queue();
+                        return Ok(true);
+                    }
+                }
+            }
+
+            self.prev_first_spectrum_id = Some(bb.first_spectrum_id);
+            self.bb_row_buffer.push(bb);
+        }
+
+        // No more BBs: flush remaining
+        self.flush_bb_buffer_to_priority_queue()?;
+        self.drain_priority_queue();
+        self.finished = true;
+        Ok(!self.spectrum_buffer.is_empty())
+    }
+
+    /// Process the BB row buffer into merged spectra and push them into the priority queue.
+    fn flush_bb_buffer_to_priority_queue(&mut self) -> Result<()> {
+        if self.bb_row_buffer.is_empty() {
+            return Ok(());
+        }
+
+        let mut temp_buffer = Vec::with_capacity(100);
+        let spectrum_ids = self.dia_spectrum_ids.as_deref();
+        bb_row_buffer_to_spectrum_buffer(
+            &self.bb_row_buffer,
+            &mut temp_buffer,
+            self.entity_cache,
+            spectrum_ids,
+        ).dot()?;
+        self.bb_row_buffer.clear();
+
+        for s in temp_buffer {
+            self.priority_queue.push(std::cmp::Reverse(SpectrumByIdOrd(s)));
+        }
+        Ok(())
+    }
+
+    /// Drain the priority queue into spectrum_buffer in ascending spectrum ID order.
+    fn drain_priority_queue(&mut self) {
+        self.spectrum_buffer.reserve(self.priority_queue.len());
+        while let Some(std::cmp::Reverse(wrapper)) = self.priority_queue.pop() {
+            self.spectrum_buffer.push(wrapper.0);
+        }
+    }
+
+    /// Standard sequential fill (single ms level or DIA mode).
+    fn fill_sequential(&mut self) -> Result<bool> {
         // Process bounding boxes until we have spectra to return
         while let Some(bb) = self.read_next_bb()? {
             let bb_first_spectrum_header = self

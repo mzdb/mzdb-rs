@@ -5,15 +5,25 @@
 //! apex and surrounding data points are retained, significantly reducing file size
 //! while preserving the essential signal information.
 //!
+//! # Subcommands
+//!
+//! - `simplify`: Basic simplification, auto-detects staggered DIA but keeps original
+//!   isolation window bounds in the output.
+//! - `unstagger`: Simplification with unstaggering — rewrites isolation window bounds
+//!   as non-overlapping sub-windows. Includes signal dispatch strategy for edge regions.
+//!
 //! # Usage
 //!
 //! ```bash
 //! # Basic simplification (auto-detects staggered DIA)
 //! shrinkdia simplify --mzdb input.mzDB --peakeldb peakels.peakeldb --output output.mzDB
 //!
-//! # With unstaggering options for staggered DIA
+//! # With unstaggering (non-overlapping windows in output)
+//! shrinkdia unstagger --mzdb staggered.mzDB --peakeldb peakels.peakeldb --output out.mzDB
+//!
+//! # With custom edge dispatch strategy
 //! shrinkdia unstagger --mzdb staggered.mzDB --peakeldb peakels.peakeldb --output out.mzDB \
-//!     --mz-tol-ppm 15 --min-corr 0.8
+//!     --single-obs remove
 //! ```
 
 use std::path::PathBuf;
@@ -22,30 +32,18 @@ use std::process;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use mzdb::processing::dia_simplifier::{DiaSimplifier, DiaSimplifierConfig};
-use mzdb::processing::staggered::{
-    StaggeredPeakelConfig, MzTolerance, SingleObservationStrategy, MultipleMatchStrategy,
-};
+use mzdb::processing::staggered::SingleObservationStrategy;
 
-/// Strategy for handling peakels observed in only one cycle's window
+/// Strategy for handling data points in single-cycle-only regions
+/// (edge windows covered by only one DIA series in staggered mode)
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum SingleObsStrategy {
-    /// Duplicate the peakel to all potential unstaggered windows
+    /// Emit the data point into the single-cycle window
     Duplicate,
-    /// Remove single-observation peakels entirely
+    /// Remove data points in single-cycle regions entirely
     Remove,
-    /// Keep in the original (wider) window
+    /// Keep in the original window
     KeepOriginal,
-}
-
-/// Strategy for handling peakels with multiple potential matches
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum MultiMatchStrategy {
-    /// Create merged entries for all matching pairs
-    MergeAll,
-    /// Select the best match based on correlation
-    SelectBest,
-    /// Create separate entries for each potential pairing
-    CreateSeparate,
 }
 
 /// Shrink DIA mzDB files using detected MS2 peakels
@@ -58,7 +56,11 @@ enum MultiMatchStrategy {
     long_about = "This tool simplifies DIA (Data-Independent Acquisition) mzDB files by \
                   reconstructing MS2 spectra from detected peakels. For each peakel, only \
                   the apex and surrounding data points are retained, significantly reducing \
-                  file size while preserving the essential signal information."
+                  file size while preserving the essential signal information.\n\n\
+                  Staggered DIA mode is automatically detected. Peakels are already \
+                  deduplicated and merged across overlapping windows during detection, \
+                  so the simplifier only needs to dispatch signal to the correct \
+                  unstaggered sub-windows."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -91,7 +93,8 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Simplify and unstagger a staggered DIA mzDB file
+    /// Simplify and unstagger a staggered DIA mzDB file.
+    /// Rewrites isolation window bounds as non-overlapping sub-windows.
     Unstagger {
         /// Input DIA mzDB file
         #[arg(short, long)]
@@ -116,25 +119,12 @@ enum Commands {
 
         // ==================== Unstagger-specific Options ====================
 
-        /// Strategy for single observations (peakels seen in only one cycle type)
+        /// Strategy for data points in single-cycle-only regions (edge windows
+        /// covered by only one DIA series). 'duplicate' emits them into the
+        /// edge window, 'remove' discards them, 'keep-original' is the same
+        /// as duplicate for the intra-peakel dispatch.
         #[arg(long, value_enum, default_value = "duplicate")]
         single_obs: SingleObsStrategy,
-
-        /// Strategy for multiple matches (when a peakel matches several candidates)
-        #[arg(long, value_enum, default_value = "select-best")]
-        multi_match: MultiMatchStrategy,
-
-        /// m/z tolerance for peakel matching (in ppm)
-        #[arg(long, default_value_t = 10.0)]
-        mz_tol_ppm: f64,
-
-        /// Minimum correlation threshold for accepting peakel matches (0.0-1.0)
-        #[arg(long, default_value_t = 0.7)]
-        min_corr: f64,
-
-        /// Enable intensity scaling during peakel merge
-        #[arg(long, default_value_t = true)]
-        intensity_scaling: bool,
     },
 }
 
@@ -147,19 +137,10 @@ struct CommonArgs {
     verbose: bool,
 }
 
-/// Unstagger-specific arguments
-struct UnstaggerArgs {
-    single_obs: SingleObsStrategy,
-    multi_match: MultiMatchStrategy,
-    mz_tol_ppm: f64,
-    min_corr: f64,
-    intensity_scaling: bool,
-}
-
 fn main() {
     let cli = Cli::parse();
 
-    let (common, unstagger_opts) = match &cli.command {
+    let (common, single_obs_strategy) = match &cli.command {
         Commands::Simplify {
             mzdb,
             peakeldb,
@@ -183,10 +164,6 @@ fn main() {
             points,
             verbose,
             single_obs,
-            multi_match,
-            mz_tol_ppm,
-            min_corr,
-            intensity_scaling,
         } => (
             CommonArgs {
                 mzdb: mzdb.clone(),
@@ -195,12 +172,10 @@ fn main() {
                 points: *points,
                 verbose: *verbose,
             },
-            Some(UnstaggerArgs {
-                single_obs: *single_obs,
-                multi_match: *multi_match,
-                mz_tol_ppm: *mz_tol_ppm,
-                min_corr: *min_corr,
-                intensity_scaling: *intensity_scaling,
+            Some(match single_obs {
+                SingleObsStrategy::Duplicate => SingleObservationStrategy::Duplicate,
+                SingleObsStrategy::Remove => SingleObservationStrategy::Remove,
+                SingleObsStrategy::KeepOriginal => SingleObservationStrategy::KeepOriginal,
             }),
         ),
     };
@@ -232,13 +207,9 @@ fn main() {
     }
 
     // Log unstagger options if using unstagger subcommand
-    if let Some(ref opts) = unstagger_opts {
+    if let Some(ref strategy) = single_obs_strategy {
         log::info!("Unstagger mode: ENABLED");
-        log::info!("  Single observation strategy: {:?}", opts.single_obs);
-        log::info!("  Multiple match strategy: {:?}", opts.multi_match);
-        log::info!("  m/z tolerance: {} ppm", opts.mz_tol_ppm);
-        log::info!("  Min correlation: {}", opts.min_corr);
-        log::info!("  Intensity scaling: {}", opts.intensity_scaling);
+        log::info!("  Single observation strategy: {:?}", strategy);
     }
 
     // Create configuration
@@ -251,23 +222,8 @@ fn main() {
     };
 
     // Apply unstagger options if provided
-    if let Some(ref opts) = unstagger_opts {
-        config.staggered_peakel_config = StaggeredPeakelConfig {
-            mz_tolerance: MzTolerance::Ppm(opts.mz_tol_ppm),
-            min_correlation: opts.min_corr,
-            single_observation_strategy: match opts.single_obs {
-                SingleObsStrategy::Duplicate => SingleObservationStrategy::Duplicate,
-                SingleObsStrategy::Remove => SingleObservationStrategy::Remove,
-                SingleObsStrategy::KeepOriginal => SingleObservationStrategy::KeepOriginal,
-            },
-            multiple_match_strategy: match opts.multi_match {
-                MultiMatchStrategy::MergeAll => MultipleMatchStrategy::MergeAll,
-                MultiMatchStrategy::SelectBest => MultipleMatchStrategy::SelectBest,
-                MultiMatchStrategy::CreateSeparate => MultipleMatchStrategy::CreateSeparate,
-            },
-            enable_intensity_scaling: opts.intensity_scaling,
-            ..StaggeredPeakelConfig::default()
-        };
+    if let Some(strategy) = single_obs_strategy {
+        config.single_observation_strategy = strategy;
     }
 
     // Run simplification
@@ -280,34 +236,43 @@ fn main() {
         Ok(stats) => {
             println!("\n=== Simplification Complete ===");
 
-            // Show staggered detection status
             if stats.staggered_detected {
                 println!("Staggered DIA: YES (offset: {:.2} Da)", stats.staggered_offset);
                 println!("Original isolation windows: {}", stats.original_window_count);
                 println!("Unstaggered windows: {}", stats.unstaggered_window_count);
 
-                // Show unstagger options if used
-                if let Some(ref opts) = unstagger_opts {
+                if single_obs_strategy.is_some() {
                     println!("Unstagger mode: ENABLED");
-                    println!("  Single obs strategy: {:?}", opts.single_obs);
-                    println!("  Multi match strategy: {:?}", opts.multi_match);
-                    println!("  m/z tolerance: {} ppm", opts.mz_tol_ppm);
-                    println!("  Min correlation: {}", opts.min_corr);
                 } else {
                     println!("Unstagger mode: DISABLED (use 'unstagger' subcommand to enable)");
                 }
+
+                // Dispatch statistics
+                let ds = &stats.dispatch_stats;
+                println!("\nSignal Dispatch:");
+                println!("  2-window peakels (deterministic):    {}", ds.two_window_peakels);
+                println!("  1-window peakels (strategy-dep.):    {}", ds.single_window_peakels);
+                println!("  3+-window peakels (resolved to ovlp):{}", ds.multi_window_resolved);
+                println!("  3+-window peakels (duplicated):      {}", ds.multi_window_duplicated);
+                println!("  1-window removed:                    {}", ds.single_window_removed);
+                println!("  1-window duplicated:                 {}", ds.single_window_duplicated);
+                println!("  Data points → unique window:         {}", ds.data_points_unique);
+                println!("  Data points → duplicated:            {}", ds.data_points_duplicated);
+
+                println!("\nSpectrum Doubling:");
+                println!("  Output MS2 spectra:                {}", stats.output_ms2_count);
+                println!("  Companion spectra created:         {}", stats.companion_spectra_created);
             } else {
                 println!("Staggered DIA: NO (standard DIA mode)");
                 println!("Isolation windows: {}", stats.original_window_count);
             }
 
-            println!("Peakels processed: {}", stats.peakel_count);
+            println!("\nPeakels processed: {}", stats.peakel_count);
             println!("Original MS2 spectra: {}", stats.original_ms2_count);
             println!("Simplified MS2 spectra: {}", stats.simplified_ms2_count);
             println!("Data points extracted: {}", stats.data_point_count);
             println!("Output file: {:?}", common.output);
 
-            // Calculate reduction
             if stats.original_ms2_count > 0 {
                 let reduction = 100.0
                     * (1.0 - stats.simplified_ms2_count as f64 / stats.original_ms2_count as f64);

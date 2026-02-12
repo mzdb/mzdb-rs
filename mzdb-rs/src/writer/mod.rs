@@ -368,7 +368,7 @@ impl MzDbWriter {
     /// Create all database indexes
     fn create_indexes(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
-            "CREATE UNIQUE INDEX spectrum_initial_id_idx ON spectrum (initial_id ASC,run_id ASC);
+            "CREATE INDEX spectrum_initial_id_idx ON spectrum (initial_id ASC,run_id ASC);
              CREATE INDEX spectrum_ms_level_idx ON spectrum (ms_level ASC,run_id ASC);
              CREATE INDEX spectrum_precursor_mz_idx ON spectrum (ms_level ASC, main_precursor_mz ASC);
              CREATE INDEX spectrum_bb_first_spectrum_id_idx ON spectrum (bb_first_spectrum_id ASC);

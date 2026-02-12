@@ -34,7 +34,7 @@ clap = { version = "4.4", features = ["derive"], optional = true }
 env_logger = { version = "0.11", optional = true }
 
 # Optional dependencies for thermo writer
-thernio = { path = "../../rusteomics/thernio", optional = true, features = ["raw"] }
+thernio = { path = "../../thernio", optional = true, features = ["raw"] }
 xmltree = { version = "0.12", optional = true, features = ["attribute-sorted"] }
 
 # Optional dependencies for processing module

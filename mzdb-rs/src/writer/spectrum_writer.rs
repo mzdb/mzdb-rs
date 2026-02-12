@@ -288,7 +288,7 @@ fn insert_spectrum_header(
         )",
         rusqlite::params![
             spectrum_id,                          // 1: id
-            spectrum_id,                          // 2: initial_id (same as id)
+            sh.initial_id,                        // 2: initial_id (preserves provenance to original raw file)
             &sh.title,                            // 3: title
             sh.cycle,                             // 4: cycle
             sh.time,                              // 5: time

@@ -130,10 +130,7 @@ pub use dia_simplifier::{
 
 // Re-export staggered DIA types
 pub use staggered::{
-    StaggeredDiaDetector, StaggeredDiaInfo, StaggeredPeakelConfig,
+    StaggeredDiaDetector, StaggeredDiaInfo,
     UnstaggeredWindow, UnstaggeredWindowType,
-    MzTolerance, SingleObservationStrategy, MultipleMatchStrategy,
-    StaggeredPeakelMatcher, PeakelMatchResult, MatchedPeakelPair,
-    SingleObservationPeakel, AmbiguousMatch, CycleType,
-    PeakelMerger, MergedPeakel, MergeStats, MergeConfig,
+    SingleObservationStrategy,
 };
