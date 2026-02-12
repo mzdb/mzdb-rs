@@ -76,8 +76,6 @@ pub struct DiaMs2PeakelRecord {
     pub data: Peakel,
     /// Isolation window ID (foreign key to isolation_window table)
     pub isolation_window_id: i64,
-    /// Precursor m/z (isolation window target)
-    pub precursor_mz: f64,
 }
 
 /// Globally unique identifier for an apex peak: (spectrum_id, peak_index_in_original_spectrum).
@@ -108,11 +106,10 @@ struct Ms2PeakelDetectionResult {
 
 impl DiaMs2PeakelRecord {
     /// Create a new DIA MS2 peakel record from a Peakel and isolation window info
-    pub fn new(peakel: Peakel, isolation_window_id: i64, precursor_mz: f64) -> Self {
+    pub fn new(peakel: Peakel, isolation_window_id: i64) -> Self {
         Self {
             data: peakel,
             isolation_window_id,
-            precursor_mz,
         }
     }
     
@@ -889,7 +886,7 @@ impl DiaMs2PeakelDetector {
             };
 
             if in_current {
-                let record = DiaMs2PeakelRecord::new(peakel, window.id, window.target_mz);
+                let record = DiaMs2PeakelRecord::new(peakel, window.id);
                 current_window_peakels.push((record, apex_peak_id));
             } else {
                 // Apex falls in a neighbor spectrum: attribute to the window where
@@ -897,7 +894,7 @@ impl DiaMs2PeakelDetector {
                 let apex_spectrum = peak_data.get_spectrum_lookup(apex_peak_key.spectrum_idx);
                 let apex_window = apex_spectrum.source_window();
                 neighbor_window_peakels.push(DiscardedPeakel {
-                    record: DiaMs2PeakelRecord::new(peakel, apex_window.id, apex_window.target_mz),
+                    record: DiaMs2PeakelRecord::new(peakel, apex_window.id),
                     apex_peak_id,
                 });
             }

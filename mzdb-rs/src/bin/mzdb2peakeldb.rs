@@ -433,7 +433,7 @@ fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Resu
     for peakel in peakels {
         writeln!(
             file,
-            "{}\t{:.6}\t{:.4}\t{:.4}\t{}\t{:.2}\t{:.2}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{:.4}",
+            "{}\t{:.6}\t{:.4}\t{:.4}\t{}\t{:.2}\t{:.2}\t{:.4}\t{}\t{}\t{}\t{}\t{}",
             peakel.id(),
             peakel.mz(),
             peakel.elution_time(),
@@ -447,7 +447,6 @@ fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Resu
             peakel.apex_spectrum_id(),
             peakel.last_spectrum_id(),
             peakel.isolation_window_id,
-            peakel.precursor_mz,
         )?;
     }
 

@@ -83,7 +83,6 @@ CREATE TABLE peakel (
     apex_spectrum_id INTEGER NOT NULL,
     last_spectrum_id INTEGER NOT NULL,
     isolation_window_id INTEGER NOT NULL,
-    precursor_mz REAL NOT NULL,
     map_id INTEGER NOT NULL,
     FOREIGN KEY (isolation_window_id) REFERENCES isolation_window (id),
     FOREIGN KEY (map_id) REFERENCES lcms_map (id)
@@ -144,8 +143,8 @@ impl Ms2PeakelDbWriter {
         "INSERT INTO peakel (id, moz, elution_time, duration, gap_count, apex_intensity, area, 
          amplitude, intensity_cv, peak_count, peaks, serialized_properties,
          first_spectrum_id, apex_spectrum_id, last_spectrum_id, 
-         isolation_window_id, precursor_mz, map_id) 
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+         isolation_window_id, map_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)";
 
     /// SQL for inserting an R-tree entry
     const RTREE_INSERT_SQL: &'static str =
@@ -271,7 +270,6 @@ impl Ms2PeakelDbWriter {
                 peakel.apex_spectrum_id(),
                 peakel.last_spectrum_id(),
                 peakel.isolation_window_id,
-                peakel.precursor_mz,
                 1, // map_id
             ])?;
 
@@ -307,7 +305,7 @@ impl Ms2PeakelDbWriter {
 
 impl PeakelDbWriter for Ms2PeakelDbWriter {
     type Record = DiaMs2PeakelRecord;
-    
+
     fn connection(&mut self) -> &Connection {
         &self.conn
     }
