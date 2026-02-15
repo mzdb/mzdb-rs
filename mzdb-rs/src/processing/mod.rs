@@ -53,6 +53,9 @@ pub mod staggered;
 #[cfg(feature = "shrinkdia")]
 pub mod dia_simplifier;
 
+#[cfg(feature = "shrinkdia")]
+pub mod dia_leftover_mask;
+
 // Re-export commonly used types
 pub use model::{
     Peak, Peakel, PeakelBuilder, Feature, PutativeFeature,
@@ -126,6 +129,12 @@ pub use diafication::{
 pub use dia_simplifier::{
     DiaSimplifier, DiaSimplifierConfig, SimplifiedSpectrum,
     SimplificationStats, SpectrumHeader,
+};
+
+// Re-export DIA leftover mask types (when feature enabled)
+#[cfg(feature = "shrinkdia")]
+pub use dia_leftover_mask::{
+    DiaLeftoverMask, LeftoverStats,
 };
 
 // Re-export staggered DIA types
