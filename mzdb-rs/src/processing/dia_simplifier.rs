@@ -147,6 +147,18 @@ pub struct SpectrumHeader {
 pub type PeakelDbReader = Ms2PeakelDbReader;
 
 // ============================================================================
+// Dispatch Safety Thresholds
+// ============================================================================
+
+/// Minimum total data points (both windows) to consider single-window assignment.
+/// Below this, the peakel is duplicated across sub-windows as a safeguard.
+const MIN_PEAKS_FOR_SINGLE_ASSIGN: usize = 5;
+
+/// Maximum allowed difference in peak counts between the two windows.
+/// If |n_A - n_B| exceeds this, the peakel is duplicated.
+const MAX_PEAKS_DIFF_FOR_SINGLE_ASSIGN: usize = 2;
+
+// ============================================================================
 // Peakel Window Classification
 // ============================================================================
 
@@ -157,21 +169,23 @@ enum PeakelWindowClassification {
     /// All spectra from a single original IW — cannot determine precise sub-window.
     /// Contains the original IW id.
     SingleWindow(i64),
-    /// Spectra from exactly 2 original IWs — maps deterministically to the
-    /// Overlap unstaggered window at their intersection.
-    /// Contains (iw_a_id, iw_b_id).
-    TwoWindow(i64, i64),
+    /// Spectra from exactly 2 original IWs.
+    /// Contains (iw_a_id, n_peaks_a, iw_b_id, n_peaks_b) sorted by count descending.
+    TwoWindow(i64, usize, i64, usize),
     /// Spectra from 3+ original IWs — top-2 by peak count used for overlap lookup,
-    /// all IW ids retained for fallback duplication when top-2 are non-adjacent.
-    /// Contains (iw_a_id, iw_b_id, all_iw_ids).
-    MultiWindow(i64, i64, Vec<i64>),
+    /// all (iw_id, count) pairs retained sorted by count descending.
+    MultiWindow(Vec<(i64, usize)>),
 }
 
 /// Statistics about signal dispatch decisions
 #[derive(Debug, Clone, Default)]
 pub struct DispatchStats {
-    /// Peakels with signal from exactly 2 IWs → deterministic overlap dispatch
-    pub two_window_peakels: usize,
+    /// Peakels with signal from exactly 2 IWs, confidently assigned to the overlap
+    /// sub-window (total_peaks >= MIN_PEAKS_FOR_SINGLE_ASSIGN and balanced)
+    pub two_window_single_assign: usize,
+    /// Peakels with signal from exactly 2 IWs, duplicated because too few peaks
+    /// or imbalanced peak counts between windows
+    pub two_window_duplicated: usize,
     /// Peakels with signal from only 1 IW → strategy-dependent dispatch
     pub single_window_peakels: usize,
     /// Peakels with signal from 3+ IWs → resolved to overlap window (adjacent top-2)
@@ -318,7 +332,8 @@ impl DiaSimplifier {
             log::info!("╔══════════════════════════════════════════════════════╗");
             log::info!("║       SIGNAL DISPATCH STATISTICS                     ║");
             log::info!("╠══════════════════════════════════════════════════════╣");
-            log::info!("║  2-window peakels (deterministic):      {:>8}     ║", dispatch_stats.two_window_peakels);
+            log::info!("║  2-window → single assign (confident):  {:>8}     ║", dispatch_stats.two_window_single_assign);
+            log::info!("║  2-window → duplicated (safeguard):     {:>8}     ║", dispatch_stats.two_window_duplicated);
             log::info!("║  1-window peakels (strategy-dep.):      {:>8}     ║", dispatch_stats.single_window_peakels);
             log::info!("║  3+-window peakels (resolved to ovlp):  {:>8}     ║", dispatch_stats.multi_window_resolved);
             log::info!("║  3+-window peakels (duplicated):        {:>8}     ║", dispatch_stats.multi_window_duplicated);
@@ -594,23 +609,21 @@ fn find_overlap_window<'a>(
 }
 
 /// Classify a peakel by counting distinct original IWs contributing spectra.
+///
+/// Uses **all** data points in the peakel (not just apex ± half_window) to ensure
+/// accurate classification. With sparse interleaved sampling (~3 points total),
+/// restricting to the apex window would miss contributions from the neighbor window.
 fn classify_peakel(
     peakel: &ExtendedPeakel,
-    half_window: usize,
     spectrum_to_orig_iw: &HashMap<i64, i64>,
 ) -> Option<PeakelWindowClassification> {
     let spectrum_ids = peakel.data.spectrum_ids.as_slice();
-    let apex_idx = peakel.apex_index().unwrap_or(spectrum_ids.len() / 2);
-    let start_idx = apex_idx.saturating_sub(half_window);
-    let end_idx = (apex_idx + half_window).min(spectrum_ids.len().saturating_sub(1));
 
-    // Count peaks per original IW
+    // Count peaks per original IW across the full peakel extent
     let mut iw_counts: HashMap<i64, usize> = HashMap::new();
-    for idx in start_idx..=end_idx {
-        if idx < spectrum_ids.len() {
-            if let Some(&iw_id) = spectrum_to_orig_iw.get(&spectrum_ids[idx]) {
-                *iw_counts.entry(iw_id).or_default() += 1;
-            }
+    for &spec_id in spectrum_ids {
+        if let Some(&iw_id) = spectrum_to_orig_iw.get(&spec_id) {
+            *iw_counts.entry(iw_id).or_default() += 1;
         }
     }
 
@@ -623,20 +636,21 @@ fn classify_peakel(
 
     match iw_list.len() {
         1 => Some(PeakelWindowClassification::SingleWindow(iw_list[0].0)),
-        2 => Some(PeakelWindowClassification::TwoWindow(iw_list[0].0, iw_list[1].0)),
-        _ => {
-            let all_iws: Vec<i64> = iw_list.iter().map(|(id, _)| *id).collect();
-            Some(PeakelWindowClassification::MultiWindow(iw_list[0].0, iw_list[1].0, all_iws))
-        }
+        2 => Some(PeakelWindowClassification::TwoWindow(
+            iw_list[0].0, iw_list[0].1,
+            iw_list[1].0, iw_list[1].1,
+        )),
+        _ => Some(PeakelWindowClassification::MultiWindow(iw_list)),
     }
 }
 
 /// Extract data points from peakels for staggered DIA using peakel-level dispatch.
 ///
-/// Each peakel is classified by its contributing original IWs:
-/// - 2-window: deterministic dispatch to the Overlap sub-window
+/// Each peakel is classified by its contributing original IWs using all data points:
+/// - 2-window with strong evidence (≥5 peaks, balanced): single-assign to overlap sub-window
+/// - 2-window without strong evidence: duplicated across all sub-windows of both IWs
 /// - 1-window: strategy-dependent (Duplicate to all sub-windows, or Remove)
-/// - 3+-window: top-2 IWs resolved to overlap if adjacent, otherwise duplicated across all contributing IWs
+/// - 3+-window: top-2 IWs resolved to overlap if adjacent, otherwise duplicated
 fn extract_staggered_data_points(
     peakels: &[ExtendedPeakel],
     spectrum_to_orig_iw: &HashMap<i64, i64>,
@@ -658,48 +672,61 @@ fn extract_staggered_data_points(
             continue;
         }
 
-        let classification = match classify_peakel(peakel, half_window, spectrum_to_orig_iw) {
+        let classification = match classify_peakel(peakel, spectrum_to_orig_iw) {
             Some(c) => c,
             None => continue,
         };
 
         // Determine target unstaggered windows based on classification
         let target_windows: Vec<(f64, f64, f64)> = match &classification {
-            PeakelWindowClassification::TwoWindow(iw_a, iw_b) => {
-                stats.two_window_peakels += 1;
+            PeakelWindowClassification::TwoWindow(iw_a, n_a, iw_b, n_b) => {
+                let total_peaks = n_a + n_b;
+                let n_peaks_diff = if *n_a > *n_b { n_a - n_b } else { n_b - n_a };
 
-                // Find the Overlap window at the intersection
-                if let Some(uw) = find_overlap_window(*iw_a, *iw_b, &stagger_info.unstaggered_windows) {
-                    vec![(uw.center_mz, uw.lower_mz, uw.upper_mz)]
+                // Single-assign only with strong evidence: enough peaks AND balanced
+                let confident = total_peaks >= MIN_PEAKS_FOR_SINGLE_ASSIGN
+                    && n_peaks_diff <= MAX_PEAKS_DIFF_FOR_SINGLE_ASSIGN;
+
+                if confident {
+                    stats.two_window_single_assign += 1;
+
+                    // Find the Overlap window at the intersection
+                    if let Some(uw) = find_overlap_window(*iw_a, *iw_b, &stagger_info.unstaggered_windows) {
+                        vec![(uw.center_mz, uw.lower_mz, uw.upper_mz)]
+                    } else {
+                        // Non-adjacent IWs: fall back to duplication
+                        collect_all_unstag_windows(&[*iw_a, *iw_b], &orig_iw_to_unstag)
+                    }
                 } else {
-                    // Shouldn't happen for true 2-window peakels with adjacent IWs
-                    orig_iw_to_unstag.get(iw_a)
-                        .map(|uws| uws.iter().map(|uw| (uw.center_mz, uw.lower_mz, uw.upper_mz)).collect())
-                        .unwrap_or_default()
+                    stats.two_window_duplicated += 1;
+
+                    // Duplicate across all sub-windows of both contributing IWs
+                    collect_all_unstag_windows(&[*iw_a, *iw_b], &orig_iw_to_unstag)
                 }
             }
 
-            PeakelWindowClassification::MultiWindow(iw_a, iw_b, all_iws) => {
-                // Try top-2 overlap first
-                if let Some(uw) = find_overlap_window(*iw_a, *iw_b, &stagger_info.unstaggered_windows) {
-                    stats.multi_window_resolved += 1;
-                    vec![(uw.center_mz, uw.lower_mz, uw.upper_mz)]
+            PeakelWindowClassification::MultiWindow(iw_counts) => {
+                let (iw_a, n_a) = iw_counts[0];
+                let (iw_b, n_b) = iw_counts[1];
+                let total_top2 = n_a + n_b;
+                let diff_top2 = if n_a > n_b { n_a - n_b } else { n_b - n_a };
+
+                let confident = total_top2 >= MIN_PEAKS_FOR_SINGLE_ASSIGN
+                    && diff_top2 <= MAX_PEAKS_DIFF_FOR_SINGLE_ASSIGN;
+
+                if confident {
+                    if let Some(uw) = find_overlap_window(iw_a, iw_b, &stagger_info.unstaggered_windows) {
+                        stats.multi_window_resolved += 1;
+                        vec![(uw.center_mz, uw.lower_mz, uw.upper_mz)]
+                    } else {
+                        stats.multi_window_duplicated += 1;
+                        let all_iws: Vec<i64> = iw_counts.iter().map(|(id, _)| *id).collect();
+                        collect_all_unstag_windows(&all_iws, &orig_iw_to_unstag)
+                    }
                 } else {
                     stats.multi_window_duplicated += 1;
-                    // Top-2 IWs are non-adjacent: duplicate to all sub-windows of all contributing IWs
-                    let mut windows = Vec::new();
-                    let mut seen = std::collections::HashSet::new();
-                    for iw_id in all_iws {
-                        if let Some(uws) = orig_iw_to_unstag.get(iw_id) {
-                            for uw in uws {
-                                let key = uw.center_mz.to_bits();
-                                if seen.insert(key) {
-                                    windows.push((uw.center_mz, uw.lower_mz, uw.upper_mz));
-                                }
-                            }
-                        }
-                    }
-                    windows
+                    let all_iws: Vec<i64> = iw_counts.iter().map(|(id, _)| *id).collect();
+                    collect_all_unstag_windows(&all_iws, &orig_iw_to_unstag)
                 }
             }
 
@@ -761,6 +788,26 @@ fn extract_staggered_data_points(
     log::info!("Extracted {} data points from {} peakels (peakel-level dispatch)",
                data_points.len(), peakels.len());
     Ok((data_points, stats))
+}
+
+/// Collect all unstaggered sub-windows for a set of original IW ids, deduplicated.
+fn collect_all_unstag_windows(
+    iw_ids: &[i64],
+    orig_iw_to_unstag: &HashMap<i64, Vec<&UnstaggeredWindow>>,
+) -> Vec<(f64, f64, f64)> {
+    let mut windows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for iw_id in iw_ids {
+        if let Some(uws) = orig_iw_to_unstag.get(iw_id) {
+            for uw in uws {
+                let key = uw.center_mz.to_bits();
+                if seen.insert(key) {
+                    windows.push((uw.center_mz, uw.lower_mz, uw.upper_mz));
+                }
+            }
+        }
+    }
+    windows
 }
 
 // ============================================================================

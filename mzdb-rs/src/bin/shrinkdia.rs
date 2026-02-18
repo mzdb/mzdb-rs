@@ -323,7 +323,8 @@ fn run_simplify(command: Commands) {
                 // Dispatch statistics
                 let ds = &stats.dispatch_stats;
                 println!("\nSignal Dispatch:");
-                println!("  2-window peakels (deterministic):    {}", ds.two_window_peakels);
+                println!("  2-window → single assign (confident):{}", ds.two_window_single_assign);
+                println!("  2-window → duplicated (safeguard):   {}", ds.two_window_duplicated);
                 println!("  1-window peakels (strategy-dep.):    {}", ds.single_window_peakels);
                 println!("  3+-window peakels (resolved to ovlp):{}", ds.multi_window_resolved);
                 println!("  3+-window peakels (duplicated):      {}", ds.multi_window_duplicated);
