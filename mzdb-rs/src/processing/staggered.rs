@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow_ext::Result;
 use roxmltree::Document;
@@ -245,18 +245,21 @@ impl StaggeredDiaDetector {
             return Ok(StaggeredDiaInfo::not_staggered());
         }
 
-        self.detect_from_windows_with_cycles(&windows_with_cycles)
+        // Separate windows into two series using scan order (m/z drop detection)
+        let (cycle_a_windows, cycle_b_windows) =
+            self.separate_by_scan_order(conn, &windows_with_cycles);
+
+        self.build_stagger_info(&windows_with_cycles, cycle_a_windows, cycle_b_windows)
     }
 
-    /// Detect staggered mode from pre-loaded windows with cycle info
-    pub fn detect_from_windows_with_cycles(
+    /// Core stagger info construction shared by both detect paths.
+    fn build_stagger_info(
         &self,
         windows_with_cycles: &[(IsolationWindow, Vec<i32>)],
+        cycle_a_windows: Vec<IsolationWindow>,
+        cycle_b_windows: Vec<IsolationWindow>,
     ) -> Result<StaggeredDiaInfo> {
-        // Separate windows by cycle parity
-        let (odd_windows, even_windows) = self.separate_by_cycle_parity(windows_with_cycles);
-
-        if odd_windows.is_empty() || even_windows.is_empty() {
+        if cycle_a_windows.is_empty() || cycle_b_windows.is_empty() {
             log::info!("Only one cycle pattern found - not staggered");
             return Ok(StaggeredDiaInfo::not_staggered());
         }
@@ -265,7 +268,7 @@ impl StaggeredDiaDetector {
         let avg_width = self.average_window_width(windows_with_cycles);
 
         // Calculate offset between the two window sets
-        let offset = self.calculate_offset(&odd_windows, &even_windows);
+        let offset = self.calculate_offset(&cycle_a_windows, &cycle_b_windows);
 
         // Verify staggered pattern: offset should be approximately half the width
         let expected_offset = avg_width / 2.0;
@@ -281,19 +284,19 @@ impl StaggeredDiaDetector {
         }
 
         log::info!(
-            "Staggered DIA detected: offset={:.2} Da, width={:.2} Da",
-            offset, avg_width
+            "Staggered DIA detected: offset={:.2} Da, width={:.2} Da, series A={} windows, series B={} windows",
+            offset, avg_width, cycle_a_windows.len(), cycle_b_windows.len()
         );
 
         // Generate unstaggered windows
-        let unstaggered_windows = self.generate_unstaggered_windows(&odd_windows, &even_windows);
+        let unstaggered_windows = self.generate_unstaggered_windows(&cycle_a_windows, &cycle_b_windows);
 
         Ok(StaggeredDiaInfo {
             is_staggered: true,
             window_offset: offset,
             window_width: avg_width,
-            cycle_a_windows: odd_windows,
-            cycle_b_windows: even_windows,
+            cycle_a_windows,
+            cycle_b_windows,
             unstaggered_windows,
         })
     }
@@ -394,44 +397,114 @@ impl StaggeredDiaDetector {
         Ok(result)
     }
 
-    /// Separate windows by cycle parity (odd vs even cycles)
-    fn separate_by_cycle_parity(
+    /// Separate windows into two staggered series by detecting DIA cycle boundaries
+    /// from the actual scan order.
+    ///
+    /// A new DIA cycle starts whenever the precursor m/z drops below the previous
+    /// MS2 spectrum's value. The first two distinct window sets found define
+    /// series A and B. Each window is assigned to the series it appears in.
+    fn separate_by_scan_order(
         &self,
+        conn: &Connection,
         windows_with_cycles: &[(IsolationWindow, Vec<i32>)],
     ) -> (Vec<IsolationWindow>, Vec<IsolationWindow>) {
-        let mut odd_windows = Vec::new();
-        let mut even_windows = Vec::new();
+        // Query MS2 spectra in scan order to detect cycle boundaries
+        let mut stmt = conn.prepare(
+            "SELECT main_precursor_mz FROM spectrum \
+             WHERE ms_level = 2 AND main_precursor_mz IS NOT NULL \
+             ORDER BY id"
+        ).unwrap();
 
-        for (window, cycles) in windows_with_cycles {
-            // Check which cycle types this window belongs to
-            let has_odd = cycles.iter().any(|&c| c % 2 == 1);
-            let has_even = cycles.iter().any(|&c| c % 2 == 0);
+        let precursor_mzs: Vec<f64> = stmt
+            .query_map([], |row| row.get::<_, f64>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
 
-            // In staggered DIA, each window should belong to only odd OR even cycles
-            if has_odd && !has_even {
-                odd_windows.push(window.clone());
-            } else if has_even && !has_odd {
-                even_windows.push(window.clone());
-            } else {
-                // Window appears in both odd and even cycles.
-                // This is common in staggered DIA where every window appears in every cycle
-                // but the primary series is determined by the first cycle of appearance.
-                // Use min(cycle) parity as the tie-breaker: the first cycle a window appears
-                // in indicates its primary series assignment.
-                let min_cycle = cycles.iter().copied().min().unwrap_or(1);
-                if min_cycle % 2 == 1 {
-                    odd_windows.push(window.clone());
-                } else {
-                    even_windows.push(window.clone());
+        if precursor_mzs.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        // Detect cycle boundaries: m/z drops indicate new cycle start
+        // Collect the first two distinct cycle patterns
+        let mut pattern_a: Option<Vec<i64>> = None;
+        let mut pattern_b: Option<Vec<i64>> = None;
+        let mut current_cycle_keys: Vec<i64> = Vec::new();
+        let mut prev_mz = 0.0f64;
+
+        for &mz in &precursor_mzs {
+            if mz < prev_mz && !current_cycle_keys.is_empty() {
+                // Cycle boundary — identify this cycle's pattern
+                let key_set: Vec<i64> = current_cycle_keys.clone();
+
+                match (&pattern_a, &pattern_b) {
+                    (None, _) => {
+                        pattern_a = Some(key_set);
+                    }
+                    (Some(pa), None) => {
+                        if key_set != *pa {
+                            pattern_b = Some(key_set);
+                            break; // We have both patterns
+                        }
+                    }
+                    _ => break,
+                }
+                current_cycle_keys.clear();
+            }
+            current_cycle_keys.push((mz * 100.0).round() as i64);
+            prev_mz = mz;
+        }
+
+        // Handle the last cycle if we still need pattern_b
+        if pattern_b.is_none() && !current_cycle_keys.is_empty() {
+            if let Some(pa) = &pattern_a {
+                if current_cycle_keys != *pa {
+                    pattern_b = Some(current_cycle_keys);
                 }
             }
         }
 
-        // Sort by target m/z
-        odd_windows.sort_by(|a, b| a.target_mz.total_cmp(&b.target_mz));
-        even_windows.sort_by(|a, b| a.target_mz.total_cmp(&b.target_mz));
+        let (pat_a, pat_b) = match (pattern_a, pattern_b) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                log::warn!("Could not detect two distinct cycle patterns from scan order");
+                return (Vec::new(), Vec::new());
+            }
+        };
 
-        (odd_windows, even_windows)
+        // Convert patterns to HashSets for O(1) lookup
+        let set_a: HashSet<i64> = pat_a.iter().copied().collect();
+        let set_b: HashSet<i64> = pat_b.iter().copied().collect();
+
+        log::info!(
+            "Cycle patterns from scan order: series A = {} windows, series B = {} windows",
+            set_a.len(), set_b.len()
+        );
+
+        // Assign each window to its series
+        let mut cycle_a_windows = Vec::new();
+        let mut cycle_b_windows = Vec::new();
+
+        for (window, _) in windows_with_cycles {
+            let key = (window.target_mz * 100.0).round() as i64;
+            if set_a.contains(&key) {
+                cycle_a_windows.push(window.clone());
+            } else if set_b.contains(&key) {
+                cycle_b_windows.push(window.clone());
+            } else {
+                // Window not in either pattern — assign to the closest series by m/z
+                log::warn!(
+                    "Window {:.2} not found in either cycle pattern, skipping",
+                    window.target_mz
+                );
+            }
+        }
+
+        // Sort by target m/z
+        cycle_a_windows.sort_by(|a, b| a.target_mz.total_cmp(&b.target_mz));
+        cycle_b_windows.sort_by(|a, b| a.target_mz.total_cmp(&b.target_mz));
+
+        (cycle_a_windows, cycle_b_windows)
     }
 
     /// Calculate average window width by looking at spacing within same-parity windows
@@ -546,13 +619,15 @@ impl StaggeredDiaDetector {
         cycle_a: &[IsolationWindow],
         cycle_b: &[IsolationWindow],
     ) -> Vec<UnstaggeredWindow> {
-        // Boundary event for sweep line algorithm
+        // Boundary event for sweep line algorithm.
+        // End events carry the window id they belong to, so we only clear state
+        // when the *current* window ends (not a stale one from a same-series overlap).
         #[derive(Debug, Clone)]
         enum BoundaryEvent {
             CycleAStart(IsolationWindow),
-            CycleAEnd,
+            CycleAEnd(i64), // id of the window ending
             CycleBStart(IsolationWindow),
-            CycleBEnd,
+            CycleBEnd(i64), // id of the window ending
         }
 
         // Collect all boundary events
@@ -560,15 +635,26 @@ impl StaggeredDiaDetector {
 
         for win in cycle_a {
             events.push((win.lower_mz, BoundaryEvent::CycleAStart(win.clone())));
-            events.push((win.upper_mz, BoundaryEvent::CycleAEnd));
+            events.push((win.upper_mz, BoundaryEvent::CycleAEnd(win.id)));
         }
         for win in cycle_b {
             events.push((win.lower_mz, BoundaryEvent::CycleBStart(win.clone())));
-            events.push((win.upper_mz, BoundaryEvent::CycleBEnd));
+            events.push((win.upper_mz, BoundaryEvent::CycleBEnd(win.id)));
         }
 
-        // Sort by m/z position
-        events.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Sort by m/z position. For events at the same m/z, process End before Start
+        // to avoid transient states where both old and new windows appear active.
+        events.sort_by(|a, b| {
+            a.0.total_cmp(&b.0).then_with(|| {
+                let order = |e: &BoundaryEvent| -> u8 {
+                    match e {
+                        BoundaryEvent::CycleAEnd(_) | BoundaryEvent::CycleBEnd(_) => 0,
+                        BoundaryEvent::CycleAStart(_) | BoundaryEvent::CycleBStart(_) => 1,
+                    }
+                };
+                order(&a.1).cmp(&order(&b.1))
+            })
+        });
 
         // Sweep line to create non-overlapping windows
         let mut unstaggered = Vec::new();
@@ -606,12 +692,22 @@ impl StaggeredDiaDetector {
                 }
             }
 
-            // Update state based on event type
+            // Update state based on event type.
+            // End events only clear state if they match the currently active window,
+            // preventing a stale End from clearing a newer same-series window.
             match event {
                 BoundaryEvent::CycleAStart(win) => current_cycle_a = Some(win.clone()),
-                BoundaryEvent::CycleAEnd => current_cycle_a = None,
+                BoundaryEvent::CycleAEnd(id) => {
+                    if current_cycle_a.as_ref().is_some_and(|w| w.id == *id) {
+                        current_cycle_a = None;
+                    }
+                }
                 BoundaryEvent::CycleBStart(win) => current_cycle_b = Some(win.clone()),
-                BoundaryEvent::CycleBEnd => current_cycle_b = None,
+                BoundaryEvent::CycleBEnd(id) => {
+                    if current_cycle_b.as_ref().is_some_and(|w| w.id == *id) {
+                        current_cycle_b = None;
+                    }
+                }
             }
 
             last_mz = *mz;
