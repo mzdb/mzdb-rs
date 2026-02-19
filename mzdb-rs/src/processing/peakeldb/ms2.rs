@@ -229,6 +229,7 @@ CREATE INDEX peakel_map_id_idx ON peakel (map_id);
 /// ```
 pub struct Ms2PeakelDbWriter {
     conn: Connection,
+    output_path: std::path::PathBuf,
     stats: PeakelWriterStats,
     closed: bool,
 }
@@ -268,8 +269,11 @@ impl Ms2PeakelDbWriter {
             std::fs::remove_file(path.as_ref())?;
         }
 
-        let conn = Connection::open(path.as_ref())
-            .context("Failed to create peakelDB file")?;
+        let output_path = path.as_ref().to_path_buf();
+
+        // Work in memory for fast R-tree population, then flush to disk on close
+        let conn = Connection::open_in_memory()
+            .context("Failed to create in-memory peakelDB")?;
 
         // SQLite optimizations
         conn.execute_batch(
@@ -328,6 +332,7 @@ impl Ms2PeakelDbWriter {
 
         Ok(Self {
             conn,
+            output_path,
             stats: PeakelWriterStats::new(),
             closed: false,
         })
@@ -435,7 +440,7 @@ impl Ms2PeakelDbWriter {
         Ok(())
     }
 
-    /// Finalize the database: commit the transaction and update peakel count.
+    /// Finalize the database: commit the transaction, then flush to disk.
     fn close_impl(&mut self) -> Result<()> {
         if self.closed {
             return Ok(());
@@ -445,7 +450,13 @@ impl Ms2PeakelDbWriter {
 
         let peakel_count = self.finalize_peakeldb()?;
 
-        log::info!("MS2 DIA peakelDB closed: {} peakels written", peakel_count);
+        // Flush in-memory database to disk as a single sequential write
+        let path_str = self.output_path.to_str()
+            .context("Invalid output path")?;
+        self.conn.execute("VACUUM INTO ?1", params![path_str])
+            .context("Failed to flush peakelDB to disk")?;
+
+        log::info!("MS2 DIA peakelDB closed: {} peakels written to {:?}", peakel_count, self.output_path);
 
         Ok(())
     }
