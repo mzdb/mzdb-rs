@@ -296,6 +296,7 @@ fn run_simplify(command: Commands) {
 
     // Apply unstagger options if provided
     if let Some(strategy) = single_obs_strategy {
+        config.unstagger = true;
         config.single_observation_strategy = strategy;
     }
 

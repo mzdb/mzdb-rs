@@ -55,8 +55,14 @@ pub struct DiaSimplifierConfig {
     pub points_per_peakel: usize,
     /// m/z merge tolerance - peaks within this distance are merged
     pub mz_merge_tolerance: f32,
+    /// Whether to unstagger staggered DIA acquisitions.
+    /// When false (simplify mode), original isolation windows are preserved and
+    /// spectra are simplified 1:1. When true (unstagger mode), staggered windows
+    /// are split into non-overlapping sub-windows with signal dispatch.
+    pub unstagger: bool,
     /// Strategy for handling peakels observed in only one cycle's isolation window
-    /// (cannot determine precise unstaggered sub-window assignment)
+    /// (cannot determine precise unstaggered sub-window assignment).
+    /// Only used when `unstagger` is true.
     pub single_observation_strategy: SingleObservationStrategy,
 }
 
@@ -65,6 +71,7 @@ impl Default for DiaSimplifierConfig {
         Self {
             points_per_peakel: 3,
             mz_merge_tolerance: 0.001,
+            unstagger: false,
             single_observation_strategy: SingleObservationStrategy::Duplicate,
         }
     }
@@ -247,9 +254,16 @@ impl DiaSimplifier {
         log::info!("Checking for staggered DIA acquisition...");
         let stagger_info = detect_staggered_from_mzdb(&mzdb_conn)?;
 
+        // Only activate the staggered pipeline when unstaggering is requested
+        let use_staggered_pipeline = stagger_info.is_staggered && self.config.unstagger;
+
+        if stagger_info.is_staggered && !self.config.unstagger {
+            log::info!("Staggered DIA detected but unstaggering not requested — using simple simplification");
+        }
+
         // Build isolation window lookup - use unstaggered windows if staggered DIA detected
         let (window_lookup, staggered_detected, staggered_offset, unstaggered_window_count) =
-            if stagger_info.is_staggered {
+            if use_staggered_pipeline {
                 log::info!("╔══════════════════════════════════════════════╗");
                 log::info!("║        STAGGERED DIA DETECTED                ║");
                 log::info!("╠══════════════════════════════════════════════╣");
