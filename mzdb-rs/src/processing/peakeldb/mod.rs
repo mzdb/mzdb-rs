@@ -13,13 +13,12 @@
 //! # Common Types
 //!
 //! The `common` module provides shared types:
-//! - `PeakelSerializer`: Static methods for MessagePack serialization/deserialization
 //! - `ExtendedPeakel`: Complete peakel with summary fields + raw data
 //!
 //! # Example
 //!
 //! ```no_run
-//! use mzdb::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel, PeakelSerializer};
+//! use mzdb::processing::peakeldb::{Ms2PeakelDbReader, ExtendedPeakel};
 //!
 //! // Read MS2 DIA peakeldb
 //! let reader = Ms2PeakelDbReader::open("peakels.peakeldb").unwrap();
@@ -33,7 +32,7 @@ pub mod ms2;
 
 // Re-export common types
 pub use common::{
-    ExtendedPeakel, PeakelSerializer, PeakelWriterStats, PeakelDbWriter,
+    ExtendedPeakel, PeakelWriterStats, PeakelDbWriter,
     chrono_lite_timestamp,
 };
 

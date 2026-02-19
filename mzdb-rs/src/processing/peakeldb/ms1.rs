@@ -20,6 +20,52 @@ use crate::processing::{Peakel, HasPeakelData};
 use super::common::{chrono_lite_timestamp, PeakelWriterStats, PeakelDbWriter};
 
 // ============================================================================
+// MS1 PeakelSerializer - Legacy 4-array MessagePack format
+// ============================================================================
+
+/// MS1 peakel serialization using the legacy 4-array MessagePack format.
+///
+/// # Format
+/// MessagePack tuple of 4 arrays: `[spectrum_ids (i64), elution_times (f32), mz_values (f64), intensities (f32)]`
+/// Compatible with Scala mzdb-processing MessagePack format.
+struct Ms1PeakelSerializer;
+
+impl Ms1PeakelSerializer {
+    /// Serialize peakel data to MessagePack bytes (legacy 4-array format).
+    fn to_msgpack<T: HasPeakelData>(peakel: &T) -> anyhow_ext::Result<Vec<u8>> {
+        let data = (
+            peakel.spectrum_ids(),
+            peakel.elution_times(),
+            peakel.mz_values(),
+            peakel.intensity_values(),
+        );
+        rmp_serde::to_vec(&data)
+            .map_err(|e| anyhow_ext::anyhow!("msgpack serialization error: {}", e))
+    }
+
+    /// Deserialize MessagePack bytes to a new Peakel (legacy 4-array format).
+    fn from_msgpack(bytes: &[u8]) -> anyhow_ext::Result<Peakel> {
+        let (spectrum_ids, elution_times, mz_values_f64, intensity_values):
+            (Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>) =
+            rmp_serde::from_slice(bytes)
+                .map_err(|e| anyhow_ext::anyhow!("msgpack deserialization error: {}", e))?;
+
+        // mz_values: f64 in peakelDB, f32 in memory
+        let mz_values: Vec<f32> = mz_values_f64.into_iter().map(|mz| mz as f32).collect();
+
+        Peakel::from_vectors(
+            spectrum_ids,
+            elution_times,
+            mz_values,
+            intensity_values,
+            None,
+            None,
+            0,
+        )
+    }
+}
+
+// ============================================================================
 // Schema
 // ============================================================================
 
@@ -249,7 +295,7 @@ impl Ms1PeakelDbWriter {
             let max_time = peakel.max_time();
             let min_intensity = peakel.calc_min_intensity();
 
-            let peaks_blob = super::PeakelSerializer::to_msgpack(peakel)?;
+            let peaks_blob = Ms1PeakelSerializer::to_msgpack(peakel)?;
             let left_hwhm_mean = peakel.left_hwhm_mean();
             let right_hwhm_mean = peakel.right_hwhm_mean();
             let first_spectrum_id = peakel.first_spectrum_id().unwrap_or(0);
@@ -429,7 +475,7 @@ impl Ms1PeakelDbReader {
             ) = result?;
 
             // Parse the MessagePack peaks blob
-            let data = super::PeakelSerializer::from_msgpack(&peaks_blob)?;
+            let data = Ms1PeakelSerializer::from_msgpack(&peaks_blob)?;
 
             peakels.push(super::ExtendedPeakel::new(
                 id,

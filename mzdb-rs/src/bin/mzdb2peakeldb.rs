@@ -362,9 +362,9 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
 
     match args.format.as_str() {
         "sqlite" => {
-            // Create writer with windows metadata
+            // Create writer with windows metadata and spectrum headers
             let mut writer = Ms2PeakelDbWriter::create(
-                &args.output_file_path, input_filename, &windows
+                &args.output_file_path, input_filename, reader.get_spectrum_headers(), &windows
             )?;
 
             // Stream peakel batches directly to SQLite

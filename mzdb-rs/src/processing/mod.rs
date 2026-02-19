@@ -110,7 +110,7 @@ pub use math::{
 
 // Re-export peakeldb types
 pub use peakeldb::{
-    ExtendedPeakel, PeakelSerializer, PeakelWriterStats, PeakelDbWriter,
+    ExtendedPeakel, PeakelWriterStats, PeakelDbWriter,
     chrono_lite_timestamp,
     Ms1PeakelDbReader, Ms1PeakelDbWriter, Ms1PeakelDbSchema, Ms1PeakelRecord,
     Ms2PeakelDbReader, Ms2PeakelDbWriter, Ms2PeakelDbSchema,

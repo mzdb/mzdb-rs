@@ -1,7 +1,6 @@
 //! Common utilities for peakelDB operations
 //!
 //! This module provides shared types and functions for peakelDB operations:
-//! - `PeakelSerializer`: Static methods for MessagePack serialization/deserialization of peakel data
 //! - `ExtendedPeakel`: Complete peakel with summary fields + raw data (for DB read/write)
 //! - `PeakelWriterStats`: Running statistics accumulated during batch writes
 //! - `PeakelDbWriter`: Trait shared by MS1 and MS2 peakelDB writers
@@ -162,71 +161,7 @@ impl PeakelWriterStats {
     }
 }
 
-// ============================================================================
-// PeakelSerializer - MessagePack serialization/deserialization
-// ============================================================================
 
-/// Utility struct for MessagePack serialization and deserialization of peakel data.
-/// 
-/// Provides static methods to serialize any `HasPeakelData` implementor to MessagePack
-/// and deserialize MessagePack bytes back to `Peakel`.
-/// 
-/// # Format
-/// MessagePack tuple of 4 arrays: `[spectrum_ids, elution_times, mz_values, intensities]`
-/// Compatible with Scala mzdb-processing MessagePack format.
-/// 
-/// # Example
-/// ```ignore
-/// use mzdb::processing::{Peakel, PeakelSerializer};
-/// 
-/// // Serialize any HasPeakelData implementor
-/// let peakel: Peakel = /* ... */;
-/// let blob = PeakelSerializer::to_msgpack(&peakel)?;
-/// 
-/// // Deserialize back to Peakel
-/// let restored = PeakelSerializer::from_msgpack(&blob)?;
-/// ```
-pub struct PeakelSerializer;
-
-impl PeakelSerializer {
-    /// Serialize peakel data to MessagePack bytes.
-    /// 
-    /// Works with any type implementing `HasPeakelData` (Peakel, ExtendedPeakel, etc.)
-    pub fn to_msgpack<T: HasPeakelData>(peakel: &T) -> Result<Vec<u8>> {
-        let data = (
-            peakel.spectrum_ids(),
-            peakel.elution_times(),
-            peakel.mz_values(),
-            peakel.intensity_values(),
-        );
-        rmp_serde::to_vec(&data)
-            .map_err(|e| anyhow_ext::anyhow!("msgpack serialization error: {}", e))
-    }
-    
-    /// Deserialize MessagePack bytes to a new Peakel.
-    /// 
-    /// Creates a Peakel with gap_count=0 and no HWHM data.
-    /// Note: gap_count and other metadata come from database columns, not the msgpack blob.
-    pub fn from_msgpack(bytes: &[u8]) -> Result<Peakel> {
-        let (spectrum_ids, elution_times, mz_values_f64, intensity_values):
-            (Vec<i64>, Vec<f32>, Vec<f64>, Vec<f32>) = 
-            rmp_serde::from_slice(bytes)
-                .map_err(|e| anyhow_ext::anyhow!("msgpack deserialization error: {}", e))?;
-
-        // mz_values: f64 in peakelDB, f32 in memory
-        let mz_values: Vec<f32> = mz_values_f64.into_iter().map(|mz| mz as f32).collect();
-        
-        Peakel::from_vectors(
-            spectrum_ids,
-            elution_times,
-            mz_values,
-            intensity_values,
-            None,
-            None,
-            0, // FIXME: this is fragile and may create some inconsistencies
-        )
-    }
-}
 
 // ============================================================================
 // ============================================================================
