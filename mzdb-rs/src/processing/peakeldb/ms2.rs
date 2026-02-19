@@ -98,7 +98,6 @@ CREATE VIRTUAL TABLE peakel_rtree USING rtree(
 CREATE INDEX peakel_moz_idx ON peakel (moz);
 CREATE INDEX peakel_elution_time_idx ON peakel (elution_time);
 CREATE INDEX peakel_isolation_window_idx ON peakel (isolation_window_id);
-CREATE INDEX peakel_precursor_mz_idx ON peakel (precursor_mz);
 CREATE INDEX peakel_map_id_idx ON peakel (map_id);
 "#;
 }
@@ -379,7 +378,7 @@ impl Ms2PeakelDbReader {
             "SELECT id, moz, elution_time, duration, gap_count, apex_intensity,
                     area, amplitude, peak_count, peaks, serialized_properties,
                     first_spectrum_id, apex_spectrum_id, last_spectrum_id,
-                    isolation_window_id, precursor_mz
+                    isolation_window_id
              FROM peakel
              ORDER BY id",
         )?;
@@ -396,12 +395,11 @@ impl Ms2PeakelDbReader {
                 row.get::<_, f32>(6)?,    // area
                 row.get::<_, f32>(7)?,    // amplitude
                 row.get::<_, i32>(8)?,    // peak_count -> peaks_count
-                peaks_blob,               // peaks (index 9)
+                peaks_blob,                   // peaks (index 9)
                 row.get::<_, i64>(11)?,   // first_spectrum_id
                 row.get::<_, i64>(12)?,   // apex_spectrum_id
                 row.get::<_, i64>(13)?,   // last_spectrum_id
                 row.get::<_, i64>(14)?,   // isolation_window_id
-                row.get::<_, f64>(15)?,   // precursor_mz (keep f64 for precursor)
             ))
         })?;
 
@@ -423,7 +421,6 @@ impl Ms2PeakelDbReader {
                 apex_spectrum_id,
                 last_spectrum_id,
                 isolation_window_id,
-                precursor_mz,
             ) = result?;
 
             // Parse the MessagePack peaks blob
@@ -443,7 +440,6 @@ impl Ms2PeakelDbReader {
                 apex_spectrum_id,
                 last_spectrum_id,
                 isolation_window_id,
-                precursor_mz,
                 data,
             ));
         }
@@ -488,7 +484,6 @@ mod tests {
             102,        // apex_spectrum_id
             104,        // last_spectrum_id
             1,          // isolation_window_id
-            500.0,      // precursor_mz
             data,
         );
 

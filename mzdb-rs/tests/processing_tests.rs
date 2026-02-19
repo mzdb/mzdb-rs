@@ -509,7 +509,7 @@ fn test_walking_peakel_detection() -> Result<()> {
     if !detected_peakels.is_empty() {
         // Sort by intensity
         detected_peakels.sort_by(|a, b| 
-            b.apex_intensity().total_cmp(&a.apex_intensity())
+            b.apex_intensity().unwrap_or(0.0).total_cmp(&a.apex_intensity().unwrap_or(0.0))
         );
         
         println!("\nTop 10 peakels by intensity:");

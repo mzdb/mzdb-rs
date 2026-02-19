@@ -27,7 +27,7 @@
 //! }
 //! ```
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow_ext::Result;
 use roxmltree::Document;

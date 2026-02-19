@@ -271,8 +271,6 @@ pub struct ExtendedPeakel {
     // MS2 DIA specific fields (optional)
     /// Isolation window ID (for MS2 DIA peakels)
     pub isolation_window_id: Option<i64>,
-    /// Precursor m/z (for MS2 DIA peakels)
-    pub precursor_mz: Option<f64>,
     
     /// Raw peaks data
     pub data: Peakel,
@@ -309,7 +307,6 @@ impl ExtendedPeakel {
             apex_spectrum_id,
             last_spectrum_id,
             isolation_window_id: None,
-            precursor_mz: None,
             data,
         }
     }
@@ -329,7 +326,6 @@ impl ExtendedPeakel {
         apex_spectrum_id: i64,
         last_spectrum_id: i64,
         isolation_window_id: i64,
-        precursor_mz: f64,
         data: Peakel,
     ) -> Self {
         Self {
@@ -346,7 +342,6 @@ impl ExtendedPeakel {
             apex_spectrum_id,
             last_spectrum_id,
             isolation_window_id: Some(isolation_window_id),
-            precursor_mz: Some(precursor_mz),
             data,
         }
     }
@@ -422,7 +417,6 @@ impl From<&Peakel> for ExtendedPeakel {
             apex_spectrum_id: peakel.apex_spectrum_id().unwrap_or(0),
             last_spectrum_id: peakel.spectrum_ids.last().copied().unwrap_or(0),
             isolation_window_id: None,
-            precursor_mz: None,
             data: peakel.clone(),
         }
     }
@@ -516,7 +510,7 @@ mod tests {
 
         let ms2 = ExtendedPeakel::new_ms2_dia(
             1, 500.0, 100.0, 10.0, 0, 1000.0, 5000.0, 10.0, 5,
-            1, 3, 5, 1, 400.0, data
+            1, 3, 5, 1, data
         );
         assert!(ms2.is_ms2_dia());
 
