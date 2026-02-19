@@ -179,13 +179,20 @@ CREATE TABLE peakel (
     FOREIGN KEY (map_id) REFERENCES lcms_map (id)
 );
 
-CREATE VIRTUAL TABLE peakel_rtree USING rtree(
-    id,
-    min_mz, max_mz,
-    min_time, max_time,
-    min_intensity, max_intensity
+CREATE TABLE peakel_rtree_staging (
+    id INTEGER NOT NULL PRIMARY KEY,
+    min_mz REAL NOT NULL,
+    max_mz REAL NOT NULL,
+    min_time REAL NOT NULL,
+    max_time REAL NOT NULL,
+    min_intensity REAL NOT NULL,
+    max_intensity REAL NOT NULL
 );
+"#;
 
+    /// SQL for creating indexes and R-tree after bulk data insertion.
+    /// Deferred to avoid incremental index maintenance overhead during writes.
+    const DEFERRED_INDEXES: &'static str = r#"
 CREATE INDEX ms2_spectrum_ref_iw_idx ON ms2_spectrum_ref (isolation_window_id);
 CREATE INDEX peakel_moz_idx ON peakel (moz);
 CREATE INDEX peakel_elution_time_idx ON peakel (elution_time);
@@ -194,6 +201,19 @@ CREATE INDEX peakel_apex_spectrum_idx ON peakel (apex_spectrum_id);
 CREATE INDEX peakel_last_spectrum_idx ON peakel (last_spectrum_id);
 CREATE INDEX peakel_isolation_window_idx ON peakel (isolation_window_id);
 CREATE INDEX peakel_map_id_idx ON peakel (map_id);
+
+CREATE VIRTUAL TABLE peakel_rtree USING rtree(
+    id,
+    min_mz, max_mz,
+    min_time, max_time,
+    min_intensity, max_intensity
+);
+
+INSERT INTO peakel_rtree (id, min_mz, max_mz, min_time, max_time, min_intensity, max_intensity)
+    SELECT id, min_mz, max_mz, min_time, max_time, min_intensity, max_intensity
+    FROM peakel_rtree_staging;
+
+DROP TABLE peakel_rtree_staging;
 "#;
 }
 
@@ -222,7 +242,7 @@ CREATE INDEX peakel_map_id_idx ON peakel (map_id);
 /// let reader = MzDbReader::open("input.mzDB").unwrap();
 /// let windows = reader.get_isolation_windows();
 /// let mut writer = Ms2PeakelDbWriter::create(
-///     "output.peakeldb", "input.mzDB", reader.get_spectrum_headers(), &windows
+///     "output.peakelDB", "input.mzDB", reader.get_spectrum_headers(), &windows
 /// ).unwrap();
 /// // ... write batches via write_peakels_batch() ...
 /// writer.close().unwrap();
@@ -243,9 +263,9 @@ impl Ms2PeakelDbWriter {
          isolation_window_id, map_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)";
 
-    /// SQL for inserting an R-tree entry
+    /// SQL for inserting an R-tree staging entry (bulk-loaded into R-tree on close)
     const RTREE_INSERT_SQL: &'static str =
-        "INSERT INTO peakel_rtree (id, min_mz, max_mz, min_time, max_time, min_intensity, max_intensity) 
+        "INSERT INTO peakel_rtree_staging (id, min_mz, max_mz, min_time, max_time, min_intensity, max_intensity) 
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
     /// Create a new MS2 DIA peakelDB file
@@ -271,7 +291,8 @@ impl Ms2PeakelDbWriter {
 
         let output_path = path.as_ref().to_path_buf();
 
-        // Work in memory for fast R-tree population, then flush to disk on close
+        // Work in memory for fast inserts (no disk I/O during writes),
+        // then flush to disk on close via VACUUM INTO
         let conn = Connection::open_in_memory()
             .context("Failed to create in-memory peakelDB")?;
 
@@ -440,7 +461,7 @@ impl Ms2PeakelDbWriter {
         Ok(())
     }
 
-    /// Finalize the database: commit the transaction, then flush to disk.
+    /// Finalize the database: commit, build indexes in memory, then flush to disk.
     fn close_impl(&mut self) -> Result<()> {
         if self.closed {
             return Ok(());
@@ -450,13 +471,24 @@ impl Ms2PeakelDbWriter {
 
         let peakel_count = self.finalize_peakeldb()?;
 
+        // Build indexes and R-tree in bulk after all data is inserted.
+        // This avoids incremental index maintenance overhead during writes.
+        log::info!("Building indexes and R-tree ({} peakels)...", peakel_count);
+        self.conn.execute_batch(Ms2PeakelDbSchema::DEFERRED_INDEXES)
+            .context("Failed to build deferred indexes")?;
+
+        // Populate query planner statistics for optimal read performance
+        self.conn.execute("PRAGMA optimize", [])
+            .context("Failed to optimize database")?;
+
         // Flush in-memory database to disk as a single sequential write
         let path_str = self.output_path.to_str()
             .context("Invalid output path")?;
+        log::info!("Flushing peakelDB to disk: {:?}", self.output_path);
         self.conn.execute("VACUUM INTO ?1", params![path_str])
             .context("Failed to flush peakelDB to disk")?;
 
-        log::info!("MS2 DIA peakelDB closed: {} peakels written to {:?}", peakel_count, self.output_path);
+        log::info!("MS2 DIA peakelDB closed: {} peakels written", peakel_count);
 
         Ok(())
     }
