@@ -332,7 +332,7 @@ impl Default for DiaMs2PeakelConfig {
     fn default() -> Self {
         Self {
             mz_tol_ppm: 10.0,
-            min_intensity: 100.0,
+            min_intensity: 0.0,
             min_peaks: 5,
             // Default of 3 bridges interleaved neighbor spectra in staggered DIA
             max_consecutive_gaps: 3,
@@ -671,6 +671,8 @@ impl DiaMs2PeakelDetector {
         a.upper_mz > b.lower_mz && b.upper_mz > a.lower_mz
     }
 
+    /// Discover all isolation windows in the mzDB file
+    ///
     /// Detect peakels for a single isolation window
     ///
     /// This method loads MS2 spectra only for the specified isolation window,

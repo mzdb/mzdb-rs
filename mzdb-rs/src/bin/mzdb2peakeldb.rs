@@ -3,30 +3,28 @@
 //! This command-line tool extracts chromatographic peaks (peakels) from mzDB files
 //! and exports them to a peakelDB SQLite database.
 //!
-//! Supports both:
-//! - MS1 peakel detection (default)
-//! - MS2 peakel detection for DIA data (--ms-level 2)
+//! # Subcommands
+//!
+//! - `ms1`: MS1 peakel detection
+//! - `ms2`: MS2 peakel detection for DIA data
 //!
 //! # Usage
 //!
 //! ```bash
-//! # MS1 peakel detection (default)
-//! mzdb2peakeldb -i input.mzDB -o output.peakeldb
+//! # MS1 peakel detection
+//! mzdb2peakeldb ms1 -i input.mzDB -o output.peakelDB
 //!
 //! # MS2 peakel detection for DIA data
-//! mzdb2peakeldb -i input.mzDB -o output.peakeldb --ms-level 2
+//! mzdb2peakeldb ms2 -i input.mzDB -o output.peakelDB
 //!
-//! # Use 4 threads for parallel processing
-//! mzdb2peakeldb -i input.mzDB -o output.peakeldb --threads 4
-//!
-//! # Use all available CPUs
-//! mzdb2peakeldb -i input.mzDB -o output.peakeldb --threads auto
+//! # Override defaults
+//! mzdb2peakeldb ms2 -i input.mzDB -o output.peakelDB --mz-tol 20 --threads 4
 //! ```
 
 use std::path::{Path, PathBuf};
 
 use anyhow_ext::{anyhow, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use mzdb::MzDbReader;
 
@@ -42,7 +40,7 @@ use mzdb::processing::{
 };
 
 /// Detect peakels from mzDB files and export to peakelDB
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug)]
 #[command(
     name = "mzdb2peakeldb",
     author,
@@ -50,77 +48,141 @@ use mzdb::processing::{
     about = "Detect MS1 or MS2 peakels from mzDB files",
     long_about = None
 )]
-struct Args {
-    /// Path to the mzDB file
-    #[arg(short = 'i', long = "input")]
-    mzdb_file_path: PathBuf,
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Output peakelDB file path (SQLite database or TSV)
-    #[arg(short = 'o', long = "output")]
-    output_file_path: PathBuf,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Detect MS1 peakels
+    Ms1 {
+        /// Path to the mzDB file
+        #[arg(short = 'i', long = "input")]
+        mzdb_file_path: PathBuf,
 
-    /// MS level to process: 1 for MS1 peakels, 2 for DIA MS2 peakels
-    #[arg(long = "ms-level", default_value = "1")]
-    ms_level: u8,
+        /// Output peakelDB file path (SQLite database or TSV)
+        #[arg(short = 'o', long = "output")]
+        output_file_path: PathBuf,
 
-    /// m/z tolerance in PPM for XIC extraction
-    #[arg(long = "mz-tol", default_value = "10.0")]
-    mz_tol_ppm: f32,
+        /// m/z tolerance in PPM for XIC extraction
+        #[arg(long = "mz-tol", default_value = "10.0")]
+        mz_tol_ppm: f32,
 
-    /// Minimum intensity threshold for peak detection
-    #[arg(long = "min-intensity", default_value = "0.0")]
-    min_intensity: f32,
+        /// Minimum intensity threshold for peak detection
+        #[arg(long = "min-intensity", default_value = "0.0")]
+        min_intensity: f32,
 
-    /// Minimum number of points per peakel
-    #[arg(long = "min-peaks", default_value = "5")]
-    min_peaks: usize,
+        /// Minimum number of points per peakel
+        #[arg(long = "min-peaks", default_value = "5")]
+        min_peaks: usize,
 
-    /// Maximum consecutive gaps in XIC before stopping walk.
-    /// For staggered DIA (overlapping windows), neighbor spectra are interleaved
-    /// in the timeline and appear as gaps. Use >=3 for staggered DIA to bridge
-    /// over interleaved neighbor spectra. For non-staggered DIA, 1 may suffice.
-    #[arg(long = "max-gaps", default_value = "3")]
-    max_consecutive_gaps: usize,
+        /// Maximum consecutive gaps in XIC before stopping walk
+        #[arg(long = "max-gaps", default_value = "3")]
+        max_consecutive_gaps: usize,
 
-    /// Maximum total gaps across both walking directions (default: unlimited)
-    #[arg(long = "max-total-gaps", default_value = "4294967295")]
-    max_total_gaps: usize,
+        /// Maximum total gaps across both walking directions (default: unlimited)
+        #[arg(long = "max-total-gaps", default_value = "4294967295")]
+        max_total_gaps: usize,
 
-    /// Intensity percentile threshold (0.0-1.0) for peak filtering
-    /// Peaks below this percentile will be skipped during walking
-    #[arg(long = "intensity-pct", default_value = "0.9")]
-    intensity_percentile: f32,
+        /// Intensity percentile threshold (0.0-1.0) for peak filtering
+        #[arg(long = "intensity-pct", default_value = "0.9")]
+        intensity_percentile: f32,
 
-    /// Minimum peakel amplitude (apex/min intensity ratio).
-    /// If not specified, uses algorithm default (1.5 for MS1, 1.0 for DIA MS2).
-    #[arg(long = "min-amplitude")]
-    min_peakel_amplitude: Option<f32>,
+        /// Minimum peakel amplitude (apex/min intensity ratio)
+        #[arg(long = "min-amplitude", default_value = "1.5")]
+        min_peakel_amplitude: f32,
 
-    /// Minimum peakel duration in seconds
-    #[arg(long = "min-duration", default_value = "0.0")]
-    min_peakel_duration: f32,
+        /// Minimum peakel duration in seconds
+        #[arg(long = "min-duration", default_value = "0.0")]
+        min_peakel_duration: f32,
 
-    /// Algorithm: 'basic' or 'smart'
-    #[arg(long = "algo", default_value = "smart")]
-    algo: String,
+        /// Algorithm: 'basic' or 'smart'
+        #[arg(long = "algo", default_value = "smart")]
+        algo: String,
 
-    /// Require apex to not be at peakel boundary (first or last peak).
-    /// By default this check is skipped (matching Scala reference implementation).
-    /// Use this flag to enable the check.
-    #[arg(long = "require-apex-boundary")]
-    require_apex_boundary: bool,
+        /// Require apex to not be at peakel boundary (first or last peak)
+        #[arg(long = "require-apex-boundary")]
+        require_apex_boundary: bool,
 
-    /// Export format: 'sqlite' or 'tsv'
-    #[arg(long = "format", default_value = "sqlite")]
-    format: String,
+        /// Export format: 'sqlite' or 'tsv'
+        #[arg(long = "format", default_value = "sqlite")]
+        format: String,
 
-    /// Number of threads: 1 for single-threaded, 'auto' for all CPUs, or a specific number
-    #[arg(long = "threads", default_value = "1")]
-    threads: String,
+        /// Number of threads: 'auto' for all CPUs, or a specific number
+        #[arg(long = "threads", default_value = "auto")]
+        threads: String,
 
-    /// Verbosity level (-v, -vv, -vvv)
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    verbose: u8,
+        /// Verbosity level (-v, -vv, -vvv)
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
+    },
+
+    /// Detect MS2 peakels for DIA data
+    Ms2 {
+        /// Path to the mzDB file
+        #[arg(short = 'i', long = "input")]
+        mzdb_file_path: PathBuf,
+
+        /// Output peakelDB file path (SQLite database or TSV)
+        #[arg(short = 'o', long = "output")]
+        output_file_path: PathBuf,
+
+        /// m/z tolerance in PPM for XIC extraction
+        #[arg(long = "mz-tol", default_value = "15.0")]
+        mz_tol_ppm: f32,
+
+        /// Minimum intensity threshold for peak detection
+        #[arg(long = "min-intensity", default_value = "0.0")]
+        min_intensity: f32,
+
+        /// Minimum number of points per peakel
+        #[arg(long = "min-peaks", default_value = "2")]
+        min_peaks: usize,
+
+        /// Maximum consecutive gaps in XIC before stopping walk.
+        /// For staggered DIA (overlapping windows), neighbor spectra are interleaved
+        /// in the timeline and appear as gaps. Use >=3 for staggered DIA to bridge
+        /// over interleaved neighbor spectra.
+        #[arg(long = "max-gaps", default_value = "3")]
+        max_consecutive_gaps: usize,
+
+        /// Maximum total gaps across both walking directions (default: unlimited)
+        #[arg(long = "max-total-gaps", default_value = "4294967295")]
+        max_total_gaps: usize,
+
+        /// Intensity percentile threshold (0.0-1.0) for peak filtering
+        #[arg(long = "intensity-pct", default_value = "0.99")]
+        intensity_percentile: f32,
+
+        /// Minimum peakel amplitude (apex/min intensity ratio)
+        #[arg(long = "min-amplitude", default_value = "1.0")]
+        min_peakel_amplitude: f32,
+
+        /// Minimum peakel duration in seconds
+        #[arg(long = "min-duration", default_value = "0.0")]
+        min_peakel_duration: f32,
+
+        /// Algorithm: 'basic' or 'smart'
+        #[arg(long = "algo", default_value = "smart")]
+        algo: String,
+
+        /// Require apex to not be at peakel boundary (first or last peak)
+        #[arg(long = "require-apex-boundary")]
+        require_apex_boundary: bool,
+
+        /// Export format: 'sqlite' or 'tsv'
+        #[arg(long = "format", default_value = "sqlite")]
+        format: String,
+
+        /// Number of threads: 'auto' for all CPUs, or a specific number
+        #[arg(long = "threads", default_value = "auto")]
+        threads: String,
+
+        /// Verbosity level (-v, -vv, -vvv)
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
+    },
 }
 
 /// Parse and validate the threads parameter, returns the number of threads to use
@@ -149,11 +211,8 @@ fn parse_threads(threads_arg: &str) -> Result<usize> {
     }
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-
-    // Initialize logging
-    let log_level = match args.verbose {
+fn init_logging(verbose: u8) {
+    let log_level = match verbose {
         0 => log::LevelFilter::Warn,
         1 => log::LevelFilter::Info,
         2 => log::LevelFilter::Debug,
@@ -164,11 +223,9 @@ fn main() -> Result<()> {
         .filter_level(log_level)
         .format_timestamp_millis()
         .init();
+}
 
-    // Parse and validate threads parameter
-    let num_threads = parse_threads(&args.threads)?;
-
-    // Check if parallel processing is available
+fn print_parallel_warning(num_threads: usize) {
     if num_threads > 1 {
         #[cfg(feature = "processing-parallel")]
         {
@@ -181,42 +238,137 @@ fn main() -> Result<()> {
             eprintln!("Falling back to single-threaded mode.");
         }
     }
+}
 
-    // Print configuration
-    println!("mzdb2peakeldb - Peakel Detection");
-    println!("================================");
-    println!("Input mzDB: {:?}", args.mzdb_file_path);
-    println!("Output: {:?}", args.output_file_path);
-    println!("MS level: {}", args.ms_level);
-    println!("m/z tolerance: {} ppm", args.mz_tol_ppm);
-    println!("Min intensity: {}", args.min_intensity);
-    println!("Min peaks per peakel: {}", args.min_peaks);
-    println!("Max consecutive gaps: {}", args.max_consecutive_gaps);
-    println!("Algorithm: {}", args.algo);
-    println!("Output format: {}", args.format);
-    println!("Threads: {}", num_threads);
-    println!();
+fn main() -> Result<()> {
+    let cli = Cli::parse();
 
-    // Open the mzDB file
-    println!("Opening mzDB file...");
-    let reader = MzDbReader::open(args.mzdb_file_path.to_str().unwrap())?;
-    let headers = reader.get_spectrum_headers();
+    match cli.command {
+        Commands::Ms1 {
+            mzdb_file_path,
+            output_file_path,
+            mz_tol_ppm,
+            min_intensity,
+            min_peaks,
+            max_consecutive_gaps,
+            max_total_gaps,
+            intensity_percentile,
+            min_peakel_amplitude,
+            min_peakel_duration,
+            algo,
+            require_apex_boundary,
+            format,
+            threads,
+            verbose,
+        } => {
+            init_logging(verbose);
+            let num_threads = parse_threads(&threads)?;
+            print_parallel_warning(num_threads);
 
-    println!("Total spectra: {}", headers.len());
+            println!("mzdb2peakeldb - MS1 Peakel Detection");
+            println!("====================================");
+            println!("Input mzDB: {:?}", mzdb_file_path);
+            println!("Output: {:?}", output_file_path);
+            println!("m/z tolerance: {} ppm", mz_tol_ppm);
+            println!("Min intensity: {}", min_intensity);
+            println!("Min peaks per peakel: {}", min_peaks);
+            println!("Max consecutive gaps: {}", max_consecutive_gaps);
+            println!("Intensity percentile: {}", intensity_percentile);
+            println!("Min amplitude: {}", min_peakel_amplitude);
+            println!("Algorithm: {}", algo);
+            println!("Output format: {}", format);
+            println!("Threads: {}", num_threads);
+            println!();
 
-    // Count MS levels
-    let ms1_count = headers.iter().filter(|h| h.ms_level == 1).count();
-    let ms2_count = headers.iter().filter(|h| h.ms_level == 2).count();
-    println!("MS1 spectra: {}", ms1_count);
-    println!("MS2 spectra: {}", ms2_count);
-    println!();
+            let reader = MzDbReader::open(mzdb_file_path.to_str().unwrap())?;
+            let headers = reader.get_spectrum_headers();
+            println!("Total spectra: {} (MS1: {}, MS2: {})",
+                headers.len(),
+                headers.iter().filter(|h| h.ms_level == 1).count(),
+                headers.iter().filter(|h| h.ms_level == 2).count());
+            println!();
 
-    match args.ms_level {
-        1 => run_ms1_detection(&args, &reader, num_threads)?,
-        2 => run_ms2_dia_detection(&args, &reader, num_threads)?,
-        _ => {
-            eprintln!("Error: Invalid MS level {}. Supported values: 1, 2", args.ms_level);
-            std::process::exit(1);
+            run_ms1_detection(
+                &mzdb_file_path, &output_file_path, &reader, num_threads,
+                &Ms1PeakelConfig {
+                    mz_tol_ppm,
+                    min_intensity,
+                    min_peaks,
+                    max_consecutive_gaps,
+                    max_total_gaps,
+                    max_time_window: 1200.0,
+                    intensity_percentile,
+                    min_peakel_amplitude,
+                    min_peakel_duration,
+                    algorithm: algo,
+                    skip_apex_boundary_check: !require_apex_boundary,
+                },
+                &format,
+            )?;
+        }
+
+        Commands::Ms2 {
+            mzdb_file_path,
+            output_file_path,
+            mz_tol_ppm,
+            min_intensity,
+            min_peaks,
+            max_consecutive_gaps,
+            max_total_gaps,
+            intensity_percentile,
+            min_peakel_amplitude,
+            min_peakel_duration,
+            algo,
+            require_apex_boundary,
+            format,
+            threads,
+            verbose,
+        } => {
+            init_logging(verbose);
+            let num_threads = parse_threads(&threads)?;
+            print_parallel_warning(num_threads);
+
+            println!("mzdb2peakeldb - MS2 DIA Peakel Detection");
+            println!("=========================================");
+            println!("Input mzDB: {:?}", mzdb_file_path);
+            println!("Output: {:?}", output_file_path);
+            println!("m/z tolerance: {} ppm", mz_tol_ppm);
+            println!("Min intensity: {}", min_intensity);
+            println!("Min peaks per peakel: {}", min_peaks);
+            println!("Max consecutive gaps: {}", max_consecutive_gaps);
+            println!("Intensity percentile: {}", intensity_percentile);
+            println!("Min amplitude: {}", min_peakel_amplitude);
+            println!("Algorithm: {}", algo);
+            println!("Output format: {}", format);
+            println!("Threads: {}", num_threads);
+            println!();
+
+            let reader = MzDbReader::open(mzdb_file_path.to_str().unwrap())?;
+            let headers = reader.get_spectrum_headers();
+            println!("Total spectra: {} (MS1: {}, MS2: {})",
+                headers.len(),
+                headers.iter().filter(|h| h.ms_level == 1).count(),
+                headers.iter().filter(|h| h.ms_level == 2).count());
+            println!();
+
+            run_ms2_dia_detection(
+                &mzdb_file_path, &output_file_path, &reader, num_threads,
+                &DiaMs2PeakelConfig {
+                    mz_tol_ppm,
+                    min_intensity,
+                    min_peaks,
+                    max_consecutive_gaps,
+                    max_total_gaps,
+                    max_time_window: 1200.0,
+                    intensity_percentile,
+                    min_peakel_amplitude,
+                    min_peakel_duration,
+                    algorithm: algo,
+                    skip_apex_boundary_check: !require_apex_boundary,
+                    zero_pad_xic: true,
+                },
+                &format,
+            )?;
         }
     }
 
@@ -230,45 +382,31 @@ fn main() -> Result<()> {
 // MS1 Peakel Detection (using walking algorithm)
 // ============================================================================
 
-fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
-    // Build configuration for Ms1PeakelDetector
-    let ms1_defaults = Ms1PeakelConfig::default();
-    let config = Ms1PeakelConfig {
-        mz_tol_ppm: args.mz_tol_ppm,
-        min_intensity: args.min_intensity,
-        min_peaks: args.min_peaks,
-        max_consecutive_gaps: args.max_consecutive_gaps,
-        max_total_gaps: args.max_total_gaps,
-        max_time_window: 1200.0,
-        intensity_percentile: args.intensity_percentile,
-        min_peakel_amplitude: args.min_peakel_amplitude.unwrap_or(ms1_defaults.min_peakel_amplitude),
-        min_peakel_duration: args.min_peakel_duration,
-        algorithm: args.algo.clone(),
-        skip_apex_boundary_check: !args.require_apex_boundary,
-    };
-
+fn run_ms1_detection(
+    mzdb_file_path: &Path,
+    output_file_path: &Path,
+    reader: &MzDbReader,
+    num_threads: usize,
+    config: &Ms1PeakelConfig,
+    format: &str,
+) -> Result<()> {
     println!("Detecting MS1 peakels using walking algorithm...");
     println!("  Config: mz_tol={} ppm, min_peaks={}, min_intensity={}, max_gaps={}",
              config.mz_tol_ppm, config.min_peaks, config.min_intensity, config.max_consecutive_gaps);
     println!("  Validation: min_amplitude={}, min_duration={}s, apex_boundary_check={}",
              config.min_peakel_amplitude, config.min_peakel_duration, !config.skip_apex_boundary_check);
 
-    // Create detector
-    let detector = Ms1PeakelDetector::with_config(config);
-
-    // Check if mzDB file is DIA
+    let detector = Ms1PeakelDetector::with_config(config.clone());
     let is_dia = reader.is_dia().unwrap_or(false);
 
-    // Get input filename for metadata
-    let input_filename = args.mzdb_file_path
+    let input_filename = mzdb_file_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown.mzDB");
 
-    match args.format.as_str() {
+    match format {
         "sqlite" => {
-            // Streaming mode: detect and write batches directly to SQLite
-            let mut writer = Ms1PeakelDbWriter::create(&args.output_file_path, input_filename, is_dia)?;
+            let mut writer = Ms1PeakelDbWriter::create(output_file_path, input_filename, is_dia)?;
 
             detector.detect_peakels_in_batches_with_threads(reader, num_threads, |batch| {
                 let batch_count = batch.peakels.len();
@@ -297,8 +435,6 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
             }
         }
         "tsv" => {
-            // TSV mode: collect all peakels then write
-            // (streaming TSV would be possible but statistics need all peakels)
             let peakels = detector.detect_all_peakels_with_threads(reader, num_threads)?;
 
             if peakels.is_empty() {
@@ -308,20 +444,16 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
 
             println!("Detected {} MS1 peakels", peakels.len());
             println!("Writing TSV file...");
-            write_ms1_peakels_tsv(&args.output_file_path, &peakels)?;
+            write_ms1_peakels_tsv(output_file_path, &peakels)?;
             print_peakel_stats("MS1 Peakel Statistics", &peakels);
         }
         _ => {
-            eprintln!("Warning: Unknown format '{}', defaulting to SQLite", args.format);
-            // Recurse with sqlite format (avoid code duplication)
-            let mut patched_args = args.clone();
-            patched_args.format = "sqlite".to_string();
-            return run_ms1_detection(&patched_args, reader, num_threads);
+            eprintln!("Warning: Unknown format '{}', defaulting to SQLite", format);
+            return run_ms1_detection(mzdb_file_path, output_file_path, reader, num_threads, config, "sqlite");
         }
     }
 
-    println!("Output written to: {:?}", args.output_file_path);
-
+    println!("Output written to: {:?}", output_file_path);
     Ok(())
 }
 
@@ -329,23 +461,14 @@ fn run_ms1_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Re
 // MS2 DIA Peakel Detection
 // ============================================================================
 
-fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -> Result<()> {
-    let ms2_defaults = DiaMs2PeakelConfig::default();
-    let config = DiaMs2PeakelConfig {
-        mz_tol_ppm: args.mz_tol_ppm,
-        min_intensity: args.min_intensity,
-        min_peaks: args.min_peaks,
-        max_consecutive_gaps: args.max_consecutive_gaps,
-        max_total_gaps: args.max_total_gaps,
-        max_time_window: 1200.0,
-        intensity_percentile: args.intensity_percentile,
-        min_peakel_amplitude: args.min_peakel_amplitude.unwrap_or(ms2_defaults.min_peakel_amplitude),
-        min_peakel_duration: args.min_peakel_duration,
-        algorithm: args.algo.clone(),
-        skip_apex_boundary_check: !args.require_apex_boundary,
-        zero_pad_xic: true,
-    };
-
+fn run_ms2_dia_detection(
+    mzdb_file_path: &Path,
+    output_file_path: &Path,
+    reader: &MzDbReader,
+    num_threads: usize,
+    config: &DiaMs2PeakelConfig,
+    format: &str,
+) -> Result<()> {
     let detector = DiaMs2PeakelDetector::with_config(config.clone(), reader);
     let windows = detector.isolation_windows();
 
@@ -354,20 +477,17 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
              config.min_peakel_amplitude, config.min_peakel_duration, !config.skip_apex_boundary_check);
     println!("Found {} isolation windows", windows.len());
 
-    // Get input filename for metadata
-    let input_filename = args.mzdb_file_path
+    let input_filename = mzdb_file_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown.mzDB");
 
-    match args.format.as_str() {
+    match format {
         "sqlite" => {
-            // Create writer with windows metadata and spectrum headers
             let mut writer = Ms2PeakelDbWriter::create(
-                &args.output_file_path, input_filename, reader.get_spectrum_headers(), &windows
+                output_file_path, input_filename, reader.get_spectrum_headers(), &windows
             )?;
 
-            // Stream peakel batches directly to SQLite
             detector.detect_peakels_in_batches_with_threads(reader, num_threads, |batch| {
                 let batch_count = batch.peakels.len();
                 writer.write_peakels_batch(&batch.peakels)?;
@@ -391,7 +511,6 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
             writer.close()?;
         }
         "tsv" => {
-            // TSV mode: collect all peakels then write
             let peakels = detector.detect_all_peakels_with_threads(reader, num_threads)?;
 
             println!();
@@ -400,30 +519,30 @@ fn run_ms2_dia_detection(args: &Args, reader: &MzDbReader, num_threads: usize) -
             println!("Total MS2 peakels: {}", peakels.len());
 
             println!("Writing TSV file...");
-            write_ms2_peakels_tsv(&args.output_file_path, &peakels)?;
+            write_ms2_peakels_tsv(output_file_path, &peakels)?;
             print_peakel_stats("MS2 DIA Peakel Statistics", &peakels);
         }
         _ => {
-            eprintln!("Warning: Unknown format '{}', defaulting to SQLite", args.format);
-            let mut patched_args = args.clone();
-            patched_args.format = "sqlite".to_string();
-            return run_ms2_dia_detection(&patched_args, reader, num_threads);
+            eprintln!("Warning: Unknown format '{}', defaulting to SQLite", format);
+            return run_ms2_dia_detection(mzdb_file_path, output_file_path, reader, num_threads, config, "sqlite");
         }
     }
 
-    println!("Output written to: {:?}", args.output_file_path);
-
+    println!("Output written to: {:?}", output_file_path);
     Ok(())
 }
 
+// ============================================================================
+// TSV Writers
+// ============================================================================
+
 /// Write DIA MS2 peakels to a TSV file
-fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Result<()> {
+fn write_ms2_peakels_tsv(path: &Path, peakels: &[DiaMs2PeakelRecord]) -> Result<()> {
     use std::io::Write;
     use std::fs::File;
 
     let mut file = File::create(path)?;
 
-    // Header with MS2-specific fields (isolation_window_id, precursor_mz)
     writeln!(
         file,
         "id\tmoz\telution_time\tduration\tgap_count\tapex_intensity\tarea\tamplitude\tpeak_count\t\
@@ -455,7 +574,7 @@ fn write_ms2_peakels_tsv(path: &PathBuf, peakels: &[DiaMs2PeakelRecord]) -> Resu
 }
 
 /// Write MS1 peakels to a TSV file
-fn write_ms1_peakels_tsv<P: AsRef<Path>>(path: P, peakels: &[Peakel]) -> Result<()> {
+fn write_ms1_peakels_tsv(path: &Path, peakels: &[Peakel]) -> Result<()> {
     use std::io::Write;
     use std::fs::File;
 
