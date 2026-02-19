@@ -59,11 +59,11 @@ struct Args {
     bb_mz_height_msn: f64,
 
     /// Bounding box retention time width for MS1 spectra
-    #[arg(long = "bb-rt-width-ms1", default_value = "5.0")]
+    #[arg(long = "bb-rt-width-ms1", default_value = "30.0")]
     bb_rt_width_ms1: f32,
 
     /// Bounding box retention time width for MSn spectra
-    #[arg(long = "bb-rt-width-msn", default_value = "60.0")]
+    #[arg(long = "bb-rt-width-msn", default_value = "0.0")]
     bb_rt_width_msn: f32,
 }
 
