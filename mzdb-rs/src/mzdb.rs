@@ -531,84 +531,92 @@ impl MzDbReader {
         )
     }
 
-    /// Get all unique isolation windows (precursor m/z values) for MS2 spectra
+    /// Get all unique isolation windows for MS2 spectra with their bounds and spectrum counts
     ///
     /// This is useful for discovering all DIA windows in a file before processing.
-    /// Windows are grouped by rounding to 0.1 m/z.
-    pub fn get_isolation_windows(&self) -> Vec<f64> {
-        use std::collections::BTreeSet;
-        
-        let mut windows: BTreeSet<i64> = BTreeSet::new();
-        for header in self.get_spectrum_headers() {
+    /// Windows are grouped by rounding to 0.1 m/z. Isolation window offsets are
+    /// parsed from the precursor_list XML metadata.
+    pub fn get_isolation_windows(&self) -> Vec<IsolationWindow> {
+        use std::collections::BTreeMap;
+        use crate::metadata::parse_isolation_window_offsets_from_xml;
+
+        let headers = self.get_spectrum_headers();
+
+        // Group MS2 spectra by precursor m/z and track actual window bounds
+        // Key: window_key (target_mz rounded to 0.1)
+        // Value: (target_mz, lower_offset, upper_offset, count)
+        let mut window_data: BTreeMap<i64, (f64, Option<f64>, Option<f64>, usize)> = BTreeMap::new();
+
+        for header in headers {
             if header.ms_level == 2 {
-                if let Some(prec_mz) = header.precursor_mz {
-                    // Round to 1 decimal place for grouping
-                    let window_key = (prec_mz * 10.0).round() as i64;
-                    windows.insert(window_key);
+                if let Some(precursor_mz) = header.precursor_mz {
+                    // Round to 0.1 m/z for grouping
+                    let window_key = (precursor_mz * 10.0).round() as i64;
+
+                    // Try to parse window offsets from precursor_list XML
+                    let (lower_offset, upper_offset) = header.precursor_list_str
+                        .as_ref()
+                        .map(|xml| parse_isolation_window_offsets_from_xml(xml))
+                        .unwrap_or((None, None));
+
+                    let entry = window_data.entry(window_key).or_insert((precursor_mz, None, None, 0));
+                    entry.3 += 1;
+
+                    // Update offsets if we found them and don't have them yet
+                    if entry.1.is_none() && lower_offset.is_some() {
+                        entry.1 = lower_offset;
+                    }
+                    if entry.2.is_none() && upper_offset.is_some() {
+                        entry.2 = upper_offset;
+                    }
                 }
             }
         }
-        
-        windows.into_iter().map(|k| k as f64 / 10.0).collect()
+
+        // Convert to IsolationWindow structs
+        window_data.into_iter()
+            .enumerate()
+            .map(|(idx, (_key, (target_mz, lower_offset, upper_offset, _count)))| {
+                // Use parsed offsets, or fall back to a conservative default
+                let half_width_lower = lower_offset.unwrap_or_else(|| {
+                    log::warn!("No isolation window offset found for m/z {:.1}, using default 4.0 Da", target_mz);
+                    4.0
+                });
+                let half_width_upper = upper_offset.unwrap_or_else(|| {
+                    log::warn!("No isolation window offset found for m/z {:.1}, using default 4.0 Da", target_mz);
+                    4.0
+                });
+
+                IsolationWindow {
+                    id: (idx + 1) as i64,
+                    target_mz,
+                    lower_mz: target_mz - half_width_lower,
+                    upper_mz: target_mz + half_width_upper,
+                    spectrum_count: _count,
+                }
+            })
+            .collect()
     }
 
-    /// Get all unique isolation windows with their actual bounds from XML metadata
+    /// Get all unique isolation windows as (target_mz, lower_bound, upper_bound) tuples
     ///
-    /// Returns a vector of (target_mz, lower_bound, upper_bound) tuples.
-    /// This parses the isolation window offsets from the precursor_list XML metadata
-    /// to get the exact window bounds rather than approximations.
+    /// This is a convenience wrapper around [`get_isolation_windows`] for callers
+    /// that only need the m/z bounds.
     ///
     /// # Example
     /// ```no_run
     /// use mzdb::MzDbReader;
     ///
     /// let reader = MzDbReader::open("dia_file.mzDB").unwrap();
-    /// for (target_mz, lower, upper) in reader.get_isolation_windows_with_bounds() {
+    /// for (target_mz, lower, upper) in reader.get_isolation_windows_as_bounds() {
     ///     println!("Window: {:.4} Da, range [{:.4}, {:.4}]", target_mz, lower, upper);
     /// }
     /// ```
-    pub fn get_isolation_windows_with_bounds(&self) -> Vec<(f64, f64, f64)> {
-        use std::collections::HashMap;
-        use crate::metadata::parse_isolation_window_offsets_from_xml;
-        
-        let mut windows: HashMap<i64, (f64, f64, f64)> = HashMap::new();
-        
-        for header in self.get_spectrum_headers() {
-            if header.ms_level == 2 {
-                if let Some(prec_mz) = header.precursor_mz {
-                    let window_key = (prec_mz * 10.0).round() as i64;
-                    
-                    // Skip if we already have this window
-                    if windows.contains_key(&window_key) {
-                        continue;
-                    }
-                    
-                    // Try to parse isolation window offsets from XML
-                    let (lower_offset, upper_offset) = if let Some(ref xml) = header.precursor_list_str {
-                        parse_isolation_window_offsets_from_xml(xml)
-                    } else {
-                        (None, None)
-                    };
-                    
-                    let (lower_bound, upper_bound) = match (lower_offset, upper_offset) {
-                        (Some(lo), Some(uo)) => {
-                            // Use actual offsets from XML
-                            (prec_mz - lo, prec_mz + uo)
-                        }
-                        _ => {
-                            // Fallback: assume ±2 Da (common for 4 Da windows)
-                            (prec_mz - 2.0, prec_mz + 2.0)
-                        }
-                    };
-                    
-                    windows.insert(window_key, (prec_mz, lower_bound, upper_bound));
-                }
-            }
-        }
-        
-        let mut result: Vec<_> = windows.into_values().collect();
-        result.sort_by(|a, b| a.0.total_cmp(&b.0));
-        result
+    pub fn get_isolation_windows_as_bounds(&self) -> Vec<(f64, f64, f64)> {
+        self.get_isolation_windows()
+            .into_iter()
+            .map(|w| (w.target_mz, w.lower_mz, w.upper_mz))
+            .collect()
     }
 
     // ========================================================================

@@ -703,3 +703,22 @@ impl RunSlice {
     }
 }
 
+
+// ============================================================================
+// DIA Isolation Window
+// ============================================================================
+
+/// Isolation window definition for DIA
+#[derive(Clone, Debug)]
+pub struct IsolationWindow {
+    /// Unique identifier for this isolation window
+    pub id: i64,
+    /// Center m/z of the isolation window
+    pub target_mz: f64,
+    /// Lower m/z bound (target_mz - lower_offset)
+    pub lower_mz: f64,
+    /// Upper m/z bound (target_mz + upper_offset)
+    pub upper_mz: f64,
+    /// Number of MS2 spectra in this window
+    pub spectrum_count: usize,
+}

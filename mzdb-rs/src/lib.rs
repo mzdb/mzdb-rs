@@ -101,7 +101,7 @@ pub use model::{
     AcquisitionMode, BBSizes, BoundingBox, BoundingBoxIndex, ByteOrder, DataEncoding,
     DataEncodingsCache, DataMode, DataPointProvider, DataPrecision, EntityCache, MzRange, PeakEncoding,
     SimpleSpectrumData, Spectrum, SpectrumData, SpectrumHeader, SpectrumSlice, XicMethod, XicPeak,
-    RunSlice, RunSliceHeader, RunSliceData,
+    RunSlice, RunSliceHeader, RunSliceData, IsolationWindow,
 };
 
 // Re-export chromatogram types

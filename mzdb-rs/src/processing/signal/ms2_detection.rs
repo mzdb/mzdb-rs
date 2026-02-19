@@ -26,7 +26,6 @@
 //! println!("Detected {} peakels across {} windows", peakels.len(), windows.len());
 //! ```
 
-use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use anyhow_ext::*;
@@ -35,7 +34,6 @@ use anyhow_ext::*;
 use std::sync::Mutex;
 
 use crate::MzDbReader;
-use crate::metadata::parse_isolation_window_offsets_from_xml;
 use super::detection::{
     PeakelBatch, PeakelDetectionConfig, SpectrumPeakLookup, SortedPeaksProvider, PeakelDetector,
 };
@@ -44,20 +42,8 @@ use super::detection::{
 // Isolation Window
 // ============================================================================
 
-/// Isolation window definition for DIA
-#[derive(Clone, Debug)]
-pub struct IsolationWindow {
-    /// Unique identifier for this isolation window
-    pub id: i64,
-    /// Center m/z of the isolation window
-    pub target_mz: f64,
-    /// Lower m/z bound (target_mz - lower_offset)
-    pub lower_mz: f64,
-    /// Upper m/z bound (target_mz + upper_offset)
-    pub upper_mz: f64,
-    /// Number of MS2 spectra in this window
-    pub spectrum_count: usize,
-}
+// IsolationWindow is defined in crate::model
+pub use crate::model::IsolationWindow;
 
 // ============================================================================
 // DIA MS2 Peakel Record
@@ -629,7 +615,7 @@ impl DiaMs2PeakelDetector {
     pub fn with_config(config: DiaMs2PeakelConfig, reader: &MzDbReader) -> Self {
         log::info!("DiaMs2PeakelDetector config: min_peaks={}, mz_tol={} ppm, max_gaps={}",
                    config.min_peaks, config.mz_tol_ppm, config.max_consecutive_gaps);
-        let raw_windows = Self::discover_isolation_windows(reader);
+        let raw_windows = reader.get_isolation_windows();
         let is_staggered = Self::detect_staggering(&raw_windows);
         let isolation_windows: Vec<Arc<IsolationWindow>> = raw_windows.into_iter()
             .map(Arc::new)
@@ -683,69 +669,6 @@ impl DiaMs2PeakelDetector {
     #[inline]
     fn windows_overlap(a: &IsolationWindow, b: &IsolationWindow) -> bool {
         a.upper_mz > b.lower_mz && b.upper_mz > a.lower_mz
-    }
-
-    /// Discover all isolation windows in the mzDB file
-    ///
-    /// This method parses the actual isolation window bounds from the precursor_list XML
-    /// rather than assuming a fixed window width.
-    fn discover_isolation_windows(reader: &MzDbReader) -> Vec<IsolationWindow> {
-        let headers = reader.get_spectrum_headers();
-
-        // Group MS2 spectra by precursor m/z and track actual window bounds
-        // Key: window_key (target_mz rounded to 0.1)
-        // Value: (target_mz, lower_offset, upper_offset, count)
-        let mut window_data: BTreeMap<i64, (f64, Option<f64>, Option<f64>, usize)> = BTreeMap::new();
-
-        for header in headers {
-            if header.ms_level == 2 {
-                if let Some(precursor_mz) = header.precursor_mz {
-                    // Round to 0.1 m/z for grouping
-                    let window_key = (precursor_mz * 10.0).round() as i64;
-
-                    // Try to parse window offsets from precursor_list XML
-                    let (lower_offset, upper_offset) = header.precursor_list_str
-                        .as_ref()
-                        .map(|xml| parse_isolation_window_offsets_from_xml(xml))
-                        .unwrap_or((None, None));
-
-                    let entry = window_data.entry(window_key).or_insert((precursor_mz, None, None, 0));
-                    entry.3 += 1;
-
-                    // Update offsets if we found them and don't have them yet
-                    if entry.1.is_none() && lower_offset.is_some() {
-                        entry.1 = lower_offset;
-                    }
-                    if entry.2.is_none() && upper_offset.is_some() {
-                        entry.2 = upper_offset;
-                    }
-                }
-            }
-        }
-
-        // Convert to IsolationWindow structs
-        window_data.into_iter()
-            .enumerate()
-            .map(|(idx, (_key, (target_mz, lower_offset, upper_offset, count)))| {
-                // Use parsed offsets, or fall back to a conservative default
-                let half_width_lower = lower_offset.unwrap_or_else(|| {
-                    log::warn!("No isolation window offset found for m/z {:.1}, using default 4.0 Da", target_mz);
-                    4.0
-                });
-                let half_width_upper = upper_offset.unwrap_or_else(|| {
-                    log::warn!("No isolation window offset found for m/z {:.1}, using default 4.0 Da", target_mz);
-                    4.0
-                });
-
-                IsolationWindow {
-                    id: (idx + 1) as i64,
-                    target_mz,
-                    lower_mz: target_mz - half_width_lower,
-                    upper_mz: target_mz + half_width_upper,
-                    spectrum_count: count,
-                }
-            })
-            .collect()
     }
 
     /// Detect peakels for a single isolation window
