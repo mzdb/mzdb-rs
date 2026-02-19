@@ -65,29 +65,13 @@ pub struct DiaMs2PeakelRecord {
 }
 
 /// Globally unique identifier for an apex peak: (spectrum_id, peak_index_in_original_spectrum).
-/// Unlike Ms2PeakKey whose spectrum_idx is local to a window's merged timeline,
-/// this uses the database spectrum ID and is stable across windows.
-type ApexPeakId = (i64, usize);
-
-/// A peakel discarded by the apex-in-current filter, carrying its apex peak identity
-/// for robust deduplication during rescue.
-struct DiscardedPeakel {
-    record: DiaMs2PeakelRecord,
-    /// Globally unique apex peak identifier (spectrum_id, peak_idx).
-    apex_peak_id: ApexPeakId,
-}
-
 /// Result of running the walking algorithm for a single isolation window.
-/// 
-/// Separates peakels whose apex is in the current window from those discarded
-/// because their apex falls in a neighbor window's spectrum. The latter
-/// can be rescued during post-processing if no other window claims them.
 struct Ms2PeakelDetectionResult {
-    /// Peakels whose apex is in the current window, with their apex peak identities
-    current_window_peakels: Vec<(DiaMs2PeakelRecord, ApexPeakId)>,
-    /// Peakels whose apex falls in a neighbor window's spectrum.
-    /// These are candidates for rescue if not emitted by any other window.
-    neighbor_window_peakels: Vec<DiscardedPeakel>,
+    /// Peakels whose apex is in the current window
+    peakels: Vec<DiaMs2PeakelRecord>,
+    /// Count of peakels discarded because their apex falls in a neighbor window's
+    /// spectrum (these will be detected when that neighbor is processed as current)
+    neighbor_discarded: usize,
 }
 
 impl DiaMs2PeakelRecord {
@@ -689,10 +673,7 @@ impl DiaMs2PeakelDetector {
         let spectra = Self::load_spectra_for_window(reader, window)?;
         let indexed = self.build_indexed_spectra(&spectra, window);
         let result = self.run_walking_algorithm_for_window(&indexed, window, None, None);
-        // No neighbors → no apex-in-neighbor discards expected, but merge for safety
-        let mut peakels: Vec<DiaMs2PeakelRecord> = result.current_window_peakels.into_iter().map(|(r, _)| r).collect();
-        peakels.extend(result.neighbor_window_peakels.into_iter().map(|dp| dp.record));
-        Ok(peakels)
+        Ok(result.peakels)
     }
 
     /// Load raw spectra for a single isolation window.
@@ -771,8 +752,8 @@ impl DiaMs2PeakelDetector {
     ) -> Ms2PeakelDetectionResult {
         if current_spectra.is_empty() {
             return Ms2PeakelDetectionResult {
-                current_window_peakels: Vec::new(),
-                neighbor_window_peakels: Vec::new(),
+                peakels: Vec::new(),
+                neighbor_discarded: 0,
             };
         }
 
@@ -789,16 +770,13 @@ impl DiaMs2PeakelDetector {
         // Use the trait's default walking algorithm
         let peakels_with_keys = self.run_walking_algorithm(&peak_data);
 
-        // Partition: keep peakels whose apex is in the current window,
-        // collect those whose apex is in a neighbor window for potential rescue
-        let mut current_window_peakels = Vec::new();
-        let mut neighbor_window_peakels = Vec::new();
+        // Keep only peakels whose apex is in the current window.
+        // Those with apex in a neighbor are discarded — they will be detected
+        // when that neighbor window is processed as current.
+        let mut kept = Vec::new();
+        let mut neighbor_discarded = 0usize;
 
-        for (peakel, apex_peak_key) in peakels_with_keys {
-            // Convert local Ms2PeakKey to global ApexPeakId
-            let apex_spectrum_id = peak_data.get_spectrum_lookup(apex_peak_key.spectrum_idx).spectrum_id();
-            let apex_peak_id: ApexPeakId = (apex_spectrum_id, apex_peak_key.peak_idx);
-
+        for (peakel, _apex_peak_key) in peakels_with_keys {
             let in_current = if let Some(apex_idx) = peakel.apex_index() {
                 let spectrum_ids = peakel.spectrum_ids();
                 if apex_idx < spectrum_ids.len() {
@@ -811,21 +789,13 @@ impl DiaMs2PeakelDetector {
             };
 
             if in_current {
-                let record = DiaMs2PeakelRecord::new(peakel, window.id);
-                current_window_peakels.push((record, apex_peak_id));
+                kept.push(DiaMs2PeakelRecord::new(peakel, window.id));
             } else {
-                // Apex falls in a neighbor spectrum: attribute to the window where
-                // the apex was actually measured (read from the spectrum's source_window)
-                let apex_spectrum = peak_data.get_spectrum_lookup(apex_peak_key.spectrum_idx);
-                let apex_window = apex_spectrum.source_window();
-                neighbor_window_peakels.push(DiscardedPeakel {
-                    record: DiaMs2PeakelRecord::new(peakel, apex_window.id),
-                    apex_peak_id,
-                });
+                neighbor_discarded += 1;
             }
         }
 
-        Ms2PeakelDetectionResult { current_window_peakels, neighbor_window_peakels }
+        Ms2PeakelDetectionResult { peakels: kept, neighbor_discarded }
     }
 
 
@@ -903,61 +873,6 @@ impl DiaMs2PeakelDetector {
         Ok(())
     }
 
-    /// Rescue orphaned apex-in-neighbor peakels.
-    ///
-    /// When the apex of a peakel falls in a neighbor window's spectrum, it gets
-    /// discarded from the current window. Normally, the neighbor window would detect
-    /// this peakel when it becomes the "current" window. But in staggered DIA, the
-    /// precursor m/z may not fall in the neighbor's isolation bounds, so the peakel
-    /// is never emitted by any window.
-    ///
-    /// This method rescues such orphans by:
-    /// 1. Deduplicating discards using ApexPeakId (spectrum_id, peak_idx) — globally unique
-    /// 2. Keeping only the best version (most peaks) per unique apex peak
-    /// 3. Filtering out any that match an already-emitted peakel
-    fn rescue_orphan_peakels(
-        discarded: Vec<DiscardedPeakel>,
-        emitted_keys: &HashSet<ApexPeakId>,
-    ) -> Vec<DiaMs2PeakelRecord> {
-        use std::collections::HashMap;
-
-        if discarded.is_empty() {
-            return Vec::new();
-        }
-
-        log::info!("  Apex-in-neighbor rescue: {} total discards to process", discarded.len());
-
-        // Deduplicate by ApexPeakId (spectrum_id, peak_idx) — globally unique.
-        // Keep the version with the most peaks (richest XIC walk).
-        let mut best_per_apex: HashMap<ApexPeakId, DiscardedPeakel> = HashMap::new();
-
-        for dp in discarded {
-            match best_per_apex.entry(dp.apex_peak_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if dp.record.peaks_count() > entry.get().record.peaks_count() {
-                        entry.insert(dp);
-                    }
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(dp);
-                }
-            }
-        }
-
-        let deduplicated_count = best_per_apex.len();
-
-        // Filter out any that were already emitted by another window
-        let rescued: Vec<DiaMs2PeakelRecord> = best_per_apex.into_values()
-            .filter(|dp| !emitted_keys.contains(&dp.apex_peak_id))
-            .map(|dp| dp.record)
-            .collect();
-
-        log::info!("  Rescued {} unique orphan peakels ({} deduplicated, {} already emitted)",
-                   rescued.len(), deduplicated_count, deduplicated_count - rescued.len());
-
-        rescued
-    }
-
     /// Sequential processing of isolation windows, emitting batches via callback.
     ///
     /// For staggered DIA, uses a sliding window of [prev, current, next] indexed spectra.
@@ -984,14 +899,8 @@ impl DiaMs2PeakelDetector {
         }
 
         // Staggered: sliding window of indexed spectra
-        // Load first window
         let mut prev_indexed: Option<Vec<IndexedMs2Spectrum>> = None;
         let mut current_indexed: Option<Vec<IndexedMs2Spectrum>> = None;
-
-        // Collect apex-in-neighbor discards for potential rescue
-        let mut all_discarded: Vec<DiscardedPeakel> = Vec::new();
-        // Track emitted peakels by ApexPeakId for cross-checking against rescued orphans
-        let mut emitted_apex_keys: HashSet<ApexPeakId> = HashSet::new();
 
         for (batch_index, window) in windows.iter().enumerate() {
             // Get current indexed spectra: reuse from previous iteration's right neighbor,
@@ -1025,38 +934,16 @@ impl DiaMs2PeakelDetector {
                 &cur, window, left_neighbor, right_neighbor,
             );
 
-            log::info!("  Window {}/{}: {:.1} m/z → {} peakels, {} apex-in-neighbor (neighbors: left={}, right={})",
-                       batch_index + 1, total_batches, window.target_mz, result.current_window_peakels.len(),
-                       result.neighbor_window_peakels.len(),
+            log::info!("  Window {}/{}: {:.1} m/z → {} peakels, {} neighbor-discarded (neighbors: left={}, right={})",
+                       batch_index + 1, total_batches, window.target_mz, result.peakels.len(),
+                       result.neighbor_discarded,
                        left_neighbor.is_some(), right_neighbor.is_some());
 
-            // Track emitted peakels' apex keys and extract records
-            let kept_records: Vec<DiaMs2PeakelRecord> = result.current_window_peakels.into_iter()
-                .map(|(record, apex_peak_id)| {
-                    emitted_apex_keys.insert(apex_peak_id);
-                    record
-                })
-                .collect();
-
-            on_batch(PeakelBatch { peakels: kept_records, batch_index, total_batches })?;
-
-            // Collect discards for later rescue
-            all_discarded.extend(result.neighbor_window_peakels);
+            on_batch(PeakelBatch { peakels: result.peakels, batch_index, total_batches })?;
 
             // Slide: current → prev, right neighbor → current for next iteration
             prev_indexed = Some(cur);
             current_indexed = next_indexed;
-        }
-
-        // Rescue orphaned apex-in-neighbor peakels
-        let rescued = Self::rescue_orphan_peakels(all_discarded, &emitted_apex_keys);
-        if !rescued.is_empty() {
-            log::info!("  Rescued {} orphan apex-in-neighbor peakels", rescued.len());
-            on_batch(PeakelBatch {
-                peakels: rescued,
-                batch_index: total_batches,
-                total_batches: total_batches + 1,
-            })?;
         }
 
         Ok(())
@@ -1124,9 +1011,9 @@ impl DiaMs2PeakelDetector {
                             &work.current_spectra, &work.window, left, right,
                         );
 
-                        log::debug!("Thread {} processed window {}/{}: {:.1} m/z ({} peakels, {} discards)",
+                        log::debug!("Thread {} processed window {}/{}: {:.1} m/z ({} peakels, {} neighbor-discarded)",
                                    thread_id, work.window_idx + 1, total_windows,
-                                   work.window.target_mz, result.current_window_peakels.len(), result.neighbor_window_peakels.len());
+                                   work.window.target_mz, result.peakels.len(), result.neighbor_discarded);
 
                         if result_tx.send((work.window_idx, result)).is_err() {
                             log::warn!("Result channel closed, stopping consumer {}", thread_id);
@@ -1222,25 +1109,15 @@ impl DiaMs2PeakelDetector {
                 }
             });
 
-            // Main thread: receive results, emit batches, collect discards
+            // Main thread: receive results, emit batches
             let mut total_peakels = 0usize;
             let mut batches_emitted = 0usize;
-            let mut all_discarded: Vec<DiscardedPeakel> = Vec::new();
-            let mut emitted_apex_keys: HashSet<ApexPeakId> = HashSet::new();
 
             for (window_idx, result) in result_rx {
-                total_peakels += result.current_window_peakels.len();
-
-                // Track emitted peakels' apex keys and extract records
-                let kept_records: Vec<DiaMs2PeakelRecord> = result.current_window_peakels.into_iter()
-                    .map(|(record, apex_peak_id)| {
-                        emitted_apex_keys.insert(apex_peak_id);
-                        record
-                    })
-                    .collect();
+                total_peakels += result.peakels.len();
 
                 if let Err(e) = on_batch(PeakelBatch {
-                    peakels: kept_records,
+                    peakels: result.peakels,
                     batch_index: window_idx,
                     total_batches: total_windows,
                 }) {
@@ -1248,22 +1125,7 @@ impl DiaMs2PeakelDetector {
                     break;
                 }
 
-                all_discarded.extend(result.neighbor_window_peakels);
                 batches_emitted += 1;
-            }
-
-            // Rescue orphaned peakels
-            let rescued = Self::rescue_orphan_peakels(all_discarded, &emitted_apex_keys);
-            if !rescued.is_empty() {
-                total_peakels += rescued.len();
-                log::info!("  Rescued {} orphan apex-in-neighbor peakels", rescued.len());
-                if let Err(e) = on_batch(PeakelBatch {
-                    peakels: rescued,
-                    batch_index: total_windows,
-                    total_batches: total_windows + 1,
-                }) {
-                    log::error!("on_batch error for rescued peakels: {:?}", e);
-                }
             }
 
             log::info!("Parallel detection complete in {:?}: {} peakels in {} batches",
@@ -1311,7 +1173,7 @@ mod tests {
         let config = DiaMs2PeakelConfig::default();
 
         assert_eq!(config.mz_tol_ppm, 10.0);
-        assert_eq!(config.min_intensity, 0.0);
+        assert_eq!(config.min_intensity, 100.0);
         assert_eq!(config.min_peaks, 5);
         assert_eq!(config.intensity_percentile, 0.9);
         assert_eq!(config.algorithm, "smart");
