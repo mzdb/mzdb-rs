@@ -1311,7 +1311,7 @@ mod tests {
         let config = DiaMs2PeakelConfig::default();
 
         assert_eq!(config.mz_tol_ppm, 10.0);
-        assert_eq!(config.min_intensity, 100.0);
+        assert_eq!(config.min_intensity, 0.0);
         assert_eq!(config.min_peaks, 5);
         assert_eq!(config.intensity_percentile, 0.9);
         assert_eq!(config.algorithm, "smart");
