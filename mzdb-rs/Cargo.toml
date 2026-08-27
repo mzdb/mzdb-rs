@@ -1,6 +1,6 @@
 [package]
 name = "mzdb-rs"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "A Rust library for reading mzDB mass spectrometry files"
 authors = ["David Bouyssie", "Caroline Sancho"]
@@ -23,9 +23,8 @@ fallible-iterator = "0.3"
 log = "0.4"
 ordered-float = "4.2"
 roxmltree = "0.20"
-rusqlite = { version = "0.32", features = ["blob", "bundled"] }
+rusqlite = { version = ">=0.32, <0.38", features = ["blob", "bundled", "backup"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_rusqlite = "0.36"
 smallvec = { version = "1.15", features = ["serde"] }
 strum_macros = "0.26"
 

@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use anyhow_ext::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use rusqlite::Result as RusqliteResult;
-use serde_rusqlite::from_rows;
 use smallvec::SmallVec;
 
 use crate::bounding_box::{create_bbox, index_bbox, read_spectrum_slice_data_at, merge_spectrum_slices};
@@ -703,7 +702,45 @@ pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
          FROM spectrum",
     )?;
 
-    let s_headers = from_rows::<SpectrumHeader>(statement.query([])?)
+    // Manual row mapping, replacing a former `serde_rusqlite::from_rows::<SpectrumHeader>` call.
+    // serde_rusqlite pins one exact rusqlite minor per its own release (0.36 -> rusqlite 0.32,  0.40 -> rusqlite 0.37, ...),
+    // which forces every consumer of this crate onto whichever rusqlite mzdb-rs happens to depend on.
+    // Since this was the crate's only serde_rusqlite call site,
+    // dropping it lets mzdb-rs's own `rusqlite` requirement widen to a range instead,
+    // so consumers can pick their own compatible rusqlite version.
+    //
+    // Column order and names below must match the SELECT list above. `param_tree`, `scan_list`,
+    // and `product_list` are deliberately absent from the query (as they were under from_rows,
+    // which leaves missing Option fields as None) and are set to None explicitly.
+    let s_headers = statement
+        .query_map([], |row| {
+            Ok(SpectrumHeader {
+                id: row.get(0)?,
+                initial_id: row.get(1)?,
+                title: row.get(2)?,
+                cycle: row.get(3)?,
+                time: row.get(4)?,
+                ms_level: row.get(5)?,
+                activation_type: row.get(6)?,
+                tic: row.get(7)?,
+                base_peak_mz: row.get(8)?,
+                base_peak_intensity: row.get(9)?,
+                precursor_mz: row.get(10)?,
+                precursor_charge: row.get(11)?,
+                peaks_count: row.get(12)?,
+                param_tree_str: None,
+                scan_list_str: None,
+                precursor_list_str: row.get(13)?,
+                product_list_str: None,
+                shared_param_tree_id: row.get(14)?,
+                instrument_configuration_id: row.get(15)?,
+                source_file_id: row.get(16)?,
+                run_id: row.get(17)?,
+                data_processing_id: row.get(18)?,
+                data_encoding_id: row.get(19)?,
+                bb_first_spectrum_id: row.get(20)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<SpectrumHeader>, _>>()?;
 
     Ok(s_headers)

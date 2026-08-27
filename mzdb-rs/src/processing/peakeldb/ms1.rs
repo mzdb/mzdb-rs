@@ -19,6 +19,14 @@ use rusqlite::{params, Connection};
 use crate::processing::{Peakel, HasPeakelData};
 use super::common::{chrono_lite_timestamp, PeakelWriterStats, PeakelDbWriter};
 
+/// Correction factors for querying the SQLite R*Tree, whose coordinates are 32-bit floats.
+///
+/// Query boxes given in `f64` must be widened -- lower bounds down, upper bounds up -- or entries near a boundary are lost to rounding.
+/// This is SQLite's own documented advice (<https://www.sqlite.org/rtree.html#roundoff_error>),
+/// and matches the constants Scala's `PeakelDbHelper` applies for the same reason.
+const SQLITE_RTREE_UB_CORR: f64 = 1.0 + 0.000_000_12;
+const SQLITE_RTREE_LB_CORR: f64 = 1.0 - 0.000_000_12;
+
 // ============================================================================
 // MS1 PeakelSerializer - Legacy 4-array MessagePack format
 // ============================================================================
@@ -414,6 +422,70 @@ impl Ms1PeakelDbReader {
         Ok(Self { conn })
     }
 
+    /// Open a peakeldb file by copying it wholesale into an in-memory database first.
+    ///
+    /// Port of `PeakelDbReader.loadPeakelDbInMemory`, which `PeakelsDetector` calls at both of its
+    /// consumption sites (single-run detection and cross-run assignment) before running any query.
+    ///
+    /// The motivation is throughput, and it is not incidental: feature assembly performs one range
+    /// query and one body load *per isotope step, per charge, per matched peakel*, which for a real
+    /// run is thousands of queries. Serving those from RAM rather than from the file is the
+    /// difference the reference deliberately buys, and this port exists because that difference
+    /// matters — the whole point of moving this pipeline to Rust is throughput, so silently dropping
+    /// an optimisation the reference considered worth the code would give away ground for nothing.
+    ///
+    /// Uses SQLite's backup API (`rusqlite::backup`), which is the same mechanism the reference uses
+    /// via sqlite4java. The copy is a page-level clone, so the in-memory database carries the schema,
+    /// the data, *and* the `peakel_rtree` virtual table index — a schema-plus-`INSERT SELECT` copy
+    /// would not reliably reproduce the rtree.
+    ///
+    /// Cost: the whole peakel set is resident for the lifetime of the returned reader. That is the
+    /// reference's trade too, and it is bounded by one run's peakels rather than the whole dataset.
+    pub fn open_in_memory<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let src = Connection::open_with_flags(
+            path.as_ref(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .context("Failed to open peakeldb file for in-memory copy")?;
+
+        let mut dst = Connection::open_in_memory()
+            .context("Failed to create in-memory peakeldb")?;
+
+        {
+            let backup = rusqlite::backup::Backup::new(&src, &mut dst)
+                .context("Failed to initialise peakeldb backup")?;
+            // A large positive step: rusqlite's `run_to_completion` asserts `pages_per_step > 0`
+            // and panics otherwise, so SQLite's own "-1 means everything" convention does not carry
+            // over. This batch is big enough that a typical peakeldb copies in one step anyway,
+            // and `run_to_completion` loops until done regardless.
+            //
+            // There is no progress reporting to do and no concurrent writer to yield to, since the
+            // source is opened read-only, so the pause between steps is zero.
+            const BACKUP_PAGES_PER_STEP: std::os::raw::c_int = 100_000;
+            backup
+                .run_to_completion(
+                    BACKUP_PAGES_PER_STEP,
+                    std::time::Duration::from_millis(0),
+                    None,
+                )
+                .context("Failed to copy peakeldb into memory")?;
+        }
+
+        src.close()
+            .map_err(|(_, e)| e)
+            .context("Failed to close the on-disk peakeldb after copying")?;
+
+        // Reads are the only workload against this copy, and it is discarded with the reader.
+        dst.execute_batch(
+            "PRAGMA synchronous=OFF;
+             PRAGMA journal_mode=OFF;
+             PRAGMA temp_store=2;",
+        )
+        .context("Failed to configure the in-memory peakeldb")?;
+
+        Ok(Self { conn: dst })
+    }
+
     /// Get a reference to the underlying connection
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -497,4 +569,258 @@ impl Ms1PeakelDbReader {
         log::info!("Loaded {} peakels from MS1 peakeldb", peakels.len());
         Ok(peakels)
     }
+
+    /// Ids of peakels **contained within** the given m/z and time ranges.
+    ///
+    /// Faithful port of `PeakelDbReader.findPeakelIdsInRangeFromPeakelDB`. Three details matter and
+    /// were each wrong in an earlier version of this function, written before the reference was
+    /// available:
+    ///
+    /// 1. **The predicate is containment, not intersection.** `min_mz >= ? AND max_mz <= ?` selects
+    ///    peakels wholly inside the box; the intersection form (`max_mz >= ? AND min_mz <= ?`)
+    ///    returns a strict superset. These are different queries, not a rounding difference.
+    /// 2. **Only m/z is expanded**, not time. SQLite's rtree stores 32-bit floats, so query boxes
+    ///    need widening (<https://www.sqlite.org/rtree.html#roundoff_error>), but the reference
+    ///    applies the correction to the m/z bounds alone and binds time raw.
+    /// 3. **A post-query re-filter compensates for the padding**, reusing the `min_mz`/`max_mz`
+    ///    columns the query returns. Note the reference's condition is `||`, not `&&` — more
+    ///    permissive than it first looks, and preserved verbatim rather than "corrected".
+    ///
+    /// The `intensity_range` parameter of the earlier version is gone: the reference's query has no
+    /// intensity dimension, and no caller supplied one.
+    pub fn find_peakel_ids_in_range(
+        &self,
+        mz_range: (f64, f64),
+        time_range: (f32, f32),
+    ) -> Result<Vec<i64>> {
+        let (min_mz, max_mz) = mz_range;
+        let (min_time, max_time) = time_range;
+
+        let sql = "SELECT id, min_mz, max_mz FROM peakel_rtree \
+                   WHERE min_mz >= ?1 AND max_mz <= ?2 AND min_time >= ?3 AND max_time <= ?4";
+
+        let mut stmt = self.conn.prepare(sql).context("preparing peakel_rtree query")?;
+
+        let rows = stmt
+            .query_map(
+                params![
+                    min_mz * SQLITE_RTREE_LB_CORR,
+                    max_mz * SQLITE_RTREE_UB_CORR,
+                    min_time,
+                    max_time
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, f64>(2)?,
+                    ))
+                },
+            )
+            .context("querying peakel_rtree")?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            let (id, row_min_mz, row_max_mz) = row.context("reading peakel_rtree results")?;
+            // Filter again to compensate for the query padding. `||` is the reference's own
+            // condition, kept as-is.
+            if row_min_mz >= min_mz || row_max_mz <= max_mz {
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
+    }
+
+    /// Peakels whose bounding box intersects the given ranges, fully hydrated.
+    ///
+    /// Convenience wrapper over [`find_peakel_ids_in_range`](Self::find_peakel_ids_in_range) for callers that need the peakel bodies
+    /// immediately rather than filtering the id list first. Prefer the id-only query when candidates will be filtered further before use, to
+    /// avoid deserializing peaks blobs that get discarded.
+    pub fn find_peakels_in_range(
+        &self,
+        mz_range: (f64, f64),
+        time_range: (f32, f32),
+    ) -> Result<Vec<super::ExtendedPeakel>> {
+        let ids = self.find_peakel_ids_in_range(mz_range, time_range)?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, moz, elution_time, duration, gap_count, apex_intensity, \
+                    area, amplitude, peak_count, peaks, \
+                    first_spectrum_id, apex_spectrum_id, last_spectrum_id \
+             FROM peakel WHERE id IN ({placeholders}) ORDER BY id"
+        );
+
+        let mut stmt = self.conn.prepare(&sql).context("preparing peakel lookup")?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                let peaks_blob: Vec<u8> = row.get(9)?;
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, f64>(1)? as f32,
+                    row.get::<_, f32>(2)?,
+                    row.get::<_, f32>(3)?,
+                    row.get::<_, i32>(4)?,
+                    row.get::<_, f32>(5)?,
+                    row.get::<_, f32>(6)?,
+                    row.get::<_, f32>(7)?,
+                    row.get::<_, i32>(8)?,
+                    peaks_blob,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            })
+            .context("querying peakels by id")?;
+
+        let mut peakels = Vec::with_capacity(ids.len());
+        for row in rows {
+            let (
+                id,
+                mz,
+                elution_time,
+                duration,
+                gap_count,
+                apex_intensity,
+                area,
+                amplitude,
+                peaks_count,
+                peaks_blob,
+                first_spectrum_id,
+                apex_spectrum_id,
+                last_spectrum_id,
+            ) = row?;
+
+            let data = Ms1PeakelSerializer::from_msgpack(&peaks_blob)?;
+
+            peakels.push(super::ExtendedPeakel::new(
+                id,
+                mz,
+                elution_time,
+                duration,
+                gap_count,
+                apex_intensity,
+                area,
+                amplitude,
+                peaks_count,
+                first_spectrum_id,
+                apex_spectrum_id,
+                last_spectrum_id,
+                data,
+            ));
+        }
+
+        Ok(peakels)
+    }
+}
+
+#[cfg(test)]
+mod rtree_tests {
+    use super::*;
+    use crate::processing::model::Peakel;
+    use smallvec::smallvec;
+
+    /// `Peakel.id` (from `Peakel::new`'s internal counter) is not what ends up in the database:
+    /// the writer assigns its own sequential id per batch (`next_peakel_id`), independent of the
+    /// in-memory id. Tests therefore read back ids from the writer's insertion order (1-based, in
+    /// call order within a batch) rather than asserting against `Peakel.id`.
+    fn make_peakel(mz: f32, elution_time: f32, intensity: f32) -> Peakel {
+        Peakel::new(
+            smallvec![1, 2, 3],
+            smallvec![elution_time - 1.0, elution_time, elution_time + 1.0],
+            smallvec![mz - 0.001, mz, mz + 0.001],
+            smallvec![intensity * 0.5, intensity, intensity * 0.5],
+            None,
+            None,
+            1,
+            0,
+        )
+        .expect("peakel construction")
+    }
+
+    /// The rtree query returns exactly the peakels whose bounding box intersects the query range,
+    /// and excludes those that do not -- the property the whole spatial search depends on.
+    #[test]
+    fn find_peakel_ids_in_range_matches_contained_peakels_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rtree_test.peakelDB");
+
+        let mut writer =
+            Ms1PeakelDbWriter::create(&path, "test.mzDB", false).expect("create writer");
+
+        // Three peakels: one inside the query window, one just outside on m/z, one far away on time.
+        // Written in order: inside gets writer id 1, outside_mz id 2, outside_time id 3.
+        let inside = make_peakel(500.0, 100.0, 1000.0);
+        let outside_mz = make_peakel(600.0, 100.0, 1000.0);
+        let outside_time = make_peakel(500.0, 500.0, 1000.0);
+
+        writer
+            .write_peakels_batch(&[inside, outside_mz, outside_time])
+            .expect("write batch");
+        writer.close().expect("close writer");
+
+        let reader = Ms1PeakelDbReader::open(&path).expect("open reader");
+        assert_eq!(reader.get_peakel_count().expect("count"), 3);
+
+        let ids = reader
+            .find_peakel_ids_in_range((499.5, 500.5), (98.0, 102.0))
+            .expect("rtree query");
+
+        assert_eq!(ids, vec![1], "only the inside peakel (writer id 1) should intersect: {ids:?}");
+    }
+
+    /// A range that intersects nothing returns an empty result, not an error.
+    #[test]
+    fn find_peakel_ids_in_range_returns_empty_for_no_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rtree_empty_test.peakelDB");
+
+        let mut writer =
+            Ms1PeakelDbWriter::create(&path, "test.mzDB", false).expect("create writer");
+        writer
+            .write_peakels_batch(&[make_peakel(500.0, 100.0, 1000.0)])
+            .expect("write batch");
+        writer.close().expect("close writer");
+
+        let reader = Ms1PeakelDbReader::open(&path).expect("open reader");
+        let ids = reader
+            .find_peakel_ids_in_range((900.0, 901.0), (0.0, 1.0))
+            .expect("rtree query");
+
+        assert!(ids.is_empty());
+    }
+
+    /// The hydrated variant returns fully deserialized peakels for the same ids the id-only query
+    /// would return, not a different or partial set.
+    #[test]
+    fn find_peakels_in_range_hydrates_matching_peakels() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rtree_hydrate_test.peakelDB");
+
+        let mut writer =
+            Ms1PeakelDbWriter::create(&path, "test.mzDB", false).expect("create writer");
+        let inside = make_peakel(500.0, 100.0, 1000.0);
+        let expected_mz = inside.apex_mz().unwrap_or(f32::NAN);
+        writer
+            .write_peakels_batch(&[inside])
+            .expect("write batch");
+        writer.close().expect("close writer");
+
+        let reader = Ms1PeakelDbReader::open(&path).expect("open reader");
+        let peakels = reader
+            .find_peakels_in_range((499.5, 500.5), (98.0, 102.0))
+            .expect("rtree query");
+
+        assert_eq!(peakels.len(), 1);
+        assert_eq!(peakels[0].id, 1, "writer-assigned id");
+        assert_eq!(peakels[0].mz, expected_mz, "apex mz, matching the value the writer itself stored");
+    }
+
 }

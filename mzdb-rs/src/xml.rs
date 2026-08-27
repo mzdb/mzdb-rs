@@ -380,6 +380,161 @@ impl IsolationWindow {
     }
 }
 
+// ============================================================================
+// Thermo scan filter string
+// ============================================================================
+
+/// One fragmentation event described by a Thermo scan filter string.
+///
+/// Port of `fr.profi.mzdb.db.model.params.thermo.ThermoFragmentationTarget` (mzdb-access).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThermoFragmentationTarget {
+    /// The MS level this target was isolated *at* — 1 for the precursor selected from the MS1
+    /// survey, 2 for the one selected from the MS2 spectrum, and so on. Note this is one less than
+    /// the level of the spectrum describing it.
+    pub ms_level: i32,
+    /// Isolation m/z.
+    pub mz: f64,
+    /// Activation method as written in the filter string, lowercase (`cid`, `hcd`, `etd`...).
+    pub activation_type: String,
+    pub collision_energy: f32,
+}
+
+/// Metadata decoded from a Thermo scan filter string.
+///
+/// Port of `fr.profi.mzdb.db.model.params.thermo.ThermoScanMetaData` (mzdb-access), reached there
+/// through `ScanParamTree.getThermoMetaData()`. Unlike the rest of this module the source is not XML
+/// but a fixed-grammar vendor string, carried in the `filterString` CV param (`MS:1000512`) and
+/// already extracted into [`Scan::filter_string`].
+///
+/// Examples, from the reference's own comments:
+///
+/// ```text
+/// MS2: ITMS + c NSI d Full ms2 476.20@cid30.00 [120.00-1440.00]
+/// MS3: FTMS + p NSI sps d Full ms3 707.8472@cid35.00 463.3669@hcd45.00 [115.0000-140.0000]
+/// ```
+///
+/// The MS3 case is what makes this worth parsing: isobaric quantification of MS3 data pairs each MS3
+/// spectrum to its MS2 parent by comparing this structure's first target m/z against the MS2's
+/// isolation-window target m/z, and there is no other source for that value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ThermoScanMetaData {
+    /// Everything up to and including `Full msN`, e.g. `"FTMS + p NSI sps d Full ms3"`.
+    pub acquisition_type: String,
+    /// The leading analyzer token, e.g. `"FTMS"` or `"ITMS"`.
+    pub analyzer_type: String,
+    pub ms_level: i32,
+    /// Scan range `[low, high]` from the trailing bracketed pair.
+    pub mz_range: [f32; 2],
+    /// One target per fragmentation step: 1 for an MS2 filter, 2 for an MS3 filter.
+    pub targets: Vec<ThermoFragmentationTarget>,
+}
+
+impl ThermoScanMetaData {
+    /// Parse a Thermo filter string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the string does not have the expected shape. The Java reference instead
+    /// leaves the targets array full of nulls and the range at `[0, 0]` when its regex does not
+    /// match, which pushes the failure to whatever dereferences a target later; failing here reports
+    /// it where the cause is visible.
+    pub fn parse(filter_string: &str) -> Result<Self> {
+        use anyhow_ext::bail;
+
+        // Everything hinges on the `Full msN` marker: it separates the instrument description from
+        // the fragmentation description, and its digit is the MS level.
+        let Some((left, right)) = filter_string.split_once("Full ms") else {
+            bail!("not a Thermo filter string (no `Full ms` marker): {filter_string:?}");
+        };
+
+        let ms_level_char = right.chars().next().unwrap_or(' ');
+        let Some(ms_level) = ms_level_char.to_digit(10).map(|d| d as i32) else {
+            bail!("no MS level digit after `Full ms` in {filter_string:?}");
+        };
+
+        let acquisition_type = format!("{left}Full ms{ms_level_char}");
+        let analyzer_type =
+            left.split_whitespace().next().unwrap_or_default().to_string();
+
+        // After the level digit come `mz@methodEnergy` groups, then a bracketed range.
+        let rest = &right[ms_level_char.len_utf8()..];
+
+        let mut targets = Vec::new();
+        for (index, token) in rest.split_whitespace().filter(|t| t.contains('@')).enumerate() {
+            let Some((mz_str, activation)) = token.split_once('@') else {
+                continue;
+            };
+
+            let mz: f64 = mz_str
+                .parse()
+                .map_err(|_| anyhow_ext::anyhow!("bad target m/z {mz_str:?} in {filter_string:?}"))?;
+
+            // `cid30.00` -> ("cid", 30.00): the method is the leading alphabetic run.
+            let split_at = activation
+                .find(|c: char| !c.is_ascii_alphabetic())
+                .unwrap_or(activation.len());
+            let (activation_type, energy_str) = activation.split_at(split_at);
+
+            let collision_energy: f32 = energy_str.parse().map_err(|_| {
+                anyhow_ext::anyhow!("bad collision energy {energy_str:?} in {filter_string:?}")
+            })?;
+
+            targets.push(ThermoFragmentationTarget {
+                // The first target is the precursor selected from MS1, hence level 1.
+                ms_level: index as i32 + 1,
+                mz,
+                activation_type: activation_type.to_string(),
+                collision_energy,
+            });
+        }
+
+        if targets.is_empty() {
+            bail!("no fragmentation targets found in {filter_string:?}");
+        }
+
+        // Trailing `[low-high]`.
+        let mz_range = match rest.rsplit_once('[') {
+            Some((_, bracketed)) => {
+                let bracketed = bracketed.trim_end_matches(']');
+                match bracketed.split_once('-') {
+                    Some((low, high)) => {
+                        let low: f32 = low.trim().parse().map_err(|_| {
+                            anyhow_ext::anyhow!("bad range start {low:?} in {filter_string:?}")
+                        })?;
+                        let high: f32 = high.trim().parse().map_err(|_| {
+                            anyhow_ext::anyhow!("bad range end {high:?} in {filter_string:?}")
+                        })?;
+                        [low, high]
+                    }
+                    None => bail!("malformed scan range in {filter_string:?}"),
+                }
+            }
+            None => bail!("no scan range in {filter_string:?}"),
+        };
+
+        Ok(Self {
+            acquisition_type,
+            analyzer_type,
+            ms_level,
+            mz_range,
+            targets,
+        })
+    }
+}
+
+impl Scan {
+    /// Decode this scan's Thermo filter string, when it has one.
+    ///
+    /// Port of `ScanParamTree.getThermoMetaData()`. `None` means the scan carries no `filterString`
+    /// CV param — a non-Thermo instrument, or a file that did not record it — which the reference
+    /// signals by returning `null` and is not an error. A `Some(Err(..))` means the string was
+    /// present but unparseable.
+    pub fn thermo_meta_data(&self) -> Option<Result<ThermoScanMetaData>> {
+        self.filter_string.as_deref().map(ThermoScanMetaData::parse)
+    }
+}
+
 /// A selected ion in the precursor
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SelectedIon {
@@ -1150,4 +1305,97 @@ mod tests {
         assert_eq!(parse_scan_list("").unwrap().count, 0);
         assert_eq!(parse_precursor_list("").unwrap().count, 0);
     }
+
+    // ------------------------------------------------------------------------
+    // Thermo scan filter string
+    //
+    // Ported from mzdb-access's `MzDbMetaDataTest`, including its exact expected values.
+    // ------------------------------------------------------------------------
+
+    /// The MS3 case from the reference test, with its documented decomposition.
+    #[test]
+    fn parses_an_ms3_thermo_filter_string() {
+        let s = "FTMS + p NSI sps d Full ms3 707.8472@cid35.00 463.3669@hcd45.00 [115.0000-140.0000]";
+        let meta = ThermoScanMetaData::parse(s).expect("MS3 filter string should parse");
+
+        assert_eq!(meta.ms_level, 3);
+        assert_eq!(meta.analyzer_type, "FTMS");
+        assert_eq!(meta.acquisition_type, "FTMS + p NSI sps d Full ms3");
+        assert_eq!(meta.mz_range, [115.0, 140.0]);
+
+        assert_eq!(meta.targets.len(), 2);
+
+        let ms1_target = &meta.targets[0];
+        assert_eq!(ms1_target.ms_level, 1);
+        assert!((ms1_target.mz - 707.8472).abs() < 1e-12);
+        assert_eq!(ms1_target.activation_type, "cid");
+        assert!((ms1_target.collision_energy - 35.0).abs() < 1e-4);
+
+        let ms2_target = &meta.targets[1];
+        assert_eq!(ms2_target.ms_level, 2);
+        assert!((ms2_target.mz - 463.3669).abs() < 1e-12);
+        assert_eq!(ms2_target.activation_type, "hcd");
+        assert!((ms2_target.collision_energy - 45.0).abs() < 1e-4);
+    }
+
+    /// The MS2 case from the reference's own comment.
+    #[test]
+    fn parses_an_ms2_thermo_filter_string() {
+        let s = "ITMS + c NSI d Full ms2 476.20@cid30.00 [120.00-1440.00]";
+        let meta = ThermoScanMetaData::parse(s).expect("MS2 filter string should parse");
+
+        assert_eq!(meta.ms_level, 2);
+        assert_eq!(meta.analyzer_type, "ITMS");
+        assert_eq!(meta.mz_range, [120.0, 1440.0]);
+
+        assert_eq!(meta.targets.len(), 1, "an MS2 filter describes one fragmentation step");
+        assert!((meta.targets[0].mz - 476.20).abs() < 1e-12);
+        assert_eq!(meta.targets[0].activation_type, "cid");
+        assert!((meta.targets[0].collision_energy - 30.0).abs() < 1e-4);
+    }
+
+    /// A scan with no `filterString` yields `None`, not an error.
+    ///
+    /// The Java reference returns `null` here — a non-Thermo instrument is an ordinary case, not a
+    /// malformed one.
+    #[test]
+    fn scan_without_a_filter_string_has_no_thermo_metadata() {
+        let scan = Scan::default();
+        assert!(scan.thermo_meta_data().is_none());
+    }
+
+    /// A present but malformed string is an error rather than silently-empty metadata.
+    ///
+    /// The Java reference leaves its targets array full of nulls when the regex misses, deferring
+    /// the failure to whatever dereferences one later.
+    #[test]
+    fn malformed_filter_strings_are_rejected() {
+        for s in [
+            "ITMS + c NSI d ms2 476.20@cid30.00 [120.00-1440.00]", // no `Full ms`
+            "ITMS + c NSI d Full msX 476.20@cid30.00 [120.00]",    // no level digit
+            "ITMS + c NSI d Full ms2 [120.00-1440.00]",            // no targets
+            "ITMS + c NSI d Full ms2 476.20@cid30.00",             // no scan range
+        ] {
+            assert!(
+                ThermoScanMetaData::parse(s).is_err(),
+                "should have rejected {s:?}"
+            );
+        }
+    }
+
+    /// A scan carrying a filter string decodes through the `Scan` accessor.
+    #[test]
+    fn scan_accessor_decodes_the_filter_string() {
+        let scan = Scan {
+            filter_string: Some(
+                "ITMS + c NSI d Full ms2 476.20@cid30.00 [120.00-1440.00]".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let meta = scan.thermo_meta_data().expect("filter string present").expect("parses");
+        assert_eq!(meta.ms_level, 2);
+        assert_eq!(meta.analyzer_type, "ITMS");
+    }
+
 }
