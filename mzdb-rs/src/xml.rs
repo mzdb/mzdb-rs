@@ -294,7 +294,7 @@ pub struct InstrumentComponent {
 /// List of instrument components
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ComponentList {
-    pub count: i32,
+    pub count: u8,
     pub components: Vec<InstrumentComponent>,
 }
 
@@ -337,7 +337,7 @@ pub struct Scan {
 /// List of scans for a spectrum
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScanList {
-    pub count: i32,
+    pub count: u8,
     /// CV params at scanList level (e.g., combination method)
     pub cv_params: Vec<CvParam>,
     pub scans: Vec<Scan>,
@@ -575,7 +575,7 @@ pub struct Precursor {
 /// List of precursors for MSn spectra
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PrecursorList {
-    pub count: i32,
+    pub count: u8,
     pub precursors: Vec<Precursor>,
 }
 
@@ -593,7 +593,7 @@ pub struct Product {
 /// List of products
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProductList {
-    pub count: i32,
+    pub count: u8,
     pub products: Vec<Product>,
 }
 
@@ -785,7 +785,7 @@ pub fn parse_component_list(xml: &str) -> Result<ComponentList> {
 
     let count = root
         .attribute("count")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(0);
 
     let mut components = Vec::new();
@@ -839,7 +839,7 @@ pub fn parse_scan_list(xml: &str) -> Result<ScanList> {
 
     let count = root
         .attribute("count")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(0);
 
     // Get CV params at scanList level (direct children only)
@@ -929,14 +929,32 @@ pub fn parse_precursor_list(xml: &str) -> Result<PrecursorList> {
     let doc = Document::parse(xml)?;
     let root = doc.root_element();
 
-    let count = root
-        .attribute("count")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    // `count` only has a natural home on the wrapper shape; a bare `<precursor>` has exactly one
+    // precursor by construction, so `count` is set to `1` directly rather than left at the
+    // wrapper-only attribute lookup, which would otherwise silently read `0` here too.
+
+    // The `spectrum.precursor_list` column comes in two shapes:
+    // - a `<precursorList count="N">` wrapping N `<precursor>` children, and
+    // - a bare `<precursor>` as the root element, written by `raw2mzDB.exe` (the legacy pwiz-based writer)
+    // Filtering `root.children()` matches nothing in the second case, so every precursor field silently read back as `None`.
+    // `count` only exists on the wrapper shape, so a bare `<precursor>` is set to `1` directly rather than falling through to a lookup that would read `0`.
+    let (count, precursor_nodes): (u8, Vec<_>) = if root.tag_name().name() == "precursor" {
+        (1, vec![root])
+    } else {
+        let count = root
+            .attribute("count")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(0);
+        let nodes = root
+            .children()
+            .filter(|n| n.tag_name().name() == "precursor")
+            .collect();
+        (count, nodes)
+    };
 
     let mut precursors = Vec::new();
 
-    for prec_node in root.children().filter(|n| n.tag_name().name() == "precursor") {
+    for prec_node in precursor_nodes {
         // Parse isolation window
         let isolation_window = prec_node
             .children()
@@ -1024,7 +1042,7 @@ pub fn parse_product_list(xml: &str) -> Result<ProductList> {
 
     let count = root
         .attribute("count")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<u8>().ok())
         .unwrap_or(0);
 
     let mut products = Vec::new();
@@ -1278,6 +1296,53 @@ mod tests {
 
         let act = prec.activation.as_ref().unwrap();
         assert_eq!(act.collision_energy, Some(35.0));
+        assert_eq!(act.activation_type, Some("collision-induced dissociation".to_string()));
+    }
+
+    /// `raw2mzDB` writes the column with a bare `<precursor>` as the root, no `<precursorList>` wrapper.
+    /// Before the root-shape check, this parsed to an empty list with no error, so every precursor field read back as `None`.
+    /// XML taken verbatim from `spectrum.precursor_list` for scan 17 of a real raw2mzDB 0.9.10 file.
+    #[test]
+    fn test_parse_precursor_list_bare_precursor_root() {
+        let xml = r#"<precursor spectrumRef="controllerType=0 controllerNumber=1 scan=16">
+  <isolationWindow>
+    <cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="476.2" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
+    <cvParam cvRef="MS" accession="MS:1000828" name="isolation window lower offset" value="1.0" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
+    <cvParam cvRef="MS" accession="MS:1000829" name="isolation window upper offset" value="1.0" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
+  </isolationWindow>
+  <selectedIonList count="1">
+    <selectedIon>
+      <cvParam cvRef="MS" accession="MS:1000744" name="selected ion m/z" value="475.872375488281" unitCvRef="MS" unitAccession="MS:1000040" unitName="m/z"/>
+      <cvParam cvRef="MS" accession="MS:1000041" name="charge state" value="3"/>
+      <cvParam cvRef="MS" accession="MS:1000042" name="peak intensity" value="7590.22607421875" unitCvRef="MS" unitAccession="MS:1000131" unitName="number of detector counts"/>
+    </selectedIon>
+  </selectedIonList>
+  <activation>
+    <cvParam cvRef="MS" accession="MS:1000133" name="collision-induced dissociation" value=""/>
+    <cvParam cvRef="MS" accession="MS:1000045" name="collision energy" value="30.0" unitCvRef="UO" unitAccession="UO:0000266" unitName="electronvolt"/>
+  </activation>
+</precursor>"#;
+
+        let result = parse_precursor_list(xml).unwrap();
+
+        // No `count` attribute exists on this shape, so it is set to 1 rather than defaulting to 0.
+        assert_eq!(result.count, 1);
+        assert_eq!(result.precursors.len(), 1);
+
+        let prec = &result.precursors[0];
+        assert_eq!(prec.spectrum_ref, Some("controllerType=0 controllerNumber=1 scan=16".to_string()));
+
+        let iw = prec.isolation_window.as_ref().unwrap();
+        assert_eq!(iw.target_mz, Some(476.2));
+        assert_eq!(iw.min_mz(), Some(475.2));
+        assert_eq!(iw.max_mz(), Some(477.2));
+
+        assert_eq!(prec.selected_ions[0].mz, Some(475.872375488281));
+        assert_eq!(prec.selected_ions[0].charge, Some(3));
+        assert_eq!(prec.selected_ions[0].intensity, Some(7590.22607421875));
+
+        let act = prec.activation.as_ref().unwrap();
+        assert_eq!(act.collision_energy, Some(30.0));
         assert_eq!(act.activation_type, Some("collision-induced dissociation".to_string()));
     }
 

@@ -11,7 +11,10 @@ use anyhow_ext::{anyhow, Context, Result};
 use rusqlite::{Connection, Statement};
 
 use crate::model::{BBSizes, DataEncoding, DataEncodingsCache, EntityCache};
-use crate::queries::{get_param_tree_mzdb, list_data_encodings, get_spectrum_headers};
+use crate::queries::{
+    get_param_tree_mzdb, list_data_encodings, get_spectrum_headers_with_options,
+    SpectrumHeaderLoadOptions,
+};
 use crate::metadata::parse_msn_bb_time_width;
 
 /// SQL queries that are frequently used and benefit from caching
@@ -135,7 +138,22 @@ mod tests {
 // Entity cache creation
 // ============================================================================
 
+/// Build the entity cache, loading only `precursor_list` among the optional spectrum-header XML
+/// columns -- the same default [`get_spectrum_headers`] itself uses.
+///  Preserved under the original name and behavior so existing callers are unaffected; prefer
+/// [`create_entity_cache_with_options`] when a reader needs `scan_list` or `param_tree`.
 pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
+    create_entity_cache_with_options(db, SpectrumHeaderLoadOptions::default())
+}
+
+/// Build the entity cache, loading exactly the optional spectrum-header XML columns requested by
+/// `options`. This is the one place those columns are read for the whole crate: every reader
+/// (`get_spectrum`, `for_each_spectrum`, `SpectrumIterator`, `MzDbReader`) works from the
+/// `EntityCache` this produces, so `options` here determines what is available everywhere else.
+pub fn create_entity_cache_with_options(
+    db: &Connection,
+    options: SpectrumHeaderLoadOptions,
+) -> Result<EntityCache> {
     let param_tree = get_param_tree_mzdb(db).dot()?.unwrap_or_default();
     let bb_sizes = BBSizes::from_xml(&param_tree)?;
     let msn_bb_time_width = parse_msn_bb_time_width(&param_tree);
@@ -162,7 +180,7 @@ pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
 
     let de_cache = DataEncodingsCache::new(data_encoding_by_id, spectra_data_encoding_ids);
 
-    let spectrum_headers = get_spectrum_headers(db).dot()?;
+    let spectrum_headers = get_spectrum_headers_with_options(db, options).dot()?;
     
     // Build ID-to-index map for non-consecutive ID support
     let spectrum_id_to_index: HashMap<i64, usize> = spectrum_headers
@@ -177,6 +195,7 @@ pub fn create_entity_cache(db: &Connection) -> Result<EntityCache> {
         spectrum_headers,
         spectrum_id_to_index,
         msn_bb_time_width,
+        header_load_options: options,
     })
 }
 

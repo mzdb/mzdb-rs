@@ -12,6 +12,7 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 
 use crate::model::DataMode::Fitted;
+use crate::queries::SpectrumHeaderLoadOptions;
 
 // ============================================================================
 // Data Point Trait
@@ -628,6 +629,11 @@ pub struct EntityCache {
     pub spectrum_id_to_index: HashMap<i64, usize>,
     /// Cached msn_bb_time_width from mzDB metadata (None if not found)
     pub msn_bb_time_width: Option<f64>,
+    /// Which optional XML columns `spectrum_headers` was loaded with.
+    /// Kept alongside the headers themselves so a caller holding an `EntityCache` (or an `MzDbReader` wrapping one)
+    /// can check whether e.g. `scan_list_str` is actually populated before relying on it,
+    /// rather than discovering an unconditional `None` at the point of use.
+    pub header_load_options: SpectrumHeaderLoadOptions,
 }
 
 impl EntityCache {

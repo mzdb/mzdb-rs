@@ -7,7 +7,8 @@
 use anyhow_ext::{Context, Result};
 use rusqlite::Connection;
 
-use crate::cache::create_entity_cache;
+use crate::cache::{create_entity_cache, create_entity_cache_with_options};
+use crate::queries::SpectrumHeaderLoadOptions;
 use crate::chromatogram::*;
 use crate::iterator::{for_each_spectrum as iterator_for_each_spectrum, SpectrumIterator};
 use crate::metadata::*;
@@ -61,6 +62,7 @@ pub struct MzDbReaderBuilder {
     read_only: bool,
     cache_size: Option<i64>,
     temp_store: TempStore,
+    header_load_options: SpectrumHeaderLoadOptions,
 }
 
 impl MzDbReaderBuilder {
@@ -72,6 +74,7 @@ impl MzDbReaderBuilder {
             read_only: false,
             cache_size: None,
             temp_store: TempStore::Default,
+            header_load_options: SpectrumHeaderLoadOptions::default(),
         }
     }
     
@@ -131,6 +134,13 @@ impl MzDbReaderBuilder {
         self.temp_store = store;
         self
     }
+
+    /// Choose which optional spectrum-header XML columns (`param_tree`, `scan_list`, `precursor_list`) are loaded.
+    /// Defaults to [`SpectrumHeaderLoadOptions::none`], matching the crate's historical behavior of loading only `precursor_list`.
+    pub fn header_load_options(mut self, options: SpectrumHeaderLoadOptions) -> Self {
+        self.header_load_options = options;
+        self
+    }
     
     /// Build the MzDbReader with configured settings
     pub fn build(self) -> Result<MzDbReader> {
@@ -163,7 +173,7 @@ impl MzDbReaderBuilder {
             connection.pragma_update(None, "query_only", true).dot()?;
         }
         
-        let entity_cache = create_entity_cache(&connection).dot()?;
+        let entity_cache = create_entity_cache_with_options(&connection, self.header_load_options).dot()?;
         
         Ok(MzDbReader { connection, entity_cache })
     }
@@ -220,8 +230,13 @@ impl MzDbReader {
 
     /// Open an mzDB file for reading
     pub fn open(path: &str) -> Result<Self> {
+        Self::open_with_options(path, SpectrumHeaderLoadOptions::default())
+    }
+
+    /// Open an mzDB file for reading, loading exactly the optional spectrum-header XML columns requested by `options`.
+    pub fn open_with_options(path: &str, options: SpectrumHeaderLoadOptions) -> Result<Self> {
         let connection = Connection::open(path).dot()?;
-        let entity_cache = create_entity_cache(&connection).dot()?;
+        let entity_cache = create_entity_cache_with_options(&connection, options).dot()?;
         Ok(Self {
             connection,
             entity_cache,
@@ -230,8 +245,17 @@ impl MzDbReader {
 
     /// Open an mzDB file with custom SQLite flags
     pub fn open_with_flags(path: &str, flags: rusqlite::OpenFlags) -> Result<Self> {
+        Self::open_with_flags_and_options(path, flags, SpectrumHeaderLoadOptions::default())
+    }
+
+    /// Open an mzDB file with custom SQLite flags, loading exactly the optional spectrum-header XML columns requested by `options`.
+    pub fn open_with_flags_and_options(
+        path: &str,
+        flags: rusqlite::OpenFlags,
+        options: SpectrumHeaderLoadOptions,
+    ) -> Result<Self> {
         let connection = Connection::open_with_flags(path, flags).dot()?;
-        let entity_cache = create_entity_cache(&connection).dot()?;
+        let entity_cache = create_entity_cache_with_options(&connection, options).dot()?;
         Ok(Self {
             connection,
             entity_cache,

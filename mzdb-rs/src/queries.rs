@@ -693,14 +693,108 @@ fn spectrum_slices_to_xic(
 // Spectrum header queries
 // ============================================================================
 
+/// Options controlling which optional XML columns are loaded per spectrum header.
+///
+/// `param_tree`, `scan_list`, and `precursor_list` are all real columns on the `spectrum` table,
+/// but a full read pulls a non-trivial amount of XML text per row.
+/// For a run of a few thousand spectra, loading columns nothing downstream needs is pure waste. 
+/// Each flag here gates one column's presence in the underlying `SELECT`, not just a post-read filter:
+///  setting a flag to `false` means that column is never read off disk for any spectrum, not read and discarded.
+///
+/// `product_list` is deliberately not included as an option here: no known first-party reader
+/// requires it yet, and adding it is a mechanical repeat of the pattern below when a caller does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectrumHeaderLoadOptions {
+    /// Load `spectrum.param_tree` into `SpectrumHeader::param_tree_str`.
+    pub load_param_tree: bool,
+    /// Load `spectrum.scan_list` into `SpectrumHeader::scan_list_str`.
+    pub load_scan_list: bool,
+    /// Load `spectrum.precursor_list` into `SpectrumHeader::precursor_list_str`.
+    pub load_precursor_list: bool,
+}
+
+impl Default for SpectrumHeaderLoadOptions {
+    /// The crate's historical default: only `precursor_list` loaded, `param_tree` and `scan_list` left unloaded.
+    fn default() -> Self {
+        Self {
+            load_param_tree: false,
+            load_scan_list: false,
+            load_precursor_list: true,
+        }
+    }
+}
+
+impl SpectrumHeaderLoadOptions {
+    /// No optional XML columns loaded at all -- not even `precursor_list`.
+    pub fn none() -> Self {
+        Self {
+            load_param_tree: false,
+            load_scan_list: false,
+            load_precursor_list: false,
+        }
+    }
+
+    /// Load every optional XML column.
+    pub fn all() -> Self {
+        Self {
+            load_param_tree: true,
+            load_scan_list: true,
+            load_precursor_list: true,
+        }
+    }
+}
+
+/// Get all spectrum headers, loading only `precursor_list` among the optional XML columns.
 pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
-    let mut statement = db.prepare(
-        "SELECT id, initial_id, title, cycle, time, ms_level, activation_type, tic, \
+    get_spectrum_headers_with_options(db, SpectrumHeaderLoadOptions::default())
+}
+
+/// Get all spectrum headers, loading exactly the optional XML columns requested by `options`.
+pub fn get_spectrum_headers_with_options(
+    db: &Connection,
+    options: SpectrumHeaderLoadOptions,
+) -> Result<Vec<SpectrumHeader>> {
+    // The always-present columns keep a fixed position (0..=19 below); each optional column is
+    // appended to the SELECT list only when requested, and its row index is tracked alongside it so
+    // the mapping closure knows where to read from -- or that it should not read at all.
+    let mut select_list = String::from(
+        "id, initial_id, title, cycle, time, ms_level, activation_type, tic, \
          base_peak_mz, base_peak_intensity, main_precursor_mz, main_precursor_charge, \
-         data_points_count, precursor_list, shared_param_tree_id, instrument_configuration_id, \
-         source_file_id, run_id, data_processing_id, data_encoding_id, bb_first_spectrum_id \
-         FROM spectrum",
-    )?;
+         data_points_count, shared_param_tree_id, instrument_configuration_id, \
+         source_file_id, run_id, data_processing_id, data_encoding_id, bb_first_spectrum_id",
+    );
+
+    // Index 20 onward is assigned in call order below, one at a time, so adding a future optional
+    // column only means inserting one more block in this same shape.
+    let mut next_index = 20;
+    let param_tree_idx = if options.load_param_tree {
+        select_list.push_str(", param_tree");
+        let idx = next_index;
+        next_index += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let scan_list_idx = if options.load_scan_list {
+        select_list.push_str(", scan_list");
+        let idx = next_index;
+        next_index += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let precursor_list_idx = if options.load_precursor_list {
+        select_list.push_str(", precursor_list");
+        let idx = next_index;
+        next_index += 1;
+        Some(idx)
+    } else {
+        None
+    };
+    let _ = next_index; // only needed to compute the indices above
+
+    let sql = format!("SELECT {select_list} FROM spectrum");
+    let mut statement = db.prepare(&sql)?;
 
     // Manual row mapping, replacing a former `serde_rusqlite::from_rows::<SpectrumHeader>` call.
     // serde_rusqlite pins one exact rusqlite minor per its own release (0.36 -> rusqlite 0.32,  0.40 -> rusqlite 0.37, ...),
@@ -708,10 +802,6 @@ pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
     // Since this was the crate's only serde_rusqlite call site,
     // dropping it lets mzdb-rs's own `rusqlite` requirement widen to a range instead,
     // so consumers can pick their own compatible rusqlite version.
-    //
-    // Column order and names below must match the SELECT list above. `param_tree`, `scan_list`,
-    // and `product_list` are deliberately absent from the query (as they were under from_rows,
-    // which leaves missing Option fields as None) and are set to None explicitly.
     let s_headers = statement
         .query_map([], |row| {
             Ok(SpectrumHeader {
@@ -728,17 +818,27 @@ pub fn get_spectrum_headers(db: &Connection) -> Result<Vec<SpectrumHeader>> {
                 precursor_mz: row.get(10)?,
                 precursor_charge: row.get(11)?,
                 peaks_count: row.get(12)?,
-                param_tree_str: None,
-                scan_list_str: None,
-                precursor_list_str: row.get(13)?,
+                param_tree_str: match param_tree_idx {
+                    Some(idx) => row.get(idx)?,
+                    None => None,
+                },
+                scan_list_str: match scan_list_idx {
+                    Some(idx) => row.get(idx)?,
+                    None => None,
+                },
+                precursor_list_str: match precursor_list_idx {
+                    Some(idx) => row.get(idx)?,
+                    None => None,
+                },
+                // No known first-party reader needs this yet; add an option following the same pattern above if one does.
                 product_list_str: None,
-                shared_param_tree_id: row.get(14)?,
-                instrument_configuration_id: row.get(15)?,
-                source_file_id: row.get(16)?,
-                run_id: row.get(17)?,
-                data_processing_id: row.get(18)?,
-                data_encoding_id: row.get(19)?,
-                bb_first_spectrum_id: row.get(20)?,
+                shared_param_tree_id: row.get(13)?,
+                instrument_configuration_id: row.get(14)?,
+                source_file_id: row.get(15)?,
+                run_id: row.get(16)?,
+                data_processing_id: row.get(17)?,
+                data_encoding_id: row.get(18)?,
+                bb_first_spectrum_id: row.get(19)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<SpectrumHeader>, _>>()?;
